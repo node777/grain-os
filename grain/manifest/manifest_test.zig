@@ -32,7 +32,7 @@ test "system/dev.brix is sound" {
     const console = m.domains[schema.findDomain(m, "console").?];
     try std.testing.expectEqual(@as(u8, 200), console.priority);
     try std.testing.expectEqual(schema.Restart.on_fault, console.restart);
-    try std.testing.expectEqual(@as(u32, 4_000), m.agent.?.grants[0].duration_ms);
+    try std.testing.expectEqual(@as(u32, 15_000), m.agent.?.grants[0].duration_ms);
     try std.testing.expectEqualStrings("entropy", m.agent.?.askable[0].name);
 }
 

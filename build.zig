@@ -70,7 +70,7 @@ pub fn build(b: *std.Build) void {
     // boot image and embedded in its own Steward. grain-pack refuses an image
     // missing a program, and Steward refuses a miswired manifest at compile time.
     const system_path = b.option([]const u8, "system", "System manifest for run/steward/check-manifest: .brix or .zon (default system/dev.brix)") orelse "system/dev.brix";
-    const program_names = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker", "crasher", "waiter", "registry", "kv", "envoy", "tablecloth" };
+    const program_names = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker", "crasher", "waiter", "registry", "kv", "envoy", "tablecloth", "kumara", "ledger" };
 
     const pack = b.addExecutable(.{ .name = "grain-pack", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/pack/main.zig"),
@@ -264,6 +264,11 @@ pub fn build(b: *std.Build) void {
         "domain_ready domain=tablecloth boot_healthy=true", "--expect",
         "summary failed=0",                                 "--expect-console",
         "1:Choose a passphrase",
+        // The identity is made once and survives the reboot (the test
+        // entropy is a fixed pattern, so its name is known).
+                                   "--expect",
+        "1:kumara_ready name=sift-noon-city created=true",  "--expect",
+        "2:kumara_ready name=sift-noon-city created=false",
     });
     qtest_storage.addPrefixedFileArg("--virtio-rng=", rng_file);
     qtest_storage.addPrefixedFileArg("--disk=", test_disk);
@@ -272,8 +277,9 @@ pub fn build(b: *std.Build) void {
     qtest_storage.has_side_effects = true;
     qtest_storage.step.dependOn(&qtest_system.step);
 
-    // The same system with an agent attached to Envoy: tools/agent_session.py
-    // exercises every verb, the leases' limits and the audit chain. Real time
+    // The same system with a disk and an agent attached to Envoy:
+    // tools/agent_session.py exercises every verb, the leases' limits, the
+    // audit chain, the identity, and that every action reached the Ledger. Real time
     // (leases expire by the clock), so this run is not deterministic.
     const qtest_agent = b.addSystemCommand(&.{
         "python3",          "tools/harness.py",
@@ -281,6 +287,10 @@ pub fn build(b: *std.Build) void {
         "--smp",            smp,
         "--virtio-console", "--realtime",
         "--agent",          "tools/agent_session.py",
+        "--console-input",  "open sesame",
+        "--console-input",  "open sesame",
+        "--expect",         "kumara_ready domain=kumara created=true",
+        "--expect",         "ledger_ready domain=ledger entries=0",
         "--expect",         "envoy_ready domain=envoy capabilities=4",
         "--expect",         "envoy_bye domain=envoy",
         "--expect",         "domain_exit domain=envoy code=0",
@@ -288,6 +298,7 @@ pub fn build(b: *std.Build) void {
         "--expect-console", "agent was here",
     });
     qtest_agent.addPrefixedFileArg("--virtio-rng=", rng_file);
+    qtest_agent.addPrefixedFileArg("--disk=", test_disk);
     qtest_agent.addArtifactArg(kernel);
     qtest_agent.stdio = .inherit;
     qtest_agent.has_side_effects = true;
@@ -354,6 +365,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(manifest_tests).step);
     // Tablecloth, including the crash simulator (a power cut at every device
     // operation of a generation upgrade and rollback).
+    const kumara_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/kumara.zig"), .target = host, .optimize = optimize }) });
+    test_step.dependOn(&b.addRunArtifact(kumara_tests).step);
     const tablecloth_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/tablecloth.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(tablecloth_tests).step);
     const brix_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/brix/brix.zig"), .target = host, .optimize = optimize }) });

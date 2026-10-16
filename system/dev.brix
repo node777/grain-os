@@ -74,6 +74,8 @@ domain envoy like dev {
     stack = 128KiB
     device port { virtio = 3, instance = 1, optional }
     uses registry { from = registry.registry, protocol = registry.v1 }
+    uses ledger { from = ledger.ledger, protocol = ledger.v1 }
+    uses kumara { from = kumara.kumara, protocol = kumara.v1 }
 }
 
 # The content store. It drives its disk itself; without a disk it is skipped.
@@ -85,10 +87,35 @@ domain tablecloth like dev {
     budget = 2ms
     memory = 4MiB
     stack = 128KiB
+    await_ready
     device disk { virtio = 2, optional }
     uses console { from = console.console, protocol = console.v1 }
     uses entropy { from = rng.entropy, protocol = entropy.v1 }
     provides tablecloth { protocol = tablecloth.v1 }
+}
+
+# This instance's identity; it keeps its seed sealed in the store.
+domain kumara like dev {
+    program = kumara
+    priority = 140
+    hart = 1
+    stack = 64KiB
+    await_ready
+    uses tablecloth { from = tablecloth.tablecloth, protocol = tablecloth.v1 }
+    uses entropy { from = rng.entropy, protocol = entropy.v1 }
+    provides kumara { protocol = kumara.v1 }
+}
+
+# The signed, append-only record of authority events.
+domain ledger like dev {
+    program = ledger
+    priority = 130
+    hart = 1
+    stack = 64KiB
+    await_ready
+    uses tablecloth { from = tablecloth.tablecloth, protocol = tablecloth.v1 }
+    uses kumara { from = kumara.kumara, protocol = kumara.v1 }
+    provides ledger { protocol = ledger.v1 }
 }
 
 domain checker like dev {
@@ -102,7 +129,7 @@ domain checker like dev {
 # once each. It never holds anything else.
 agent {
     envoy = envoy
-    grant echo { from = flaky.echo, protocol = echo.v1, duration = 4s }
+    grant echo { from = flaky.echo, protocol = echo.v1, duration = 15s }
     grant store { from = store.kv, protocol = kv.v1 }
     grant console { from = console.console, protocol = console.v1, uses = 20 }
     askable entropy { from = rng.entropy, protocol = entropy.v1, uses = 2 }

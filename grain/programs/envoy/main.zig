@@ -286,7 +286,28 @@ fn audit(verb: []const u8, cap: []const u8, method: []const u8, outcome: []const
     h.final(&slot.hash);
     chain = slot.hash;
     g.log("envoy_action", .{ .seq = slot.seq, .verb = verb, .cap = cap, .method = method, .outcome = outcome });
+    toLedger(verb, text);
     return slot;
+}
+
+/// The durable record: every agent action also goes to the Ledger, which
+/// signs it and commits it to disk before answering. Without one (no disk),
+/// the session's own chain is the only record.
+var ledger: ?g.CPtr = null;
+var ledger_seq: u64 = 0;
+var ledger_head: [32]u8 = @splat(0);
+
+fn toLedger(verb: []const u8, text: []const u8) void {
+    const l = ledger orelse return;
+    var kind: [24]u8 = undefined;
+    const k = std.fmt.bufPrint(&kind, "agent_{s}", .{verb}) catch "agent";
+    if (idl.call(proto.ledger.append, l, .{ .kind = idl.Text(24).from(k), .text = idl.Text(200).from(text) })) |r| {
+        ledger_seq = r.seq;
+        ledger_head = r.hash.data[0..32].*;
+    } else |e| {
+        g.log("envoy_ledger_unavailable", .{ .err = @errorName(e) });
+        ledger = null;
+    }
 }
 
 fn findAction(seq: u64) ?*Action {
@@ -485,6 +506,8 @@ fn verbHello(o: *Out) void {
     o.str("envoy.v1");
     o.field("principal");
     o.str("agent");
+    o.field("identity");
+    if (identityName()) |n| o.str(n) else o.nul();
     o.field("verbs");
     o.arr();
     for ([_][]const u8{ "hello", "discover", "describe", "call", "plan", "apply", "undo", "ask", "observe", "bye" }) |v| o.str(v);
@@ -817,10 +840,34 @@ fn verbObserve(o: *Out, req: Value) void {
     o.hex(&chain);
     o.field("hash_rule");
     o.str("hash[n] = blake3(hash[n-1] || \"seq|verb|cap|method|outcome|undo_of\"), hash[0] = 32 zero bytes");
+    o.field("ledger");
+    if (ledger != null) {
+        o.obj();
+        o.field("seq");
+        o.num(ledger_seq);
+        o.field("head");
+        o.hex(&ledger_head);
+        o.end("}");
+    } else o.nul();
     o.end("}");
 }
 
 // ---------------------------------------------------------------------------
+
+var identity: [14]u8 = undefined;
+var identity_len: usize = 0;
+
+/// This instance's name, from Kumara (asked once).
+fn identityName() ?[]const u8 {
+    if (identity_len == 0) {
+        const k = g.use("kumara") orelse return null;
+        const r = idl.call(proto.kumara.whoami, k, .{}) catch return null;
+        const n = r.name.slice();
+        @memcpy(identity[0..n.len], n);
+        identity_len = n.len;
+    }
+    return identity[0..identity_len];
+}
 
 var heap: [64 * 1024]u8 = undefined;
 var response: Out = .{};
@@ -850,6 +897,7 @@ pub fn main() !u16 {
     const e = g.env();
     ticks_per_ms = @max(e.timebase_hz / 1000, 1);
     registry = g.use("registry") orelse return error.NoRegistry;
+    ledger = g.use("ledger");
     cap_count = e.agent_count;
     for (e.agent[0..cap_count], 0..) |c, i| caps[i] = .{ .info = c };
     g.log("envoy_ready", .{ .device = "virtio_console", .mmio = g.klog.hex(info.phys), .capabilities = cap_count });

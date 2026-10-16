@@ -81,3 +81,39 @@ pub const commit = idl.Method(.{ .label = 9, .effect = .external, .doc = "Make e
 pub const switch_to = idl.Method(.{ .label = 10, .effect = .external, .doc = "Boot this stored generation next, on trial: it becomes current once a boot of it comes up whole; if none does in a few tries, Aurora goes back. Commits." }, struct {
     generation: Hash,
 }, struct {});
+
+// ---------------------------------------------------------------------------
+// Client helpers
+
+const grain = @import("grain");
+
+/// Store bytes of any size up to 64 KiB (staged 480 at a time), public or
+/// sealed for the caller; returns the hash.
+pub fn storeBytes(ep: grain.CPtr, data: []const u8, sealed: bool) idl.CallError![32]u8 {
+    var off: usize = 0;
+    while (off < data.len) {
+        const n = @min(data.len - off, chunk);
+        _ = try idl.call(write, ep, .{ .offset = @intCast(off), .data = idl.Bytes(chunk).from(data[off..][0..n]) });
+        off += n;
+    }
+    const r = try idl.call(store, ep, .{ .len = @intCast(data.len), .sealed = sealed });
+    return r.hash.data;
+}
+
+/// Read a whole object into `buf`.
+pub fn readBytes(ep: grain.CPtr, hash: [32]u8, buf: []u8) idl.CallError![]u8 {
+    var off: usize = 0;
+    while (true) {
+        const r = try idl.call(read, ep, .{ .hash = Hash.from(&hash), .offset = @intCast(off) });
+        if (r.size > buf.len) return error.InvalidArgs;
+        const d = r.data.slice();
+        @memcpy(buf[off..][0..d.len], d);
+        off += d.len;
+        if (off >= r.size or d.len == 0) return buf[0..r.size];
+    }
+}
+
+pub fn find(ep: grain.CPtr, name_: []const u8, secret: bool) idl.CallError!?[32]u8 {
+    const r = try idl.call(lookup, ep, .{ .name = NameText.from(name_), .secret = secret });
+    return if (r.found) r.hash.data else null;
+}

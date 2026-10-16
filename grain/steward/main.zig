@@ -256,13 +256,6 @@ fn makeAgentLease(comptime k: usize) !void {
 }
 
 /// Give Envoy (in its CNode) every lease made so far.
-/// Domains that serve the store: a test system waits for them to report
-/// ready before halting (their commit must not race the power-off).
-fn isStore(comptime md: schema.Domain) bool {
-    inline for (md.provides) |p| if (comptime std.mem.eql(u8, p.protocol, "tablecloth.v1")) return true;
-    return false;
-}
-
 var ready_seen: [ndomains]bool = @splat(false);
 
 fn domainName(i: usize) []const u8 {
@@ -276,9 +269,10 @@ fn bootHealthy() bool {
     return true;
 }
 
-fn storesReady() bool {
+/// Every running domain the manifest says to await has reported settled.
+fn awaitedReady() bool {
     inline for (manifest.domains, 0..) |md, i| {
-        if (comptime isStore(md)) if (domains[i].status == .running and !ready_seen[i]) return false;
+        if (md.await_ready) if (domains[i].status == .running and !ready_seen[i]) return false;
     }
     return true;
 }
@@ -481,7 +475,11 @@ fn build(comptime i: usize) !void {
     inline for (md.uses, 0..) |u, ui| {
         const t = comptime schema.resolveUse(manifest, u.from).?;
         const ep = domains[t.domain].endpoints[t.service];
-        try mintProtocol(cnode, D.Slot.first_use + ui, ep, .{ .send = true, .grant = true }, i + 1, comptime proto.kernelIdOf(u.protocol));
+        // A provider already skipped or failed gets no client: the slot
+        // stays empty and calls fail at once (invalid_cap), where a minted
+        // capability would reach an endpoint nobody serves and wait forever.
+        const down = domains[t.domain].status == .skipped or domains[t.domain].status == .failed;
+        if (!down) try mintProtocol(cnode, D.Slot.first_use + ui, ep, .{ .send = true, .grant = true }, i + 1, comptime proto.kernelIdOf(u.protocol));
         info.uses[ui] = .{ .name = undefined, .protocol = undefined, .slot = D.Slot.first_use + ui, .protocol_id = comptime proto.idOf(u.protocol) };
         D.setName(&info.uses[ui].name, u.name);
         D.setName(&info.uses[ui].protocol, u.protocol);
@@ -694,7 +692,7 @@ export fn stewardMain(bi: *const abi.BootInfo) callconv(.c) noreturn {
 
     // Lifecycle loop: exits and faults.
     while (true) {
-        if (manifest.halt_when_tasks_finish and tasksDone() and storesReady()) summary();
+        if (manifest.halt_when_tasks_finish and tasksDone() and awaitedReady()) summary();
         const m = g.recv(lifecycle);
         if (m.status != .ok) continue;
         if (m.badge & fault_flag != 0) {

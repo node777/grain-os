@@ -123,4 +123,11 @@ def run(s, check):
     check("audit_chain", ok and obs["head"] == obs["actions"][-1]["hash"]
           and "lease_expired" in outcomes and "lease_exhausted" in outcomes, f"{len(outcomes)} actions, bad={bad}")
 
+    # With a disk attached, every action is also in the durable, signed Ledger.
+    if obs.get("ledger") is not None:
+        check("ledger_has_every_action", obs["ledger"]["seq"] == len(obs["actions"]), obs["ledger"])
+    ident = s.hello().get("identity")
+    if ident is not None:
+        check("identity_named", len(ident.split("-")) == 3 and all(len(w) == 4 for w in ident.split("-")), ident)
+
     s.bye()

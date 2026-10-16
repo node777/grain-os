@@ -403,9 +403,20 @@ an unwritten convention.
 
 ### 3.3 Ledger
 
-- An append-only, hash-chained log of authority events: grants, leases,
-  revocations, generation switches, agent actions, and (in ledger mode)
-  kernel events.
+> **Status (Phase 5):** built for agent actions (`grain/programs/ledger`,
+> `ledger.v1`); grants, revocations and generation switches are *planned*.
+
+- An append-only, hash-chained, **signed** record of authority events. Each
+  entry holds its predecessor's hash, its number, *who* appended it (taken
+  from the caller's badge, so nobody can append as someone else), what
+  happened, and Kumara's signature (context `ledger`) over the BLAKE3 of
+  all that. Entries are sealed in Tablecloth (only the Ledger opens them);
+  the newest is the secret tip `head`; every append is committed to disk
+  before it returns.
+- Envoy sends every agent action there (`agent_call`, `agent_apply`, …), so
+  the session's own chain is now backed by a durable one; `observe` reports
+  the Ledger's head, and the agent session checks the Ledger has exactly one
+  entry per action.
 - Owner-readable, tamper-evident, exportable. This is where "clear" and
   "loyal" come from: you can always answer *who did what, with whose
   authority*.
@@ -567,19 +578,33 @@ enforces the limits, and an exhausted or expired lease fails with
   vector state handled lazily); aarch64 and x86_64 follow the same
   interface.
 
-### 3.7 Seal and Courier: identity and the social layer
+### 3.7 Kumara and Courier: identity and the social layer
 
 Each Grain instance is a personal server as well as a personal computer.
 
-- **Seal (identity).** At first boot the instance creates an Ed25519 *root
-  identity key*, which the owner keeps. It signs short-lived *device keys*, so
-  keys can rotate and a lost device can be cut off without losing the
-  identity. The identity's public key *is* the identity. There is no
-  registry, no blockchain and no scarcity.
-- **Names.** Every identity has a pronounceable name derived from its key
-  hash (like Urbit's `~sampel-palnet`), so people can say and check it. On
-  top of that, each owner keeps *petnames* for the identities they know.
-  Names are local and can't be hijacked.
+> **Status (Phase 5):** Kumara's identity key and names are built
+> (`grain/lib/kumara.zig`, `grain/programs/kumara`, `kumara.v1`). Device keys,
+> petnames, introductions, recovery and Courier are *planned*.
+
+- **Kumara (identity; the plan called it Seal).** On the first boot of a
+  disk, Kumara draws a 32-byte seed from the entropy service and seals it in
+  Tablecloth, where only Kumara can open it; every later boot reads it back,
+  so the identity survives reboots and (because it lives in the store, not in
+  a generation) rollbacks. The key never leaves the domain: `whoami` gives
+  the name and public key, and `sign` signs for a caller, binding the
+  caller's name as the signature's context, so a signature made for the
+  Ledger cannot pass as one made for anything else. The public key *is* the
+  identity. There is no registry, no blockchain and no scarcity. *Planned:*
+  the owner holds a root key that signs short-lived device keys, so keys can
+  rotate and a lost device can be cut off without losing the identity.
+- **Names (format v1, owner decision).** Three words from a bank of 1024
+  four-letter words, drawn from a BLAKE3 hash of the public key:
+  `sift-noon-city`. The bank is plain, common words (no titles, no
+  negatives), sorted, and part of the format: it is never edited, and a new
+  bank or a longer name is a new format. 30 bits make a handle people can
+  say and remember, not an identity: two keys can share a name, never a key.
+  On top of that, each owner keeps *petnames* for the identities they know
+  (*planned*). Names are local and can't be hijacked.
 - **Introductions and recovery.** People vouch for each other by signing
   introductions (a web of trust, not an authority). Optional *social
   recovery*: the root key can be split into threshold shares held by trusted

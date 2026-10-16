@@ -77,6 +77,10 @@ pub const Domain = struct {
     max_restarts: u8 = 3,
     /// A write-only console for `@grain` records (development systems).
     debug_console: bool = false,
+    /// With `halt_when_tasks_finish`, Steward does not power off before this
+    /// domain reports itself settled (lifecycle `ready`), so a store's or an
+    /// identity's commit never races the power-off.
+    await_ready: bool = false,
     provides: []const Provide = &.{},
     uses: []const Use = &.{},
     devices: []const Device = &.{},

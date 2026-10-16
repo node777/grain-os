@@ -56,7 +56,7 @@ pub const Lifecycle = enum(u32) {
     /// replies label 0 with w0 = 1 if every domain it was asked to start is
     /// running (or skipped), else 0. w0 = 1: the domain has acted on that
     /// (the store: confirmed the generation on trial) and is settled; a test
-    /// system does not halt before its store is.
+    /// system does not halt before every domain marked `await_ready` is.
     ready = 3,
 };
 
