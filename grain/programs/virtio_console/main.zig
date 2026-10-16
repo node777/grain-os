@@ -4,6 +4,10 @@
 //! Writes arrive in pieces of up to 256 bytes, and several clients write at once, so
 //! the driver keeps a line buffer per client (by badge) and sends only whole
 //! lines (or a full buffer). Lines from different clients never interleave.
+//!
+//! Input: what the owner types arrives on the receive queue and is handed
+//! out a line at a time by `read_line`, which the driver refuses to the
+//! agent: the console is where the owner types the disk's passphrase.
 const std = @import("std");
 const g = @import("grain");
 const proto = @import("proto");
@@ -23,9 +27,16 @@ const Line = struct {
     data: [line_max]u8 = undefined,
 };
 
+const rx_buffers = 16;
+const rx_size = 256;
+
 const Driver = struct {
     dev: virtio.Device,
     tx: virtio.Queue,
+    rx: virtio.Queue,
+    rx_page: virtio.Dma,
+    input: [512]u8 = undefined,
+    input_len: usize = 0,
     buf: virtio.Dma,
     signal: g.CPtr,
     irq: g.CPtr,
@@ -55,6 +66,31 @@ const Driver = struct {
         return .{};
     }
 
+    /// console.read_line
+    pub fn read_line(d: *Driver, _: proto.console.read_line.Params, caller: g.idl.Caller) !proto.console.read_line.Results {
+        if (caller.badge == g.domain.agent_badge) return error.Unavailable;
+        while (d.rx.poll()) |used| {
+            const id: u16 = @intCast(used.id);
+            const got = d.rx_page.bytes()[id * rx_size ..][0..@min(used.len, rx_size)];
+            for (got) |c| {
+                if (d.input_len < d.input.len) {
+                    d.input[d.input_len] = c;
+                    d.input_len += 1;
+                }
+            }
+            d.rx.submitDesc(id, d.rx_page.pa + id * rx_size, rx_size, true);
+        }
+        const nl = std.mem.indexOfScalar(u8, d.input[0..d.input_len], '\n') orelse {
+            if (d.input_len == d.input.len) d.input_len = 0; // a line too long to keep: drop it
+            return .{ .text = .{}, .ready = false };
+        };
+        const line = std.mem.trimEnd(u8, d.input[0..nl], "\r");
+        const out: proto.console.read_line.Results = .{ .text = g.idl.Text(128).from(line), .ready = true };
+        std.mem.copyForwards(u8, d.input[0..], d.input[nl + 1 .. d.input_len]);
+        d.input_len -= nl + 1;
+        return out;
+    }
+
     fn flush(d: *Driver, l: *Line) void {
         if (l.len == 0) return;
         @memcpy(d.buf.bytes()[0..l.len], l.data[0..l.len]);
@@ -75,10 +111,14 @@ pub fn main() !u16 {
     // Without the multiport feature, port 0 uses queue 0 (receive) and 1 (transmit).
     const tx = try virtio.Queue.init(dev, 1, qpage.va, qpage.pa);
     const buf = try virtio.Dma.alloc(&space, g.domain.Layout.heap + 0x1000);
+    const rq = try virtio.Dma.alloc(&space, g.domain.Layout.heap + 0x2000);
+    const rx = try virtio.Queue.init(dev, 0, rq.va, rq.pa);
+    const rx_page = try virtio.Dma.alloc(&space, g.domain.Layout.heap + 0x3000);
     const signal = try space.retype(.signal, 0);
     if (!g.invoke(info.irq_slot, g.abi.IrqMethod.set_signal, .{signal}).ok()) return error.IrqSetup;
     dev.ready();
     g.log("driver_ready", .{ .device = "virtio_console", .mmio = g.klog.hex(info.phys), .irq = info.irq_line });
-    var d: Driver = .{ .dev = dev, .tx = tx, .buf = buf, .signal = signal, .irq = info.irq_slot };
+    var d: Driver = .{ .dev = dev, .tx = tx, .rx = rx, .rx_page = rx_page, .buf = buf, .signal = signal, .irq = info.irq_slot };
+    for (0..rx_buffers) |i| d.rx.submitDesc(@intCast(i), rx_page.pa + i * rx_size, rx_size, true);
     g.idl.serve(proto.console, g.provided("console") orelse return error.NoService, &d);
 }

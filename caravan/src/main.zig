@@ -127,10 +127,18 @@ fn enterNext(h: *arch.HartLocal) noreturn {
         unlock();
         trap.caravanResume(&t.ctx);
     }
-    if (kernel.stuck() and !stuck_reported) {
-        stuck_reported = true;
-        log("stuck", .{ .reason = "no_runnable_threads_and_no_timer" });
-        kernel.logThreads();
+    if (kernel.stuck()) {
+        if (!stuck_reported) {
+            stuck_reported = true;
+            log("stuck", .{ .reason = "no_runnable_threads_and_no_timer" });
+            kernel.logThreads();
+        }
+        // Everything waits on a device. Keep a heartbeat timer: under QEMU
+        // -icount, a machine with every hart halted and no timer armed never
+        // receives the host's I/O completion (a flush can wait forever); a
+        // pending deadline keeps QEMU's clock, and so its I/O, moving. On
+        // hardware it costs one interrupt per 10 ms while fully idle.
+        sbi.setTimer(csr.time() + platform.timebase_hz / 100);
     }
     // Idle on the kernel's own table, so no user root stays live here.
     if (h.active_root.raw != arch.bootRootPhys()) arch.switchRoot(h, arch.bootRootPhys());

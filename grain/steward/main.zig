@@ -256,6 +256,56 @@ fn makeAgentLease(comptime k: usize) !void {
 }
 
 /// Give Envoy (in its CNode) every lease made so far.
+/// Domains that serve the store: a test system waits for them to report
+/// ready before halting (their commit must not race the power-off).
+fn isStore(comptime md: schema.Domain) bool {
+    inline for (md.provides) |p| if (comptime std.mem.eql(u8, p.protocol, "tablecloth.v1")) return true;
+    return false;
+}
+
+var ready_seen: [ndomains]bool = @splat(false);
+
+fn domainName(i: usize) []const u8 {
+    inline for (manifest.domains, 0..) |md, j| if (i == j) return md.name;
+    return "?";
+}
+
+/// Did every domain come up? (Skipped ones count: they were optional.)
+fn bootHealthy() bool {
+    for (domains) |d| if (d.status == .failed or d.status == .not_started) return false;
+    return true;
+}
+
+fn storesReady() bool {
+    inline for (manifest.domains, 0..) |md, i| {
+        if (comptime isStore(md)) if (domains[i].status == .running and !ready_seen[i]) return false;
+    }
+    return true;
+}
+
+const ClientSpec = struct { name: []const u8, badge: u64 };
+
+/// Every domain that uses one of domain i's services (badged with its
+/// number), and the agent if it may hold one.
+fn clientsOf(comptime i: usize) []const ClientSpec {
+    comptime {
+        @setEvalBranchQuota(100_000);
+        var out: []const ClientSpec = &.{};
+        for (manifest.domains, 0..) |d, j| {
+            const uses_i = for (d.uses) |u| {
+                if (schema.resolveUse(manifest, u.from).?.domain == i) break true;
+            } else false;
+            if (uses_i) out = out ++ .{ClientSpec{ .name = d.name, .badge = j + 1 }};
+        }
+        const by_agent = for (agent_grants ++ agent_askable) |gr| {
+            if (schema.resolveUse(manifest, gr.from).?.domain == i) break true;
+        } else false;
+        if (by_agent) out = out ++ .{ClientSpec{ .name = "agent", .badge = D.agent_badge }};
+        if (out.len > D.max_clients) @compileError("domain '" ++ manifest.domains[i].name ++ "' has more clients than DomainInfo holds");
+        return out;
+    }
+}
+
 fn installAgentLeases(cnode: g.CPtr, info: *D.DomainInfo) !void {
     inline for (0..agent_caps) |k| {
         const gr = comptime agentGrant(k);
@@ -444,6 +494,12 @@ fn build(comptime i: usize) !void {
         D.setName(&info.provides[pi].protocol, p.protocol);
     }
     info.provide_count = md.provides.len;
+    const clients = comptime clientsOf(i);
+    inline for (clients, 0..) |c, ci| {
+        info.clients[ci] = .{ .name = undefined, .badge = c.badge };
+        D.setName(&info.clients[ci].name, c.name);
+    }
+    info.client_count = clients.len;
     inline for (md.devices, 0..) |want, di| {
         const dev = claimDevice(want.virtio, want.instance, i) orelse {
             g.record("device_missing", .{ .domain = md.name, .device = want.name, .virtio_id = want.virtio, .instance = want.instance });
@@ -638,7 +694,7 @@ export fn stewardMain(bi: *const abi.BootInfo) callconv(.c) noreturn {
 
     // Lifecycle loop: exits and faults.
     while (true) {
-        if (manifest.halt_when_tasks_finish and tasksDone()) summary();
+        if (manifest.halt_when_tasks_finish and tasksDone() and storesReady()) summary();
         const m = g.recv(lifecycle);
         if (m.status != .ok) continue;
         if (m.badge & fault_flag != 0) {
@@ -647,6 +703,16 @@ export fn stewardMain(bi: *const abi.BootInfo) callconv(.c) noreturn {
         } else if (m.badge >= 1 and m.badge <= ndomains) {
             const i = m.badge - 1;
             if (m.tag.label == @backingInt(D.Lifecycle.exit)) onExit(i, @truncate(m.w[0]));
+            if (m.tag.label == @backingInt(D.Lifecycle.ready)) {
+                if (m.w[0] == 1) {
+                    ready_seen[i] = true;
+                    _ = g.reply(.{ .label = 0, .length = 0 }, .{});
+                } else {
+                    const healthy = bootHealthy();
+                    g.record("domain_ready", .{ .domain = domainName(i), .boot_healthy = healthy });
+                    _ = g.reply(.{ .label = 0, .length = 1 }, .{@intFromBool(healthy)});
+                }
+            }
             if (m.tag.label == @backingInt(D.Lifecycle.ask)) switch (onAsk(i, m.w[0])) {
                 .slot => |s_| _ = g.reply(.{ .label = 0, .length = 1 }, .{s_}),
                 .refused => |why| {

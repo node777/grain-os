@@ -5,6 +5,12 @@ pub const abi = @import("abi");
 pub const klog = @import("klog");
 pub const domain = @import("domain.zig");
 pub const virtio = @import("virtio.zig");
+pub const virtio_blk = @import("virtio_blk.zig");
+pub const tablecloth = @import("tablecloth.zig");
+
+/// Options for a program's root (`pub const std_options = grain.std_options;`):
+/// Caravan's pages are 4 KiB, which std cannot know for a freestanding target.
+pub const std_options: std.Options = .{ .page_size_min = 4096, .page_size_max = 4096 };
 pub const idl = @import("idl.zig");
 
 pub const CPtr = abi.CPtr;
@@ -337,6 +343,20 @@ pub const Space = struct {
 
     pub fn map(s: *Space, frame: CPtr, va: usize, rights: abi.Rights) !void {
         return s.mapIn(s.vspace, frame, va, rights);
+    }
+
+    /// Fresh zeroed pages mapped at `va`, through one reused slot: a
+    /// mapping keeps its frame alive without a capability (objects live
+    /// until their untyped is reset), so a heap of any size costs one slot.
+    pub fn mapHeap(s: *Space, va: usize, pages: usize) ![]u8 {
+        const scratch = try s.slot();
+        for (0..pages) |i| {
+            const r = invoke(s.untyped, abi.UntypedMethod.retype, .{ abi.Kind.frame, 12, scratch });
+            if (!r.ok()) return statusError(r.status);
+            try s.map(scratch, va + i * 4096, .{ .read = true, .write = true });
+            _ = invoke(S.cnode, abi.CNodeMethod.delete, .{scratch});
+        }
+        return @as([*]u8, @ptrFromInt(va))[0 .. pages * 4096];
     }
 
     /// Fresh zeroed pages mapped at `va`; returns the first frame's slot.

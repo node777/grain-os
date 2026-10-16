@@ -118,6 +118,7 @@ pub const max_agent_caps = 16;
 pub const max_hart_load_ppm = 900_000;
 
 pub const known_virtio = [_]struct { id: u32, what: []const u8 }{
+    .{ .id = 2, .what = "block device" },
     .{ .id = 3, .what = "console" },
     .{ .id = 4, .what = "entropy source" },
 };

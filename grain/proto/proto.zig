@@ -8,8 +8,9 @@ pub const entropy = @import("entropy.zig");
 pub const echo = @import("echo.zig");
 pub const kv = @import("kv.zig");
 pub const registry = @import("registry.zig");
+pub const tablecloth = @import("tablecloth.zig");
 
-pub const all = .{ console, entropy, echo, kv, registry };
+pub const all = .{ console, entropy, echo, kv, registry, tablecloth };
 
 comptime {
     for (all) |P| idl.check(P);

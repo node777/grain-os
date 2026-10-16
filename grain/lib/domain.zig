@@ -52,6 +52,12 @@ pub const Lifecycle = enum(u32) {
     /// within the manifest's policy (once per service) and replies label 0
     /// with w0 = the slot of the new lease, or label 1 with w0 = a reason.
     ask = 2,
+    /// w0 = 0: the domain is up and asks whether the whole boot is; Steward
+    /// replies label 0 with w0 = 1 if every domain it was asked to start is
+    /// running (or skipped), else 0. w0 = 1: the domain has acted on that
+    /// (the store: confirmed the generation on trial) and is settled; a test
+    /// system does not halt before its store is.
+    ready = 3,
 };
 
 pub const AskRefusal = enum(u32) {
@@ -105,6 +111,15 @@ pub const AgentCap = extern struct {
 
 pub const max_agent_caps = 16;
 
+/// Who calls this domain's services: the badge a server sees, and whose it
+/// is (a domain name, or "agent" for calls through Envoy).
+pub const Client = extern struct {
+    name: Name,
+    badge: u64,
+};
+
+pub const max_clients = 16;
+
 pub const Device = extern struct {
     name: Name,
     virtio_id: u32,
@@ -144,8 +159,15 @@ pub const DomainInfo = extern struct {
     devices: [max_devices]Device,
     /// Envoy only: the agent's services.
     agent_count: u32,
-    _pad: u32 = 0,
+    client_count: u32 = 0,
     agent: [max_agent_caps]AgentCap,
+    clients: [max_clients]Client,
+
+    /// The name of the domain (or "agent") behind a badge, if it is a client.
+    pub fn clientName(info: *const DomainInfo, badge: usize) ?[]const u8 {
+        for (info.clients[0..info.client_count]) |*c| if (c.badge == badge) return nameOf(&c.name);
+        return null;
+    }
 };
 
 comptime {

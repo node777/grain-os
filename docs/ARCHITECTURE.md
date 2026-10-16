@@ -185,6 +185,12 @@ seL4 tracks every derived capability in a derivation tree. Caravan does not.
 - **Logical harts.** Hart 0 is whichever hart firmware booted on (SBI may
   pick any); the others follow in device-tree order. Manifests and the core
   see only logical indices, and external interrupts go to hart 0.
+- **Idle heartbeat.** When every hart is idle and no timer is armed (all
+  threads wait on devices), the arch layer arms a 10 ms timer. Under QEMU
+  `-icount` a machine in that state never receives the host's I/O
+  completion (a disk flush waited forever); a pending deadline keeps QEMU's
+  clock and I/O moving. On hardware it is one interrupt per 10 ms of total
+  idleness.
 - *Planned:* a static time-partitioned scheduling mode for fully
   deterministic systems.
 
@@ -252,7 +258,7 @@ line is a lost record.
 │ Seal (identity) · Courier (identity-addressed network)           │
 ├──────────────────────────────────────────────────────────────────┤
 │ Envoy (agent interface) · Registry (schemas) · Ledger (audit)    │
-│ Granary (content-addressed store) · Steward (manifest, lifecycle)│
+│ Tablecloth (content store) · Steward (manifest, lifecycle)       │
 ├──────────────────────────────────────────────────────────────────┤
 │ drivers (virtio-console/blk/net/gpu/input/rng; native later)     │
 ├──────────────────────────────────────────────────────────────────┤
@@ -404,14 +410,71 @@ an unwritten convention.
   "loyal" come from: you can always answer *who did what, with whose
   authority*.
 
-### 3.4 Granary
+### 3.4 Tablecloth: holding things by their content
 
-- A content-addressed object store (BLAKE3, which is in Zig's standard
-  library) for binaries, manifests, generations and user data.
-- Encrypted at rest under owner keys. Deduplicated. Snapshots are free.
-- Files are named by hash and given petnames in per-owner namespaces. There
-  is no global filesystem namespace; a domain sees only the directories it
-  holds capabilities for.
+> **Status (Phase 5):** built: `grain/lib/tablecloth.zig` (the store, generic
+> over a block device), the `tablecloth` domain (drives virtio-blk itself),
+> `tools/disk` (`grain-disk`). The name and Mantra are the owner's (see
+> GLOSSARY.md); the plan called this Granary.
+
+Ask for the same bytes and you get the same bytes, forever. An object is
+named by its hash; **Mantra** names bind words to hashes once and for all
+(`system@3`), and *tips* are names that move (the head of a chain).
+
+**On disk** (4 KiB blocks): two superblock slots, then an append-only log of
+object bytes packed end to end, then a table (sorted object index and names)
+per commit. A commit appends after `log_end`, flushes, writes the *other*
+superblock slot (sequence number, checksum, where the table is, the
+generation state, the wrapped key), and flushes again. Nothing a committed
+superblock points at is ever overwritten, so a power cut leaves the old state
+or the new one, and a torn superblock fails its checksum so the other slot
+wins.
+
+**Proved in the simulator** (`zig build test`): a disk model whose volatile
+cache keeps, loses or tears (at a sector boundary) each unflushed write when
+the power goes. A scenario of single-commit steps (passphrase, first
+generation, a second generation with a sealed secret, stage, boot attempt,
+confirm, rollback, boot attempt, confirm) is cut at *every* device operation
+of every step, several ways each, and every recovery must mount, equal the
+state before or after that step exactly, read every object intact, and
+accept new commits. Removing the flush between the table and the superblock
+makes it fail at once.
+
+**Public and sealed.** Public objects (system generations, which Aurora
+reads before anyone unlocks) are named by BLAKE3 of their bytes. Sealed
+objects are XChaCha20-Poly1305 under the master key and named by a keyed
+BLAKE3 of (owner, plaintext); the nonce is that name (SIV), so one owner's
+equal plaintexts deduplicate and only equality leaks. Because the owner is
+in the name, a sealed object opens only for the domain that stored it: any
+other gets `NotFound`, whatever it learned. The master key is wrapped by
+Argon2id(passphrase); the cost is fixed when the disk is formatted (16 MiB,
+2 passes by default; test disks use 1 MiB, 1 pass).
+
+**The domain.** `tablecloth` mounts its disk (formatting a blank one), asks
+the owner for the passphrase on the console (twice, to create one; a wrong
+one is refused and asked again), and serves `tablecloth.v1`: `put`, `write`
++ `store` for objects up to 64 KiB, `read` (480 bytes per call, checked
+against the hash), `has`, `bind`/`lookup` (each client's names live under its
+own name: `kumara` binding `secret` makes `kumara/secret`; secret names are
+sealed), `commit`, `info`, and `switch_to` (stage a generation, §3.1).
+Clients are known by name from `DomainInfo.clients`, which Steward fills
+with every domain using the service (by badge) and the agent; Steward itself
+calls unbadged.
+
+**Console input.** `console.read_line` hands out what the owner typed, a line
+at a time, and is refused to the agent. *Limit:* any domain the manifest
+wires to the console could read input; input should be its own service, once
+a domain can serve more than one endpoint.
+
+**Ready.** Once mounted and unlocked, the store asks Steward (lifecycle
+`ready`) whether every domain came up, confirms a generation on trial if so,
+and reports settled; a test system does not power off before that. Steward
+never blocks on a domain (an earlier draft had Steward call the store, and a
+store fault would have deadlocked the supervisor).
+
+- *Planned:* reclaiming space (the log only grows), an index that is not
+  rewritten whole per commit, changing the passphrase, and directories as
+  capabilities.
 
 ### 3.5 Envoy: the AI interface
 
@@ -533,7 +596,7 @@ Each Grain instance is a personal server as well as a personal computer.
 - **Hosted apps.** An app runs on its owner's instance and is shared by
   handing friends a capability to its interface. Their Envoy and shell reach
   it through Courier with the same typed descriptors as local services. Data
-  transfer is a Granary object exchange: hashes are verified on arrival, and
+  transfer is a Tablecloth object exchange: hashes are verified on arrival, and
   only missing blocks are sent.
 - **Loyalty across the network.** Every remote grant and use goes into the
   Ledger. Owners can see who holds what, and revoke it.

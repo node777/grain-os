@@ -70,7 +70,7 @@ pub fn build(b: *std.Build) void {
     // boot image and embedded in its own Steward. grain-pack refuses an image
     // missing a program, and Steward refuses a miswired manifest at compile time.
     const system_path = b.option([]const u8, "system", "System manifest for run/steward/check-manifest: .brix or .zon (default system/dev.brix)") orelse "system/dev.brix";
-    const program_names = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker", "crasher", "waiter", "registry", "kv", "envoy" };
+    const program_names = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker", "crasher", "waiter", "registry", "kv", "envoy", "tablecloth" };
 
     const pack = b.addExecutable(.{ .name = "grain-pack", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/pack/main.zig"),
@@ -89,6 +89,22 @@ pub fn build(b: *std.Build) void {
         .imports = &.{ .{ .name = "brix", .module = brix_mod }, .{ .name = "schema", .module = schema_mod }, .{ .name = "proto", .module = proto_mod } },
     }) });
     b.installArtifact(brix_exe);
+
+    // grain-disk: Tablecloth disks on the host. Tests boot from a fresh copy
+    // of a cheap one (Argon2id at 1 MiB, one pass: test-only).
+    const tablecloth_mod = b.createModule(.{ .root_source_file = b.path("grain/lib/tablecloth.zig") });
+    const disk_exe = b.addExecutable(.{ .name = "grain-disk", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/disk/main.zig"),
+        .target = host,
+        .optimize = .Debug,
+        .imports = &.{.{ .name = "tablecloth", .module = tablecloth_mod }},
+    }) });
+    b.installArtifact(disk_exe);
+    const test_disk_run = b.addRunArtifact(disk_exe);
+    test_disk_run.addArg("format");
+    const test_disk = test_disk_run.addOutputFileArg("disk.img");
+    b.getInstallStep().dependOn(&b.addInstallFile(test_disk, "test-disk.img").step);
+    test_disk_run.addArgs(&.{ "64", "--kdf-kib", "1024", "--kdf-t", "1" });
     const Manifest = struct {
         fn zon(bb: *std.Build, tool: *std.Build.Step.Compile, path: []const u8) std.Build.LazyPath {
             if (!std.mem.endsWith(u8, path, ".brix")) return bb.path(path);
@@ -229,6 +245,33 @@ pub fn build(b: *std.Build) void {
     qtest_system.has_side_effects = true;
     qtest_system.step.dependOn(&qtest_kernel.step);
 
+    // Storage: the dev system with a disk, booted twice. The first boot finds
+    // a blank store and takes a new passphrase; the second refuses a wrong
+    // one and unlocks with the right one.
+    const qtest_storage = b.addSystemCommand(&.{
+        "python3",                                          "tools/harness.py",
+        "--timeout",                                        qemu_timeout,
+        "--smp",                                            smp,
+        "--virtio-console",                                 "--boots",
+        "2",                                                "--console-input",
+        "1:open sesame",                                    "--console-input",
+        "1:open sesame",                                    "--console-input",
+        "2:wrong guess",                                    "--console-input",
+        "2:open sesame",                                    "--expect",
+        "1:tablecloth_unlocked created=true",               "--expect",
+        "2:tablecloth_unlock_failed tries=1",               "--expect",
+        "2:tablecloth_unlocked created=false tries=2",      "--expect",
+        "domain_ready domain=tablecloth boot_healthy=true", "--expect",
+        "summary failed=0",                                 "--expect-console",
+        "1:Choose a passphrase",
+    });
+    qtest_storage.addPrefixedFileArg("--virtio-rng=", rng_file);
+    qtest_storage.addPrefixedFileArg("--disk=", test_disk);
+    qtest_storage.addArtifactArg(kernel);
+    qtest_storage.stdio = .inherit;
+    qtest_storage.has_side_effects = true;
+    qtest_storage.step.dependOn(&qtest_system.step);
+
     // The same system with an agent attached to Envoy: tools/agent_session.py
     // exercises every verb, the leases' limits and the audit chain. Real time
     // (leases expire by the clock), so this run is not deterministic.
@@ -248,7 +291,7 @@ pub fn build(b: *std.Build) void {
     qtest_agent.addArtifactArg(kernel);
     qtest_agent.stdio = .inherit;
     qtest_agent.has_side_effects = true;
-    qtest_agent.step.dependOn(&qtest_system.step);
+    qtest_agent.step.dependOn(&qtest_storage.step);
 
     // The failure path: restart limit, service revocation, no hung client.
     const qtest_faults = b.addSystemCommand(&.{
@@ -309,6 +352,10 @@ pub fn build(b: *std.Build) void {
         manifest_tests.root_module.addAnonymousImport(comptime std.fs.path.basename(name) ++ ".brix", .{ .root_source_file = b.path("system/" ++ name ++ ".brix") });
     }
     test_step.dependOn(&b.addRunArtifact(manifest_tests).step);
+    // Tablecloth, including the crash simulator (a power cut at every device
+    // operation of a generation upgrade and rollback).
+    const tablecloth_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/tablecloth.zig"), .target = host, .optimize = optimize }) });
+    test_step.dependOn(&b.addRunArtifact(tablecloth_tests).step);
     const brix_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/brix/brix.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(brix_tests).step);
     const idl_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/idl.zig"), .target = host, .optimize = optimize, .imports = &.{ .{ .name = "abi", .module = abi_mod }, .{ .name = "klog", .module = klog_mod } } }) });

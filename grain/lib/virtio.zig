@@ -108,6 +108,10 @@ pub const Device = struct {
     pub fn configByte(d: Device, off: usize) u8 {
         return @as(*volatile u8, @ptrFromInt(d.base + 0x100 + off)).*;
     }
+
+    pub fn config32(d: Device, off: usize) u32 {
+        return @as(*volatile u32, @ptrFromInt(d.base + 0x100 + off)).*;
+    }
 };
 
 pub const queue_size = 16;
@@ -197,6 +201,32 @@ pub const Queue = struct {
         q.avail.idx +%= 1;
         grain.fence();
         q.dev.write(.queue_notify, q.index);
+    }
+
+    pub const Part = struct { pa: u64, len: u32, device_writes: bool };
+
+    /// Offer one request made of several buffers, chained (virtio-blk:
+    /// header, data, status). Returns the head descriptor.
+    pub fn submitChain(q: *Queue, parts: []const Part) u16 {
+        const head = q.next_desc;
+        for (parts, 0..) |p, i| {
+            const id: u16 = @intCast((head + i) % queue_size);
+            const last = i + 1 == parts.len;
+            q.desc[id] = .{
+                .addr = p.pa,
+                .len = p.len,
+                .flags = (if (p.device_writes) Desc.flag_write else 0) | (if (last) 0 else Desc.flag_next),
+                .next = if (last) 0 else @intCast((id + 1) % queue_size),
+            };
+        }
+        q.next_desc = @intCast((head + parts.len) % queue_size);
+        const slot = q.avail.idx % queue_size;
+        q.avail.ring[slot] = head;
+        grain.fence();
+        q.avail.idx +%= 1;
+        grain.fence();
+        q.dev.write(.queue_notify, q.index);
+        return head;
     }
 
     /// A completed buffer, if the device has returned one.

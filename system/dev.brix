@@ -76,6 +76,21 @@ domain envoy like dev {
     uses registry { from = registry.registry, protocol = registry.v1 }
 }
 
+# The content store. It drives its disk itself; without a disk it is skipped.
+# The owner types the passphrase on the console.
+domain tablecloth like dev {
+    program = tablecloth
+    priority = 110
+    hart = 1
+    budget = 2ms
+    memory = 4MiB
+    stack = 128KiB
+    device disk { virtio = 2, optional }
+    uses console { from = console.console, protocol = console.v1 }
+    uses entropy { from = rng.entropy, protocol = entropy.v1 }
+    provides tablecloth { protocol = tablecloth.v1 }
+}
+
 domain checker like dev {
     program = checker
     kind = task
