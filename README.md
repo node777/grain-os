@@ -19,7 +19,8 @@ RISC-V is the primary target; aarch64 and x86_64 follow.
 > ids on every endpoint. **Envoy** lets an agent on the host discover, plan,
 > apply and undo typed calls, using only the leases the manifest gives it,
 > with every action in a hash-chained audit log. An MCP bridge and a
-> structured shell sit on the same protocol. Next: Brix, a manifest language.
+> structured shell sit on the same protocol. Systems are declared in
+> **Brix**, a small manifest language that evaluates to checked plain data.
 
 ## Quick start
 
@@ -78,6 +79,8 @@ hash chain: verified  head f82b57c52ddf0fb7...
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the design of Caravan and Grain
 - [docs/PLAN.md](docs/PLAN.md): phased roadmap and open questions
 - [docs/TESTING.md](docs/TESTING.md): how each layer is built, booted, tested and driven
+- [docs/BRIX.md](docs/BRIX.md): Brix, the language manifests are written in
+- [docs/GLOSSARY.md](docs/GLOSSARY.md): the proposed names (Tally, Pond, Rishi, Brix, …) and what each maps to
 - [docs/RESEARCH.md](docs/RESEARCH.md): what we took from seL4, Hubris, Zircon, NixOS, Linux, TigerBeetle and others
 
 ## Layout
@@ -94,7 +97,8 @@ grain/manifest/              manifest schema + validator, boot-image format
 grain/steward/main.zig       Steward: builds and supervises the system from the manifest
 grain/programs/              drivers (virtio_console, virtio_rng), registry, kv, envoy, test programs
 grain/ktest/main.zig         the kernel test suite (root task of caravan-ktest)
-system/                      manifests: dev.zon, tests/faults.zon, tests/miswired.zon
+system/                      manifests in Brix: dev.brix, tests/faults.brix, tests/miswired.brix
+grain/brix/                  Brix, the manifest language (tools/brix: check, print, write ZON)
 tools/pack/                  grain-pack: manifest + programs -> hashed boot image
 sim/                         simulated machine, scenario tests, caravan-sim
 tools/harness.py             boots QEMU, parses records, drives agent scripts, sets the exit status

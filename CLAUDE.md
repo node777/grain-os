@@ -26,4 +26,6 @@
   Domain-facing contracts live in `grain/lib/domain.zig` and `protocols.zig`.
 - Manifest checks live in `schema.validate`; each new rule needs a test with
   its message in `schema.zig`.
+- Manifests are Brix (`system/*.brix`, docs/BRIX.md). A new schema field
+  needs no Brix change; check it with `zig-out/bin/brix --print`.
 - Design changes go into `docs/ARCHITECTURE.md` in the same commit as the code.

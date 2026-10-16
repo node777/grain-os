@@ -1,7 +1,8 @@
 # Grain OS architecture (draft 0)
 
 > **Status:** proposal. Names other than *Grain* and *Caravan* are working
-> titles.
+> titles; [GLOSSARY.md](GLOSSARY.md) maps the owner's proposed names onto
+> them (code keeps the current names until the rename after Phase 4).
 >
 > **Owner decisions (2026-10-16):** Grain is a **personal-device** OS first.
 > *Social* means every instance has a shareable cryptographic identity, used
@@ -266,8 +267,10 @@ line is a lost record.
 > **Status (Phase 3):** implemented and tested, except generations and the
 > spawner, which are marked *planned*.
 
-**The manifest** (`system/*.zon`, typed by `grain/manifest/schema.zig`) is
-plain data. It lists domains, and for each one: its program, kind (`service`
+**The manifest** is written in **Brix** (`system/*.brix`, see
+[BRIX.md](BRIX.md)) and evaluates to plain data typed by
+`grain/manifest/schema.zig`. The build runs `brix` to check it and write that
+data as ZON, which grain-pack hashes and Steward embeds. It lists domains, and for each one: its program, kind (`service`
 or `task`), priority, hart, CPU budget and period, memory, restart policy,
 the services it provides (name and protocol), the services it uses
 (`"<domain>.<service>"` and the protocol it expects), its devices (by virtio
@@ -277,10 +280,13 @@ domain with `domain_skipped` instead of failing it), and whether it gets a
 write-only debug console. An optional `agent` section says what an AI agent
 may hold (§3.5).
 
-```zig
-.{ .name = "hello", .program = "hello", .kind = .task,
-   .uses = .{ .{ .name = "console", .from = "console.console", .protocol = "console.v1" },
-              .{ .name = "entropy", .from = "rng.entropy", .protocol = "entropy.v1" } } },
+```brix
+domain hello {
+    program = hello
+    kind = task
+    uses console { from = console.console, protocol = console.v1 }
+    uses entropy { from = rng.entropy, protocol = entropy.v1 }
+}
 ```
 
 **One validator, two places.** `schema.validate` checks names, uniqueness,
@@ -294,7 +300,9 @@ Steward runs it **at compile time**, so a miswired system does not build:
 error: system manifest: domain 'hello' uses 'console.consol', but no domain provides it (write it as "<domain>.<service>")
 ```
 
-and host tests run it at run time, so every message is tested.
+and `brix` and the host tests run it at run time, so every message is
+tested. Through `brix`, a message points at the block it names
+(`miswired.brix:12:1: domain 'hello' uses ...`).
 `zig build check-manifest -Dsystem=<file>` runs the compile-time check on
 its own.
 
@@ -415,11 +423,13 @@ is a **principal** with its own leased capabilities. It is never root.
 domain, the services it **grants** from boot and the ones that are
 **askable**, each with a lease limit (`uses`, `duration_ms`):
 
-```zig
-.agent = .{ .envoy = "envoy",
-    .grants = .{ .{ .name = "store", .from = "store.kv", .protocol = "kv.v1" },
-                 .{ .name = "echo", .from = "flaky.echo", .protocol = "echo.v1", .duration_ms = 4_000 } },
-    .askable = .{ .{ .name = "entropy", .from = "rng.entropy", .protocol = "entropy.v1", .uses = 2 } } },
+```brix
+agent {
+    envoy = envoy
+    grant store { from = store.kv, protocol = kv.v1 }
+    grant echo { from = flaky.echo, protocol = echo.v1, duration = 4s }
+    askable entropy { from = rng.entropy, protocol = entropy.v1, uses = 2 }
+}
 ```
 
 Steward mints each service endpoint with the agent's badge (`0xA6E7`, so

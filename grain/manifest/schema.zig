@@ -1,6 +1,7 @@
 //! The Grain system manifest: what a system is, as plain data.
 //!
-//! A manifest (`system/*.zon`) lists domains: each is one program with its
+//! A manifest (written in Brix, `system/*.brix`, which evaluates to this
+//! data) lists domains: each is one program with its
 //! own memory, its own CPU budget, the services it provides, the services it
 //! uses, and the devices it drives. Steward builds exactly this at boot.
 //!

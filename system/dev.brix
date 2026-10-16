@@ -1,0 +1,93 @@
+# The development system: two virtio drivers, a service that crashes on its
+# first run (to exercise restarts), two tasks that use them, a registry of
+# protocol descriptors, a key-value store, and Envoy, through which an AI
+# agent operates the system with leased, limited authority.
+#
+# Steward builds exactly this at boot; the build refuses it if the wiring is
+# wrong. See docs/BRIX.md for the language.
+
+name = grain-dev
+halt_when_tasks_finish
+
+# Every domain here may write `@grain` records.
+template dev {
+    debug_console
+}
+
+template driver like dev {
+    priority = 200
+    budget = 1ms
+    period = 10ms
+}
+
+domain console like driver {
+    program = virtio_console
+    restart = on_fault
+    device port { virtio = 3 }
+    provides console { protocol = console.v1 }
+}
+
+domain rng like driver {
+    program = virtio_rng
+    device source { virtio = 4 }
+    provides entropy { protocol = entropy.v1 }
+}
+
+# Crashes on its first run; Steward rebuilds it.
+domain flaky like dev {
+    program = flaky
+    priority = 150
+    restart = on_fault
+    provides echo { protocol = echo.v1 }
+}
+
+domain hello like dev {
+    program = hello
+    kind = task
+    uses console { from = console.console, protocol = console.v1 }
+    uses entropy { from = rng.entropy, protocol = entropy.v1 }
+}
+
+domain registry like dev {
+    program = registry
+    priority = 180
+    hart = 1
+    provides registry { protocol = registry.v1 }
+}
+
+domain store like dev {
+    program = kv
+    priority = 160
+    hart = 1
+    provides kv { protocol = kv.v1 }
+}
+
+# Envoy runs as a task: the session ends when the agent says bye. Its port is
+# the second virtio console; without one (no agent attached) it is skipped.
+domain envoy like dev {
+    program = envoy
+    kind = task
+    priority = 120
+    hart = 1
+    budget = 2ms
+    memory = 128KiB
+    device port { virtio = 3, instance = 1, optional }
+    uses registry { from = registry.registry, protocol = registry.v1 }
+}
+
+domain checker like dev {
+    program = checker
+    kind = task
+    uses echo { from = flaky.echo, protocol = echo.v1 }
+    uses console { from = console.console, protocol = console.v1 }
+}
+
+# The agent holds these leases from boot, and may ask for the askable ones
+# once each. It never holds anything else.
+agent {
+    envoy = envoy
+    grant echo { from = flaky.echo, protocol = echo.v1, duration = 4s }
+    grant store { from = store.kv, protocol = kv.v1 }
+    grant console { from = console.console, protocol = console.v1, uses = 20 }
+    askable entropy { from = rng.entropy, protocol = entropy.v1, uses = 2 }
+}

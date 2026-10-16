@@ -63,7 +63,7 @@ Each phase ends with something that boots and a test that proves it.
 - Drivers: virtio-console and virtio-rng on modern virtio-mmio.
 - Kernel additions: `Frame.info`, the DTB copied into the root task, and
   power-off needing the `configure` right.
-- Exit, met: the system boots from `system/dev.zon` (two drivers, a service
+- Exit, met: the system boots from `system/dev.zon` (now `dev.brix`; two drivers, a service
   that crashes and is restarted, two tasks; output checked on the virtio
   console). `system/tests/faults.zon` shows the restart limit and
   revocation. `system/tests/miswired.zon` fails to *compile* with the
@@ -80,7 +80,7 @@ Each phase ends with something that boots and a test that proves it.
 - Plus the items still open from Phases 1–2 (fastpath, ASIDs, multi-level
   CSpaces, …). Protocol ids checked by the kernel: done in Phase 4.
 
-## Phase 4: typed interfaces, Registry, Envoy ✅ (Brix in progress)
+## Phase 4: typed interfaces, Registry, Envoy, Brix ✅
 Built:
 - Zig as the IDL (`grain/lib/idl.zig`, `grain/proto/`): typed calls, server
   dispatch, wire encoding, canonical JSON descriptors with effects and undo
@@ -102,8 +102,11 @@ Built:
   and calls services it was leased, is refused once a use-limited lease is
   exhausted and once a timed lease expires, and verifies the audit chain.
 
-In progress (owner decision, 2026-10-16): **Brix**, a declaring language for
-manifests that evaluates to the same checked data.
+- **Brix** (owner decision, 2026-10-16): the manifest language. Templates,
+  units, named blocks; evaluation directed by the schema type; errors with
+  line, column and a fix; the build evaluates `system/*.brix` to the ZON
+  Steward embeds. The converted manifests were checked field by field
+  against the ZON files they replace before those were removed.
 
 ### Left over from Phase 4
 - `ask` decided by a live owner prompt instead of manifest policy (with Seal).
@@ -113,6 +116,8 @@ manifests that evaluates to the same checked data.
 - Envoy reachable over a local socket or the network, not only a virtio console.
 - Why `-icount sleep=on` stalls two-hart boots under QEMU 8.2 is not pinned
   down; real-time runs use free-running TCG instead.
+- Code renames to the owner's proposed names (GLOSSARY.md), now that
+  Phase 4 is done: this needs the owner's go-ahead on the mapping.
 
 ## Phase 5: storage, Ledger, generations, identity
 - virtio-blk driver; Granary (content-addressed, encrypted); Ledger

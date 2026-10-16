@@ -21,7 +21,8 @@ terminal, by a human or an AI, with a pass or fail answer in seconds.**
 zig build test        # host: unit tests, kernel scenarios, manifest, image and IDL tests, short simulator run
 zig build qemu-test   # QEMU riscv64, 2 harts: kernel suite, the dev system, the dev system with an
                       # agent driving Envoy, the faults system, and a miswired manifest that must fail
-zig build check-manifest -Dsystem=system/my.zon   # check a manifest at compile time
+zig build check-manifest -Dsystem=system/my.brix  # check a manifest (Brix or ZON)
+zig-out/bin/brix --print system/my.brix           # what a .brix evaluates to
 zig build sim         # the deterministic simulator (16 seeds × 50k steps); -Dseed=N replays one
 zig build bench -Doptimize=ReleaseFast   # one hart: benchmark and kernel-profile records
 zig build run         # boot in real time with an Envoy socket; connect grainsh or an MCP client
@@ -34,7 +35,10 @@ python3 tools/harness.py --json zig-out/bin/caravan   # records as JSON lines
 The four layers, from fastest to most real:
 
 1. **Unit tests** (`zig test` on the host): the device-tree parser against
-   captured QEMU DTBs, the ELF reader, the record formatter, Sv39 encoding.
+   captured QEMU DTBs, the ELF reader, the record formatter, Sv39 encoding,
+   the IDL, and Brix (syntax, units, templates, and that each error names
+   the right line and column); the shipped `.brix` manifests must evaluate
+   and pass the check.
 2. **Scenario tests** (`sim/kernel_test.zig`): the real kernel core on a
    simulated machine. A test *acts as* the current user thread by setting its
    registers and calling `handle(.syscall)`, then checks the result and the
@@ -78,8 +82,8 @@ The four layers, from fastest to most real:
    uses real time (`--realtime`), so leases expire by the clock; it is the
    one QEMU run that is not deterministic.
 7. **Manifest compile failure:** `zig build check-manifest
-   -Dsystem=system/tests/miswired.zon` must fail, and its stderr must name
-   the missing service.
+   -Dsystem=system/tests/miswired.brix` must fail, and its stderr must name
+   the missing service (brix reports it with the line of the block).
 
 Devices in QEMU (added by the harness): `--virtio-console` attaches a
 virtio console whose output goes to a temporary file (`--show-console`

@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
     // Systems: each is a manifest plus the programs it names, packed into a
     // boot image and embedded in its own Steward. grain-pack refuses an image
     // missing a program, and Steward refuses a miswired manifest at compile time.
-    const system_path = b.option([]const u8, "system", "System manifest for run/steward/check-manifest (default system/dev.zon)") orelse "system/dev.zon";
+    const system_path = b.option([]const u8, "system", "System manifest for run/steward/check-manifest: .brix or .zon (default system/dev.brix)") orelse "system/dev.brix";
     const program_names = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker", "crasher", "waiter", "registry", "kv", "envoy" };
 
     const pack = b.addExecutable(.{ .name = "grain-pack", .root_module = b.createModule(.{
@@ -78,6 +78,27 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
         .imports = &.{ .{ .name = "schema", .module = schema_mod }, .{ .name = "image", .module = image_mod } },
     }) });
+    // Brix, the manifest language: `brix` evaluates a .brix file, runs the
+    // full manifest check, and writes the plain data (ZON) everything else
+    // reads. A .zon manifest is used as it is.
+    const brix_mod = b.createModule(.{ .root_source_file = b.path("grain/brix/brix.zig") });
+    const brix_exe = b.addExecutable(.{ .name = "brix", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/brix/main.zig"),
+        .target = host,
+        .optimize = .Debug,
+        .imports = &.{ .{ .name = "brix", .module = brix_mod }, .{ .name = "schema", .module = schema_mod }, .{ .name = "proto", .module = proto_mod } },
+    }) });
+    b.installArtifact(brix_exe);
+    const Manifest = struct {
+        fn zon(bb: *std.Build, tool: *std.Build.Step.Compile, path: []const u8) std.Build.LazyPath {
+            if (!std.mem.endsWith(u8, path, ".brix")) return bb.path(path);
+            const run = bb.addRunArtifact(tool);
+            run.addFileArg(bb.path(path));
+            return run.addOutputFileArg(bb.fmt("{s}.zon", .{std.fs.path.stem(path)}));
+        }
+    };
+    const system_zon = Manifest.zon(b, brix_exe, system_path);
+
     var programs: [program_names.len]*std.Build.Step.Compile = undefined;
     for (program_names, 0..) |name, i| {
         programs[i] = UserProgram.add(b, name, b.fmt("grain/programs/{s}/main.zig", .{name}), user_target, optimize, user_imports);
@@ -93,20 +114,20 @@ pub fn build(b: *std.Build) void {
         .{ .name = "proto", .module = proto_mod },
     };
     const System = struct {
-        fn steward(bb: *std.Build, label: []const u8, manifest: []const u8, packer: *std.Build.Step.Compile, progs: []const *std.Build.Step.Compile, names: []const []const u8, target: std.Build.ResolvedTarget, opt: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
+        fn steward(bb: *std.Build, label: []const u8, manifest: std.Build.LazyPath, packer: *std.Build.Step.Compile, progs: []const *std.Build.Step.Compile, names: []const []const u8, target: std.Build.ResolvedTarget, opt: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
             const pack_run = bb.addRunArtifact(packer);
             const img = pack_run.addOutputFileArg("system.img");
-            pack_run.addFileArg(bb.path(manifest));
+            pack_run.addFileArg(manifest);
             for (progs, names) |p, name| pack_run.addPrefixedFileArg(bb.fmt("{s}=", .{name}), p.getEmittedBin());
             const s = UserProgram.add(bb, bb.fmt("steward-{s}", .{label}), "grain/steward/main.zig", target, opt, imports);
-            s.root_module.addAnonymousImport("system.zon", .{ .root_source_file = bb.path(manifest) });
+            s.root_module.addAnonymousImport("system.zon", .{ .root_source_file = manifest });
             s.root_module.addAnonymousImport("system.img", .{ .root_source_file = img });
             bb.getInstallStep().dependOn(&bb.addInstallFile(img, bb.fmt("{s}.img", .{label})).step);
             return s;
         }
     };
-    const steward = System.steward(b, "system", system_path, pack, &programs, &program_names, user_target, optimize, steward_imports);
-    const steward_faults = System.steward(b, "faults", "system/tests/faults.zon", pack, &programs, &program_names, user_target, optimize, steward_imports);
+    const steward = System.steward(b, "system", system_zon, pack, &programs, &program_names, user_target, optimize, steward_imports);
+    const steward_faults = System.steward(b, "faults", Manifest.zon(b, brix_exe, "system/tests/faults.brix"), pack, &programs, &program_names, user_target, optimize, steward_imports);
     b.installArtifact(steward);
     b.step("steward", "Build Steward for the system manifest (-Dsystem=...)").dependOn(&b.addInstallArtifact(steward, .{}).step);
 
@@ -118,7 +139,7 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
         .imports = &.{ .{ .name = "schema", .module = schema_mod }, .{ .name = "proto", .module = proto_mod } },
     }) });
-    check.root_module.addAnonymousImport("system.zon", .{ .root_source_file = b.path(system_path) });
+    check.root_module.addAnonymousImport("system.zon", .{ .root_source_file = system_zon });
     b.step("check-manifest", "Check the system manifest at compile time").dependOn(&check.step);
 
     const ktest_root = UserProgram.add(b, "ktest", "grain/ktest/main.zig", user_target, optimize, user_imports);
@@ -247,7 +268,7 @@ pub fn build(b: *std.Build) void {
     qtest_faults.step.dependOn(&qtest_agent.step);
 
     // A miswired manifest must fail to compile, with the explanation.
-    const miswired = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "check-manifest", "-Dsystem=system/tests/miswired.zon" });
+    const miswired = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "check-manifest", "-Dsystem=system/tests/miswired.brix" });
     miswired.expectExitCode(1);
     miswired.expectStdErrMatch("domain 'hello' uses 'console.consol', but no domain provides it");
     miswired.has_side_effects = true;
@@ -283,11 +304,13 @@ pub fn build(b: *std.Build) void {
 
     const schema_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/manifest/schema.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(schema_tests).step);
-    const manifest_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/manifest/manifest_test.zig"), .target = host, .optimize = optimize, .imports = &.{.{ .name = "schema", .module = schema_mod }} }) });
-    manifest_tests.root_module.addAnonymousImport("dev.zon", .{ .root_source_file = b.path("system/dev.zon") });
-    manifest_tests.root_module.addAnonymousImport("miswired.zon", .{ .root_source_file = b.path("system/tests/miswired.zon") });
-    manifest_tests.root_module.addAnonymousImport("faults.zon", .{ .root_source_file = b.path("system/tests/faults.zon") });
+    const manifest_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/manifest/manifest_test.zig"), .target = host, .optimize = optimize, .imports = &.{ .{ .name = "schema", .module = schema_mod }, .{ .name = "brix", .module = brix_mod } } }) });
+    inline for (.{ "dev", "tests/faults", "tests/miswired" }) |name| {
+        manifest_tests.root_module.addAnonymousImport(comptime std.fs.path.basename(name) ++ ".brix", .{ .root_source_file = b.path("system/" ++ name ++ ".brix") });
+    }
     test_step.dependOn(&b.addRunArtifact(manifest_tests).step);
+    const brix_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/brix/brix.zig"), .target = host, .optimize = optimize }) });
+    test_step.dependOn(&b.addRunArtifact(brix_tests).step);
     const idl_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/idl.zig"), .target = host, .optimize = optimize, .imports = &.{ .{ .name = "abi", .module = abi_mod }, .{ .name = "klog", .module = klog_mod } } }) });
     test_step.dependOn(&b.addRunArtifact(idl_tests).step);
     const image_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/manifest/image.zig"), .target = host, .optimize = optimize }) });

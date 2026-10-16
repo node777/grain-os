@@ -1,0 +1,16 @@
+# A deliberately broken manifest: `hello` asks for "console.consol".
+# `zig build qemu-test` checks that the build refuses it, with the reason.
+
+name = miswired
+
+domain console {
+    program = virtio_console
+    device port { virtio = 3 }
+    provides console { protocol = console.v1 }
+}
+
+domain hello {
+    program = hello
+    kind = task
+    uses console { from = console.consol, protocol = console.v1 }
+}
