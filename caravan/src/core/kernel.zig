@@ -40,6 +40,9 @@ pub const max_irqs = 1024;
 pub const page_size: u64 = 4096;
 /// Untyped regions earn one object-table entry per this many bytes.
 pub const bytes_per_object: u64 = 4096;
+/// Longest scheduling period accepted (in timer ticks), so time arithmetic
+/// can never overflow: about 325 days at 10 MHz.
+pub const max_period: u64 = 1 << 48;
 /// Leases can point at leases; resolution stops after this many hops.
 pub const max_lease_depth = 4;
 
@@ -706,8 +709,11 @@ pub fn Kernel(comptime A: type) type {
             const u = k.body(Untyped, ut);
             const lay = try layoutOf(kind, size_bits);
             if (u.is_device and kind != .frame) return error.WrongKind;
-            const child_budget: u32 = if (kind == .untyped) @intCast(lay.size / bytes_per_object) else 0;
-            if (u.objects_left < 1 + child_budget) return error.NoObjects;
+            // Compare in u64: a large child region's budget does not fit in u32,
+            // but such a region can never fit in our budget either.
+            const child_budget64: u64 = if (kind == .untyped) lay.size / bytes_per_object else 0;
+            if (@as(u64, u.objects_left) < 1 + child_budget64) return error.NoObjects;
+            const child_budget: u32 = @intCast(child_budget64);
 
             // Untyped children need a body too (from the top of this region).
             const body_bytes: u64 = if (kind == .untyped) 64 else 0;
@@ -1065,11 +1071,34 @@ pub fn Kernel(comptime A: type) type {
                         if (server.reply_to == t.id) server.reply_to = 0;
                     }
                     t.reply_from = 0;
+                    // Take back a context this caller lent along its call.
+                    k.reclaimLent(t);
                 },
                 .stalled, .inactive => {},
             }
             t.queue = 0;
             t.state = .inactive;
+        }
+
+        /// If `t`'s scheduling context is held by another thread (lent along
+        /// a call), take it from that thread, which stalls if it was running
+        /// on it. Afterwards the context's holder is `t` again.
+        fn reclaimLent(k: *Self, t: *Thread) void {
+            if (!k.alive(t.sc, .sched_context)) return;
+            const sc = k.body(SchedContext, t.sc);
+            if (sc.holder == t.id or !k.alive(sc.holder, .thread)) {
+                sc.holder = t.id;
+                return;
+            }
+            const holder = k.thread(sc.holder);
+            if (holder.sc == t.sc) {
+                holder.sc = 0;
+                if (holder.state == .ready or holder.state == .running) {
+                    k.detach(holder);
+                    holder.state = .stalled;
+                }
+            }
+            sc.holder = t.id;
         }
 
         fn destroyThread(k: *Self, t: *Thread) void {
@@ -1176,8 +1205,8 @@ pub fn Kernel(comptime A: type) type {
         fn refill(k: *Self, sc: *SchedContext) void {
             sc.remaining = sc.budget;
             sc.throttled = false;
-            sc.refill_at += sc.period;
-            if (sc.refill_at <= k.now) sc.refill_at = k.now + sc.period;
+            sc.refill_at +|= sc.period;
+            if (sc.refill_at <= k.now) sc.refill_at = k.now +| sc.period;
         }
 
         /// The running thread has used its budget: round-robin if its context
@@ -1243,7 +1272,7 @@ pub fn Kernel(comptime A: type) type {
             var deadline: u64 = std.math.maxInt(u64);
             if (h.current != 0) {
                 const t = k.thread(h.current);
-                if (k.alive(t.sc, .sched_context)) deadline = k.now + k.body(SchedContext, t.sc).remaining;
+                if (k.alive(t.sc, .sched_context)) deadline = k.now +| k.body(SchedContext, t.sc).remaining;
             }
             if (h.release_head != 0) deadline = @min(deadline, k.body(SchedContext, h.release_head).refill_at);
             // Only move the timer earlier. A timer that fires early costs one
@@ -1827,6 +1856,8 @@ pub fn Kernel(comptime A: type) type {
                         if (k.alive(old, .sched_context)) {
                             const sc = k.body(SchedContext, old);
                             sc.owner = 0;
+                            // If it is lent out, take it back first.
+                            if (target.sc == old) k.reclaimLent(target);
                             if (target.sc == old) {
                                 target.sc = 0;
                                 sc.holder = 0;
@@ -1938,7 +1969,7 @@ pub fn Kernel(comptime A: type) type {
             const budget = arg(t, .a3);
             const period = arg(t, .a4);
             const hart = std.math.cast(u8, arg(t, .a5)) orelse return error.InvalidArgument;
-            if (budget == 0 or period == 0 or budget > period or hart >= k.hart_count) return error.InvalidArgument;
+            if (budget == 0 or period == 0 or budget > period or period > max_period or hart >= k.hart_count) return error.InvalidArgument;
             const sc = k.body(SchedContext, scc.object);
             k.removeRelease(scc.object);
             // A thread on this context moves with it.
@@ -1954,7 +1985,7 @@ pub fn Kernel(comptime A: type) type {
             sc.budget = budget;
             sc.period = period;
             sc.remaining = budget;
-            sc.refill_at = k.now + period;
+            sc.refill_at = k.now +| period;
             sc.hart = hart;
             sc.configured = true;
             sc.throttled = false;

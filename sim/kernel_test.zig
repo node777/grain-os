@@ -340,3 +340,52 @@ test "destroying a server aborts its waiting caller" {
     try expectEqual(abi.Status.aborted, Machine.result(m.root).status);
     try expectEqual(abi.Status.invalid_cap, (try identify(&m, 110)).status);
 }
+
+/// Root becomes a caller lending its context to a passive server. Returns the server.
+fn lendToPassiveServer(m: *Machine) !*machine.Thread {
+    try retype(m, .endpoint, 0, 100);
+    const server = try spawn(m, 110, 111, 200, 50_000, 50_000);
+    _ = try m.invoke(0, 110, abi.ThreadMethod.resume_thread, &.{});
+    _ = try m.invoke(0, S.thread, abi.ThreadMethod.set_priority, &.{100});
+    _ = try m.sys(0, .recv, 100, 0, &.{}); // as the server
+    _ = try m.invoke(0, 110, abi.ThreadMethod.bind_sched, &.{0});
+    // Spawn a helper so someone can act while the root waits for its reply.
+    _ = try m.sys(0, .call, 100, 0, &.{});
+    try std.testing.expect(m.current(0) == server);
+    try expectEqual(m.root.sc, server.sc);
+    return server;
+}
+
+test "suspending a caller takes back the context its server borrowed" {
+    var m = try bootMachine();
+    defer m.deinit();
+    const server = try lendToPassiveServer(&m);
+    // The server (acting now) suspends the root, which is waiting for its reply.
+    _ = try m.invoke(0, S.thread, abi.ThreadMethod.suspend_thread, &.{});
+    try expectEqual(@as(u32, 0), server.sc);
+    try expectEqual(abi.ThreadState.inactive, m.root.state);
+    try std.testing.expect(server.state != .running);
+    // Resuming the root must not make two threads share one context.
+    m.k.handle(0, m.now, .ipi);
+    try m.check();
+}
+
+test "unbinding a lent context takes it from the server too" {
+    var m = try bootMachine();
+    defer m.deinit();
+    const server = try lendToPassiveServer(&m);
+    _ = try m.invoke(0, S.thread, abi.ThreadMethod.bind_sched, &.{0});
+    try expectEqual(@as(u32, 0), server.sc);
+    try expectEqual(@as(u32, 0), m.root.sc);
+}
+
+test "huge sizes and periods are refused, not overflowed" {
+    var m = try bootMachine();
+    defer m.deinit();
+    const r = try m.invoke(0, first_untyped, abi.UntypedMethod.retype, &.{ @backingInt(abi.Kind.untyped), 47, 100 });
+    try expectEqual(abi.Status.no_objects, r.status);
+    try retype(&m, .sched_context, 0, 101);
+    const big = std.math.maxInt(u64);
+    try expectEqual(abi.Status.invalid_argument, (try m.invoke(0, S.sched_control, abi.SchedControlMethod.configure, &.{ 101, big, big, 0 })).status);
+    try expectEqual(abi.Status.ok, (try m.invoke(0, S.sched_control, abi.SchedControlMethod.configure, &.{ 101, 1 << 48, 1 << 48, 0 })).status);
+}
