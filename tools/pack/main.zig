@@ -30,11 +30,21 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidManifest;
     }
 
+    // Only the programs the manifest names go in: the closure covers exactly
+    // what this system runs.
     var programs: std.ArrayList(image.Program) = .empty;
     for (args[3..]) |a| {
         const eq = std.mem.indexOfScalar(u8, a, '=') orelse return error.InvalidArgument;
+        const name = a[0..eq];
+        const named = for (m.domains) |d| {
+            if (std.mem.eql(u8, d.program, name)) break true;
+        } else false;
+        const dup = for (programs.items) |p| {
+            if (std.mem.eql(u8, p.name, name)) break true;
+        } else false;
+        if (!named or dup) continue;
         const bytes = try cwd.readFileAlloc(io, a[eq + 1 ..], arena, .unlimited);
-        try programs.append(arena, .{ .name = a[0..eq], .bytes = bytes });
+        try programs.append(arena, .{ .name = name, .bytes = bytes });
     }
     for (m.domains) |d| {
         const have = for (programs.items) |p| {

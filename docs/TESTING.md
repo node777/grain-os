@@ -15,11 +15,13 @@ terminal, by a human or an AI, with a pass or fail answer in seconds.**
 
 `tools/setup.sh` installs all of these on Debian/Ubuntu.
 
-## The loop today (Phase 2)
+## The loop today (Phase 3)
 
 ```sh
-zig build test        # host: unit tests, kernel scenario tests, a short simulator run
-zig build qemu-test   # QEMU riscv64, 2 harts: boot, run the root task's suite, check records
+zig build test        # host: unit tests, kernel scenarios, manifest + image tests, short simulator run
+zig build qemu-test   # QEMU riscv64, 2 harts: kernel suite, the dev system, the faults system,
+                      # and a miswired manifest that must fail to compile
+zig build check-manifest -Dsystem=system/my.zon   # check a manifest at compile time
 zig build sim         # the deterministic simulator (16 seeds × 50k steps); -Dseed=N replays one
 zig build bench -Doptimize=ReleaseFast   # one hart: benchmark and kernel-profile records
 zig build run         # boot interactively (Ctrl-A X quits QEMU)
@@ -43,13 +45,38 @@ The four layers, from fastest to most real:
    more, the machine reboots within the same seed. Every seed runs twice, and
    the final kernel memory must hash identically. A failure prints the seed
    and step; `--seed N --trace` replays it.
-4. **QEMU** (`qemu-test`): the root task runs the suite from user mode on 2
-   harts. That covers boot info, capability identity, mint and revoke, thread
+4. **QEMU, kernel suite** (`caravan-ktest`): the kernel test program runs as
+   root task, on 2 harts. That covers boot info, capability identity, mint and revoke, thread
    signalling, a passive server, fault handling with retry, leases, CPU
    budgets, untyped reset, a UART interrupt, tearing down an address space
    while it runs on the other hart, and a cross-hart call. Results are
    `@grain test ...` records, and the exit status comes from the test
    finisher.
+
+5. **QEMU, whole systems** (`caravan`, `caravan-faults`): Steward boots a
+   manifest, and the harness checks the records. For the dev system that
+   means: the image verified, both drivers ready, flaky faulted and was
+   rebuilt (restart=1), checker's echo answered 42, hello exited 0, and
+   the summary. It also checks the virtio console's output file: hello's
+   greeting, with the entropy bytes the virtio-rng device read from a
+   fixed pattern file, and checker's line. The faults system checks the
+   restart limit, service revocation and that the client was not left
+   hanging.
+6. **Manifest compile failure:** `zig build check-manifest
+   -Dsystem=system/tests/miswired.zon` must fail, and its stderr must name
+   the missing service.
+
+Devices in QEMU (added by the harness): `--virtio-console` attaches a
+virtio console whose output goes to a temporary file (`--show-console`
+prints it, `--expect-console TEXT` checks it). `--virtio-rng=FILE` attaches
+a virtio entropy device reading FILE. Both use the modern transport
+(`-global virtio-mmio.force-legacy=false`).
+
+**Determinism with devices:** the kernel suite is byte-identical run to run.
+For whole systems, the sequence of records is identical every run, but
+instruction-level counters (context switches, profile averages) can vary a
+little, because QEMU's rng backend reads its file on the host's I/O thread.
+Bit-exact runs with devices need QEMU record/replay (`-icount rr=…`).
 
 How a QEMU test reports:
 

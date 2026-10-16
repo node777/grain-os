@@ -49,15 +49,36 @@ Each phase ends with something that boots and a test that proves it.
 - Preemptible `Untyped.reset` for very large regions.
 - Ledger mode (event recording for replay and audit).
 
-## Phase 3: the manifest and Steward
-- The `grain.zon` manifest format; `comptime` validation of the wiring;
-  the build packs kernel, Steward and domains into one image with a BLAKE3
-  closure hash.
-- Steward: starts domains, wires capabilities, restarts on fault.
-- First userspace drivers: virtio-console (with a second port for Envoy),
-  virtio-rng.
-- Exit: the system boots from a manifest; a miswired manifest fails to
-  *compile* with a readable error.
+## Phase 3: the manifest and Steward ✅
+- The manifest schema (`grain/manifest/schema.zig`) and one validator used
+  at compile time (in Steward) and at run time (host tests, `grain-pack`).
+  It covers wiring, protocols, priorities, memory, per-hart CPU commitments
+  and call cycles.
+- The boot image with BLAKE3 program hashes and a closure hash, built by
+  `tools/pack` and verified by Steward at boot.
+- Steward: domains in private regions, badged service wiring, devices from
+  the device tree, the `DomainInfo` contract, a lifecycle endpoint, restart
+  on fault with limits, revoking a dead provider's services, and a summary
+  and halt for test systems.
+- Drivers: virtio-console and virtio-rng on modern virtio-mmio.
+- Kernel additions: `Frame.info`, the DTB copied into the root task, and
+  power-off needing the `configure` right.
+- Exit, met: the system boots from `system/dev.zon` (two drivers, a service
+  that crashes and is restarted, two tasks; output checked on the virtio
+  console). `system/tests/faults.zon` shows the restart limit and
+  revocation. `system/tests/miswired.zon` fails to *compile* with the
+  explanation.
+
+### Left over from Phase 3
+- A second virtio-console device for Envoy (Phase 4).
+- Passive services (running on their clients' time) as a manifest option.
+- Frame aliases, so shared-memory channels can carry bulk data instead of
+  32-byte messages.
+- Bit-exact replay with devices attached: under plain `-icount`, host I/O
+  timing (the rng backend) changes instruction counts between runs. What
+  happens is identical every run, but exact counts need QEMU record/replay.
+- Plus the items still open from Phases 1–2 (fastpath, ASIDs, protocol ids
+  checked by the kernel, multi-level CSpaces, …).
 
 ## Phase 4: typed interfaces, Registry, Envoy
 - Zig-as-IDL protocol definitions → generated stubs and descriptors; protocol
@@ -106,7 +127,8 @@ Each phase ends with something that boots and a test that proves it.
   the capability model.
 
 ## Owner decisions
-- **Milestone:** build through Phase 2 before the next review (done).
+- **Milestone:** build through Phase 2 before the next review (done); then
+  Phase 3 (done).
 - **Primary use case:** a personal device.
 - **Social:** every instance has a shareable identity, used to move data,
   host applications and connect with other people's instances (inspired by

@@ -239,26 +239,91 @@ ABI file, so a person or an agent can read the whole contract in one place.
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.1 Manifest, Steward, generations (from NixOS)
+### 3.1 Manifest, image, Steward (from NixOS, Hubris and Microkit)
 
-- The **manifest** (`grain.zon`, Zig Object Notation) declares domains,
-  their binaries (by content hash), memory budgets, scheduling contexts, the
-  capabilities each one gets, and how they are wired together.
-- **The manifest is checked at compile time.** `zig build` imports it and
-  checks, at `comptime`, that every wire connects compatible protocols, that
-  no domain gets rights it shouldn't, and that memory budgets fit. A badly
-  wired system doesn't build.
-- **Steward** (the root domain) holds the initial capabilities, starts the
-  domains the manifest lists, supervises and restarts them (Hubris-style),
-  and does nothing else.
-- **Generations:** a built system is a closure in the Granary, named by its
-  hash. Boot loads the current generation and measures it. Upgrades build a
-  new generation and switch atomically; rollback switches back. Boot always
-  offers the last known-good generation.
-- **Static core, dynamic edge:** the base system is fully static, like
-  Hubris and Microkit. Dynamic behaviour (installing apps, starting agents)
-  happens through a *spawner* service that holds an explicit untyped budget,
-  so dynamism is itself a capability the manifest grants.
+> **Status (Phase 3):** implemented and tested, except generations and the
+> spawner, which are marked *planned*.
+
+**The manifest** (`system/*.zon`, typed by `grain/manifest/schema.zig`) is
+plain data. It lists domains, and for each one: its program, kind (`service`
+or `task`), priority, hart, CPU budget and period, memory, restart policy,
+the services it provides (name and protocol), the services it uses
+(`"<domain>.<service>"` and the protocol it expects), its devices (by virtio
+id), and whether it gets a write-only debug console.
+
+```zig
+.{ .name = "hello", .program = "hello", .kind = .task,
+   .uses = .{ .{ .name = "console", .from = "console.console", .protocol = "console.v1" },
+              .{ .name = "entropy", .from = "rng.entropy", .protocol = "entropy.v1" } } },
+```
+
+**One validator, two places.** `schema.validate` checks names, uniqueness,
+that every use resolves to a provider, that protocols match, priority
+ranges, budget ≤ period, memory sizes, known device ids, that each hart
+promises at most 90% of its time, and that no cycle of synchronous calls
+exists (which could deadlock). It returns one sentence naming the problem.
+Steward runs it **at compile time**, so a miswired system does not build:
+
+```
+error: system manifest: domain 'hello' uses 'console.consol', but no domain provides it (write it as "<domain>.<service>")
+```
+
+and host tests run it at run time, so every message is tested.
+`zig build check-manifest -Dsystem=<file>` runs the compile-time check on
+its own.
+
+**The boot image** (`grain/manifest/image.zig`, written by `tools/pack`)
+holds the manifest text and every program it names, each with its BLAKE3
+hash, plus a **closure hash** over the manifest's hash and every
+(name, hash) pair. The closure hash names the whole system, as a NixOS
+store path does: the same inputs give the same hash. Steward recomputes
+every hash at boot and refuses to start if any differs.
+
+**Steward** is the root task. It:
+
+1. Verifies the image and reports `steward_start closure=… verified=true`.
+2. Finds `virtio,mmio` transports in the device tree (the kernel copies the
+   DTB into the root task), probes each one's device id, and keeps their
+   MMIO frames. It creates an `Irq` the first time a device is assigned.
+3. Creates one endpoint per provided service *in its own memory*, so the
+   endpoint outlives the provider's restarts.
+4. Builds each domain in a **private untyped region** sized from the
+   program, stack, tables and the manifest's `memory_kib`. That covers the
+   CNode, root page table, program pages (copied through a scratch window),
+   stack, IPC buffer, a `DomainInfo` page, a child untyped of `memory_kib`
+   for the domain's own use, a scheduling context with the manifest's
+   budget, and the thread. Each object is charged to the domain's region.
+5. Wires capabilities with badges. A client gets its provider's endpoint
+   with send and grant rights, badged with the client's number, so servers
+   know who is calling. The provider gets receive rights. Drivers get
+   their MMIO frame (mapped at a fixed address) and their `Irq`.
+6. Serves the **lifecycle endpoint**. Tasks call it to exit with a code.
+   Faults arrive on the same endpoint with a fault badge. A faulting domain
+   is torn down by resetting its region, which destroys everything it was
+   made of in one call. If its policy is `on_fault` and it is under
+   `max_restarts`, it is rebuilt from its image (`DomainInfo.restart_count`
+   tells it which run this is). Otherwise it is stopped, and **its
+   endpoints are revoked**, so clients waiting on it are woken with
+   `aborted` and later calls fail with `invalid_cap` instead of hanging.
+7. With `halt_when_tasks_finish`, it prints one `domain_status` record per
+   domain and a `summary` once every task has finished, then powers off.
+
+**The domain contract** (`grain/lib/domain.zig`): fixed capability slots
+(the domain's own CNode, address space, thread, memory and lifecycle
+endpoint, then uses at 16+, provides at 24+, devices at 32+), fixed
+addresses (program at 0x10000, devices at 0x7000_0000, `DomainInfo` at
+0x7ff0_0000, stack below 0x7fff_0000), and the `DomainInfo` page, which
+names everything the domain was given: its uses and provides with
+protocols and slots, its devices with MMIO address, IRQ line and slots,
+its program hash and the system's closure hash. Programs look things up by
+name (`grain.use("console")`, `grain.device("port")`). Nothing is wired by
+an unwritten convention.
+
+- *Planned (Phase 5):* **generations.** Keep built closures in the Granary,
+  switch between them atomically, and roll back to the last known-good one.
+- *Planned:* a **spawner** service with an explicit untyped budget, so
+  dynamic programs (apps, agents) are a capability the manifest grants
+  rather than an exception to it.
 
 ### 3.2 Typed interfaces and the Registry
 
@@ -321,7 +386,17 @@ is a **principal** with its own leased capabilities. It is never root.
   capabilities. Once the IOMMU is in use, a driver can DMA only into memory
   it was granted.
 - **virtio first** (console, block, net, rng, gpu, input). This covers QEMU
-  and most cloud VMs on every architecture.
+  and most cloud VMs on every architecture. *Built:* the modern (1.x)
+  virtio-mmio transport and split virtqueues in `grain/lib/virtio.zig`;
+  `virtio_console` (one port, with per-client line buffering so concurrent
+  writers never tear each other's lines) and `virtio_rng`. Drivers program
+  DMA with physical addresses from `Frame.info`. Until the IOMMU is in use,
+  a driver with a DMA-capable device is trusted with memory; that is the
+  main reason drivers are separate domains with their own regions.
+- *Changed from the plan:* the Envoy channel will be a **second
+  virtio-console device** rather than a second port of the first one.
+  Multiport needs a control queue; two devices are simpler and just as
+  isolated.
 - **Native drivers only** (owner decision: no compatibility layer). For a
   personal device that means, in order: virtio (all of QEMU), then NVMe,
   xHCI USB with HID and mass storage, a framebuffer and GPU display path,

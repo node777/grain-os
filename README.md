@@ -11,32 +11,35 @@ an audit ledger), and **loyal** (it answers to its owner only).
 
 RISC-V is the primary target; aarch64 and x86_64 follow.
 
-> Status: **Phase 2 complete.** Caravan is a working capability microkernel
-> on QEMU `virt` (riscv64, SMP). It has capabilities with O(1) revocation and
-> leases, untyped memory, Sv39 address spaces, threads, IPC with capability
-> transfer, signals, interrupts as signals, user-mode fault handling, and
-> MCS scheduling with donation. The portable core also runs in a
-> deterministic simulator that checks every invariant after every step.
+> Status: **Phase 3 complete.** Caravan is a working capability microkernel
+> on QEMU `virt` (riscv64, SMP). On top of it, **Steward** builds a whole
+> system from a declarative manifest. The manifest is checked at compile time
+> and packed into a BLAKE3-hashed boot image. Each domain gets its own memory,
+> CPU budget, services and devices. Domains restart on fault. The first
+> userspace drivers are virtio-console and virtio-rng.
 
 ## Quick start
 
 ```sh
 tools/setup.sh        # Zig 0.17.0, QEMU, OpenSBI, gdb-multiarch (Debian/Ubuntu)
 zig build test        # host: unit tests, kernel scenario tests, short simulator run
-zig build qemu-test   # QEMU, 2 harts: the root task runs the kernel test suite
+zig build qemu-test   # QEMU, 2 harts: kernel suite, the dev and faults systems, a miswired manifest
+zig build run         # boot the dev system and show its records and console output
 zig build sim         # deterministic simulator: random events, invariants every step
 zig build bench -Doptimize=ReleaseFast   # benchmark and kernel-profile records
-zig build run         # boot interactively (Ctrl-A X to quit)
 ```
 
 ```
-@caravan boot kernel=caravan arch=riscv64 hart=0 harts=2 timebase_hz=10000000 dtb=0x8fe00000 image=0x80200000
-@caravan root_task thread=25 entry=0x10000 untyped=19
-@grain test name=call_passive_server result=pass
-@grain test name=leases result=pass
-@grain test name=foreign_teardown_on_other_hart result=pass
-@grain test name=cross_hart_call result=pass
-@grain summary tests=13 failed=0
+@grain steward_start system=grain-dev domains=5 programs=5 harts=2 closure=… verified=true
+@grain driver_ready domain=console device=virtio_console mmio=0x10007000 irq=7
+@grain driver_ready domain=rng device=virtio_rng mmio=0x10008000 irq=8
+@grain domain_fault domain=flaky kind=store_page_fault addr=0x10 pc=0x27d24 restarts=0
+@grain domain_start domain=flaky program=flaky … restart=1
+@grain echo_ok domain=checker answer=42 badge_seen_by_server=5
+@grain hello domain=hello entropy=00f3e6dacdc0b4a7 console_bytes=43
+@grain summary tests=2 failed=0
+console| hello from grain! entropy 00f3e6dacdc0b4a7
+console| checker: flaky.echo answered 42
 ```
 
 ## Documents
@@ -54,8 +57,13 @@ caravan/abi/abi.zig          the system-call contract shared by kernel and user 
 caravan/src/core/            portable kernel core: kernel.zig (state machine), fdt, elf, klog
 caravan/src/arch/riscv64/    boot (Sv39, higher half), traps, SBI, PLIC, the arch interface
 caravan/src/main.zig         riscv64 glue: harts, kernel lock, traps → kernel.handle
-grain/lib/grain.zig          libgrain: system-call stubs, methods, @grain records
-grain/root/main.zig          the root task (today: the kernel test suite and benchmarks)
+grain/lib/                   libgrain: system calls, domain environment, virtio, protocols
+grain/manifest/              manifest schema + validator, boot-image format
+grain/steward/main.zig       Steward: builds and supervises the system from the manifest
+grain/programs/              drivers (virtio_console, virtio_rng) and programs
+grain/ktest/main.zig         the kernel test suite (root task of caravan-ktest)
+system/                      manifests: dev.zon, tests/faults.zon, tests/miswired.zon
+tools/pack/                  grain-pack: manifest + programs -> hashed boot image
 sim/                         simulated machine, scenario tests, caravan-sim
 tools/harness.py             boots QEMU, parses records, sets the exit status
 tools/setup.sh               toolchain installer

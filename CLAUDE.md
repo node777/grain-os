@@ -18,4 +18,10 @@
   `@grain` from user space): `<event> k=v`, names `[a-z0-9_]`.
 - Benchmarks: run `zig build bench -Doptimize=ReleaseFast` (one hart). Under
   QEMU -icount, counters on multi-hart runs include other harts' work.
+- Systems are manifests in `system/`. A new program goes in
+  `grain/programs/<name>/main.zig` (with `comptime { grain.exportStart(); }`
+  and `pub fn main() !u16`), and its name in `program_names` in build.zig.
+  Domain-facing contracts live in `grain/lib/domain.zig` and `protocols.zig`.
+- Manifest checks live in `schema.validate`; each new rule needs a test with
+  its message in `schema.zig`.
 - Design changes go into `docs/ARCHITECTURE.md` in the same commit as the code.
