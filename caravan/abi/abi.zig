@@ -255,6 +255,12 @@ pub const VSpaceMethod = enum(u32) {
     unmap = 3,
 };
 
+pub const FrameMethod = enum(u32) {
+    /// () -> a2 = physical address, a3 = size in bytes, a4 = is device memory,
+    /// a5 = is mapped. Drivers need the physical address to program DMA.
+    info = 1,
+};
+
 pub const SchedControlMethod = enum(u32) {
     /// (sched_context_cptr, budget_ticks, period_ticks, hart)
     configure = 1,
@@ -286,7 +292,8 @@ pub const LeaseMethod = enum(u32) {
 pub const DebugMethod = enum(u32) {
     /// (byte count ≤ 32, then up to 32 bytes packed little-endian in a3..a6)
     write = 1,
-    /// (code) power off; code 0 means success.
+    /// (code) power off; code 0 means success. Needs the `configure` right,
+    /// so a write-only console capability can be handed out safely.
     exit = 2,
     /// () -> a2 = time (ticks), a3 = timebase Hz
     time = 3,
@@ -313,6 +320,9 @@ pub const root_cnode_bits = 12;
 
 /// Fixed user addresses the kernel uses when it builds the root task.
 pub const RootLayout = struct {
+    /// A read-only copy of the device tree (up to `max_dtb_pages` pages).
+    pub const dtb: usize = 0x7fe0_0000;
+    pub const max_dtb_pages = 64;
     pub const boot_info: usize = 0x7ff0_0000;
     pub const ipc_buffer: usize = 0x7ff1_0000;
     pub const stack_top: usize = 0x7fff_0000;
@@ -340,6 +350,9 @@ pub const BootInfo = extern struct {
     root_cnode_slots: u32,
     user_top: u64,
     page_size: u64,
+    /// Where the device-tree copy is mapped, and its size (0 if none).
+    dtb_addr: u64,
+    dtb_size: u64,
     untyped: [max_boot_untyped]UntypedDesc,
 };
 pub const boot_info_magic: u64 = 0x6772_6169_6e5f_6269; // "grain_bi"

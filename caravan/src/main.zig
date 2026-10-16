@@ -309,6 +309,7 @@ export fn kmain(hart_id: usize, dtb_pa: usize) callconv(.c) noreturn {
         .platform = &platform,
         .reserved = &reserved,
         .root_elf = root_elf,
+        .dtb = @as([*]const u8, @ptrFromInt(arch.physToVirt(dtb_pa)))[0..fdt.totalSize()],
         .now = csr.time(),
         .root_budget_ticks = platform.timebase_hz / 1000 * root_slice_ms,
     }) catch |e| {

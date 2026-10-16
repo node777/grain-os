@@ -164,6 +164,8 @@ pub const BootConfig = struct {
     /// Physical ranges the kernel must not hand out (kernel image, DTB, …).
     reserved: []const fdt.Range,
     root_elf: []const u8,
+    /// The device tree, copied read-only into the root task (may be empty).
+    dtb: []const u8 = &.{},
     now: u64,
     root_budget_ticks: u64,
 };
@@ -575,6 +577,17 @@ pub fn Kernel(comptime A: type) type {
                 try k.mapRootPage(ut, vspace, f, L.stack_top - (p + 1) * page_size, rw);
             }
 
+            // A read-only copy of the device tree, so the root task can find devices.
+            const dtb_pages = @min(std.math.divCeil(usize, cfg.dtb.len, page_size) catch 0, L.max_dtb_pages);
+            const dtb_len = @min(cfg.dtb.len, dtb_pages * page_size);
+            for (0..dtb_pages) |p| {
+                const f = try k.retypeInternal(ut, .frame, 12);
+                const dst: [*]u8 = @ptrFromInt(A.physToVirt(k.table[f].addr));
+                const n = @min(page_size, dtb_len - p * page_size);
+                @memcpy(dst[0..n], cfg.dtb[p * page_size ..][0..n]);
+                try k.mapRootPage(ut, vspace, f, L.dtb + p * page_size, ro);
+            }
+
             const img = try elf.Image.parse(cfg.root_elf, A.elf_machine);
             var segs = img.segments();
             while (try segs.next()) |seg| {
@@ -621,6 +634,8 @@ pub fn Kernel(comptime A: type) type {
                 .root_cnode_slots = 1 << abi.root_cnode_bits,
                 .user_top = P.user_top,
                 .page_size = page_size,
+                .dtb_addr = if (dtb_len > 0) L.dtb else 0,
+                .dtb_size = dtb_len,
                 .untyped = undefined,
             };
             for (all_untyped, 0..) |u, j| {
@@ -1693,6 +1708,7 @@ pub fn Kernel(comptime A: type) type {
                 .irq => try k.invokeIrq(t, c, method),
                 .lease => try k.invokeLease(t, c, method),
                 .debug_console => try k.invokeDebug(t, c, method),
+                .frame => try k.invokeFrame(t, c, method),
                 else => return error.UnknownMethod,
             }
         }
@@ -2056,6 +2072,13 @@ pub fn Kernel(comptime A: type) type {
             setResult(t, .ok, &.{});
         }
 
+        fn invokeFrame(k: *Self, t: *Thread, c: Cap, method: u32) Error!void {
+            _ = std.enums.fromInt(abi.FrameMethod, method) orelse return error.UnknownMethod;
+            try need(c, .{ .read = true });
+            const e = k.table[c.object];
+            setResult(t, .ok, &.{ e.addr, @as(u64, 1) << @intCast(e.size_bits), @intFromBool(e.flags & flag_device != 0), @intFromBool(e.link != 0) });
+        }
+
         fn invokeDebug(k: *Self, t: *Thread, c: Cap, method: u32) Error!void {
             const m = std.enums.fromInt(abi.DebugMethod, method) orelse return error.UnknownMethod;
             switch (m) {
@@ -2071,7 +2094,7 @@ pub fn Kernel(comptime A: type) type {
                     setResult(t, .ok, &.{});
                 },
                 .exit => {
-                    try need(c, .{ .write = true });
+                    try need(c, .{ .configure = true });
                     k.log("halt", .{ .reason = "root_exit", .code = arg(t, .a2), .syscalls = k.stats.syscalls, .ipc = k.stats.ipc_transfers, .switches = k.stats.context_switches });
                     k.exit_code = @truncate(arg(t, .a2));
                     setResult(t, .ok, &.{});

@@ -408,3 +408,18 @@ test "a budget that runs out during a call is still refilled (no lost wakeup)" {
     try std.testing.expect(m.current(0) == server);
     try std.testing.expect(!m.k.stuck());
 }
+
+test "frame info reports physical address; exit needs configure" {
+    var m = try bootMachine();
+    defer m.deinit();
+    try retype(&m, .frame, 12, 100);
+    const r = try m.invoke(0, 100, abi.FrameMethod.info, &.{});
+    try expectEqual(abi.Status.ok, r.status);
+    try std.testing.expect(r.words[0] >= machine.arch.ram_base and r.words[0] % 4096 == 0);
+    try expectEqual(@as(u64, 4096), r.words[1]);
+    try expectEqual(@as(u64, 0), r.words[3]);
+    // A write-only console capability can print but not power off.
+    _ = try m.invoke(0, S.cnode, abi.CNodeMethod.mint, &.{ 101, S.debug_console, (abi.Rights{ .write = true }).bits(), 0 });
+    try expectEqual(abi.Status.no_rights, (try m.invoke(0, 101, abi.DebugMethod.exit, &.{0})).status);
+    try std.testing.expect(m.k.exitRequested() == null);
+}

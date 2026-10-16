@@ -159,6 +159,13 @@ fn testBootInfo() !void {
     g.record("boot_info", .{ .harts = boot_info.hart_count, .untyped = boot_info.untyped_count, .timebase_hz = boot_info.timebase_hz });
 }
 
+fn testDeviceTree() !void {
+    try check(boot_info.dtb_size >= 40);
+    const p: [*]const u8 = @ptrFromInt(boot_info.dtb_addr);
+    try check(std.mem.readInt(u32, p[0..4], .big) == 0xd00dfeed);
+    try check(std.mem.readInt(u32, p[4..8], .big) <= boot_info.dtb_size);
+}
+
 fn testIdentify() !void {
     const want = [_]struct { g.CPtr, Kind }{
         .{ S.cnode, .cnode },                 .{ S.vspace, .page_table },       .{ S.thread, .thread },
@@ -505,6 +512,7 @@ export fn rootMain(bi: *const abi.BootInfo) callconv(.c) noreturn {
     g.record("root_start", .{ .first_free_slot = bi.first_free_slot, .untyped = bi.untyped_count, .harts = bi.hart_count });
 
     run("boot_info", testBootInfo);
+    run("device_tree", testDeviceTree);
     run("identify_root_caps", testIdentify);
     run("mint_and_revoke", testMintRevoke);
     run("thread_signal", testThreadSignal);
