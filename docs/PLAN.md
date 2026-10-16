@@ -55,39 +55,51 @@ Each phase ends with something that boots and a test that proves it.
 - Exit: an agent on the host discovers and calls a service it was leased,
   and is refused after the lease expires.
 
-## Phase 5: storage, Ledger, generations
+## Phase 5: storage, Ledger, generations, identity
 - virtio-blk driver; Granary (content-addressed, encrypted); Ledger
   (hash-chained).
 - Generations and rollback: build a new generation, switch, roll back, all
   through Envoy.
+- Seal: first-boot identity creation, device keys, pronounceable names,
+  petnames.
 - Exit: upgrade and rollback survive a forced power-off at every step (in the
-  simulator and in QEMU).
+  simulator and in QEMU); the identity persists across reboots and rollbacks.
 
-## Phase 6: networking and the social layer
-- virtio-net, a userspace TCP/IP stack, an OCapN/CapTP-style protocol for
-  sturdy references across machines, petnames.
-- Exit: two QEMU Grain machines share a directory by passing a capability,
-  then revoke it.
+## Phase 6: the personal desktop
+- virtio-gpu and virtio-input drivers, a compositor domain, a minimal
+  widget toolkit, the structured shell as the first graphical app.
+- Testing through QMP screendump images and injected input.
+- Exit: boot to a desktop; open the shell; every visible element can be
+  inspected as typed data through Envoy.
 
-## Phase 7: reach
-- aarch64 and x86_64 ports (same suite on QEMU); a Linux guest VM through the
-  RISC-V H extension for hardware and app compatibility; virtio-gpu and a
-  minimal compositor; RISC-V IOMMU; real-board bring-up.
+## Phase 7: the social layer
+- virtio-net, a userspace UDP/IP stack, Courier (identity-addressed,
+  Noise-encrypted sessions, LAN discovery, friend relays).
+- Sturdy references backed by Leases; hosted apps; Granary exchange.
+- Exit: two QEMU Grain instances introduce themselves, one hosts an app
+  that the other uses, files move between them, then access is revoked.
 
-## Phase 8: hardening
+## Phase 8: reach
+- Native drivers for personal hardware: NVMe, xHCI with USB HID and storage,
+  display, Ethernet; then Wi-Fi.
+- RISC-V IOMMU; real-board bring-up (an RVA23 board first); aarch64 and
+  x86_64 ports running the same suite on QEMU.
+
+## Phase 9: hardening
 - Fuzzing of every kernel entry point; model checks of IPC and revocation;
   measured boot; performance work on RVA23 hardware; an external review of
   the capability model.
 
-## Open questions for the owner
-1. **First milestone:** how far past Phase 0 to go before the next review.
-2. **Primary use case:** personal device, server, embedded or appliance, or
-   AI-agent host. This decides how soon dynamism, graphics and the Linux guest
-   matter.
-3. **"Social":** sharing between the owner's own devices, between people,
-   multi-user on one machine, or federation.
-4. **Compatibility:** a Linux guest VM, a POSIX layer, or no compatibility.
-5. **Assurance:** simulation and testing (planned), or aiming for formal
-   verification (needs a different process and much more time).
-6. **License.** None is chosen yet; it should be settled before outside
-   contributions.
+## Owner decisions
+- **Milestone:** build through Phase 2 before the next review.
+- **Primary use case:** a personal device.
+- **Social:** every instance has a shareable identity, used to move data,
+  host applications and connect with other people's instances (inspired by
+  Urbit); sharing between people first.
+- **Compatibility:** none. No Linux guest and no POSIX layer.
+
+## Still open
+- **Assurance:** simulation and testing (planned), or aiming for formal
+  verification (needs a different process and much more time).
+- **License:** none is chosen yet; it should be settled before outside
+  contributions.

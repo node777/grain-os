@@ -97,10 +97,32 @@ why. These are the inputs to [ARCHITECTURE.md](ARCHITECTURE.md).
   Inspiration for safe policy plug-ins, kept in userspace in Grain.
 - **Namespaces and cgroups** are ambient-authority systems added after the
   fact. Capabilities give the same isolation by construction.
-- **Device trees and driver coverage:** Linux's driver base can't be matched.
-  Grain reaches common hardware with virtio first, then a **Linux guest VM**
-  (RISC-V H extension, later VT-x and ARM EL2) that serves as a driver and app
-  compatibility domain, the way Qubes and the seL4 VMM do.
+- **Driver coverage:** Linux's driver base can't be matched, and (by owner
+  decision) Grain won't borrow it through a guest VM. Grain starts with
+  virtio, then writes native drivers for the hardware personal devices
+  actually use (NVMe, xHCI and USB HID, display, network). Linux driver
+  sources stay useful as documentation of how the hardware behaves.
+
+### Urbit: a personal server with an identity
+- **Arvo** is an event-sourced OS: new state and effects are a pure function
+  of the old state and an input event, so an instance is fully defined by its
+  event log. That's the same idea as Caravan's event door, applied to the
+  whole OS.
+- **Ames** sends packets *to identities*, end-to-end encrypted with the
+  identities' keys; IP addresses are just routes. **Gall** apps run on your
+  own instance, and others subscribe to them. **Clay** is a typed,
+  revision-controlled filesystem.
+- **Azimuth** puts identities on Ethereum as a scarce hierarchy (galaxies,
+  stars, planets). It resists spam, but costs money, invites speculation, and
+  depends on a blockchain.
+- Common criticisms: a whole new stack (Nock, Hoon) and new names for
+  standard ideas make it hard to learn; performance; a slow road to everyday
+  usability.
+- **Grain keeps** identity-as-address, the personal server, apps on your own
+  node, and the event log. **Grain changes** identity to self-issued Ed25519
+  keys with a web of trust and social recovery (no chain, no scarcity),
+  native Zig in place of a new language stack, and standard cryptography
+  (Noise, BLAKE3) over ordinary UDP.
 
 ### Deterministic simulation testing (TigerBeetle, FoundationDB)
 - Run the real code with clock, I/O and scheduling replaced by a seeded
@@ -137,6 +159,9 @@ why. These are the inputs to [ARCHITECTURE.md](ARCHITECTURE.md).
   boards as they ship.
 
 ## Sources
+- Urbit critique (dpc): https://write.as/dpc/pragrammatic-critique-of-urbit
+- An honest look at Urbit: https://jayriverlong.substack.com/p/36-an-honest-look-at-urbit
+- Urbit notes (jzhao): https://jzhao.xyz/thoughts/Urbit
 - seL4 July 2026 releases: https://sel4.discourse.group/t/july-2026-releases-of-sel4-microkit-camkes-capdl-and-rust-support/1069
 - seL4 news (MCS RISC-V proof): https://www.sel4.systems/news/
 - Microkit manual 2.3.0: https://docs.sel4.systems/projects/microkit/manual/2.3.0/microkit_user_manual.pdf

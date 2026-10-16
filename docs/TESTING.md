@@ -59,17 +59,19 @@ every trap. `-d in_asm` gives an instruction trace.
 | 2+ | the same on real (emulated) hardware | QEMU tests with user domains that run scripted IPC workloads and report records; `-smp 4` for multi-hart |
 | 3 Userspace and drivers | virtio-console, blk, net | QEMU with virtio devices; block images built by `zig build`; networking through QEMU user-mode net with port forwards |
 | 4 Envoy | the AI interface end to end | the harness grows into a **driver**: it opens the Envoy virtio-console port as a socket (`-chardev socket`) and speaks the protocol (`discover`, `plan`, `apply`). Tests are scripts of Envoy calls with expected typed results. This is also how I interactively operate the OS while building it. |
-| 5 Graphics | compositor, UI | virtio-gpu; QMP `screendump` writes PNGs the agent can look at; input injected through QMP |
-| 6 Snapshots and replay | whole-system determinism | QEMU `-icount rr=record/replay` for bit-exact machine replay; Grain's own Ledger replay compared against it |
-| 7 Ports | aarch64, x86_64 | the same test suite on `qemu-system-aarch64 -M virt` and `qemu-system-x86_64 -M q35`, run as a CI matrix |
+| 5 Storage and identity | Granary, Ledger, generations, Seal | virtio-blk images; power-cut injection (kill QEMU at random instructions, reboot, verify) |
+| 6 Desktop | compositor, UI | virtio-gpu; QMP `screendump` writes PNGs the agent can look at; input injected through QMP |
+| 7 Social | two or more instances | several QEMU instances on a QEMU socket network (`-netdev socket`/`dgram`); tests script introductions, app hosting, transfer and revocation |
+| any | whole-system determinism | QEMU `-icount rr=record/replay` for bit-exact machine replay; Grain's own Ledger replay compared against it |
+| 8 Ports | aarch64, x86_64 | the same test suite on `qemu-system-aarch64 -M virt` and `qemu-system-x86_64 -M q35`, run as a CI matrix |
 | 8 Real hardware | boards | flash a VisionFive 2 / Milk-V / RVA23 board; the same records come over a USB-serial line and the same harness reads them. Needs the owner's hardware. |
 
 Other tools, used where they pay off:
 
 - **Spike** (`riscv-isa-sim`): the golden reference RISC-V model, for
   checking architecture code against the spec when QEMU and hardware differ.
-- **Renode**: multi-node simulation, for when Grain machines talk to each
-  other (the "social" networking layer).
+- **Renode**: multi-node simulation with controlled time, if QEMU socket
+  networking isn't deterministic enough for the social-layer tests.
 - **TLA+ or a Zig model checker:** for the IPC and revocation protocols
   before they're written. Small models, run in CI.
 - **CI:** GitHub Actions runs `zig build test qemu-test` (later `sim` with a

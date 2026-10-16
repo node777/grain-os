@@ -1,7 +1,13 @@
 # Grain OS architecture (draft 0)
 
-> **Status:** proposal. Sections marked **[open]** depend on the questions in
-> PLAN.md. Names other than *Grain* and *Caravan* are working titles.
+> **Status:** proposal. Names other than *Grain* and *Caravan* are working
+> titles.
+>
+> **Owner decisions (2026-10-16):** Grain is a **personal-device** OS first.
+> *Social* means every instance has a shareable cryptographic identity, used
+> to move data, host applications and connect with other people's instances
+> (inspired by Urbit). There is **no compatibility layer**: no Linux guest, no
+> POSIX. Everything is native, and hardware is reached through native drivers.
 
 ## 1. What Grain is
 
@@ -25,7 +31,7 @@ Grain is a capability operating system built around three claims:
 | Quality | What it means in the design |
 |---|---|
 | **Intimate** | Local-first. The owner's data lives on the owner's device, encrypted with keys the owner holds. The OS keeps a rich, private context about its owner (files, history, preferences) and shares none of it without a capability grant. |
-| **Social** | Sharing is handing someone a capability, not editing ACLs. Capabilities can cross devices and people as cryptographic *sturdy references* with local *petnames*. Collaboration is built in, not added on. |
+| **Social** | Every Grain instance has its own cryptographic identity (a *Seal*) that its owner can share. Instances address each other by identity, not by IP. Sharing is handing someone a capability, not editing ACLs. Capabilities cross instances as signed *sturdy references* with local *petnames*. Apps are hosted on the owner's own instance, and friends reach them there. |
 | **Secure** | No ambient authority. A minimal kernel (target under 10k lines of Zig). Drivers and services are unprivileged and isolated by the MMU and, later, the IOMMU. Measured boot of a content-addressed image. Static allocation in the kernel. |
 | **Clear** | Every interface is typed and self-describing. Every authority-changing event goes into an append-only, hash-chained *Ledger*. Every change has a plan you can preview, then an apply, then an undo. The kernel's own output is structured records. |
 | **Loyal** | The OS serves its owner only. No hidden authority for vendors. Updates are content-addressed and applied only with the owner's approval. Agents act only through leases the owner granted, and the owner can see everything they did. |
@@ -169,7 +175,9 @@ syscall surface is self-describing too.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│ apps · agents (via Envoy) · structured shell · Linux guest VM    │
+│ apps · agents (via Envoy) · structured shell · desktop           │
+├──────────────────────────────────────────────────────────────────┤
+│ Seal (identity) · Courier (identity-addressed network)           │
 ├──────────────────────────────────────────────────────────────────┤
 │ Envoy (agent interface) · Registry (schemas) · Ledger (audit)    │
 │ Granary (content-addressed store) · Steward (manifest, lifecycle)│
@@ -265,15 +273,50 @@ is a **principal** with its own leased capabilities. It is never root.
   it was granted.
 - **virtio first** (console, block, net, rng, gpu, input). This covers QEMU
   and most cloud VMs on every architecture.
-- **The hardware long tail** comes from a Linux guest domain (RISC-V H
-  extension, later VT-x and ARM EL2). Linux runs its own drivers for real
-  hardware and Linux apps, and is reachable from Grain only through
-  capabilities.
+- **Native drivers only** (owner decision: no compatibility layer). For a
+  personal device that means, in order: virtio (all of QEMU), then NVMe,
+  xHCI USB with HID and mass storage, a framebuffer and GPU display path,
+  Ethernet, and later Wi-Fi. Each is an isolated domain, so an untrusted or
+  buggy driver can't hurt the rest of the system.
 - **Ports:** `arch/` is a small interface (boot entry, trap entry and exit,
   page-table format, timer, IPI, interrupt controller, context switch).
   RISC-V gets first-class optimisation (Sv48, Svpbmt, AIA/IMSIC, Zicbom,
   vector state handled lazily); aarch64 and x86_64 follow the same
   interface.
+
+### 3.7 Seal and Courier: identity and the social layer
+
+Each Grain instance is a personal server as well as a personal computer.
+
+- **Seal (identity).** At first boot the instance creates an Ed25519 *root
+  identity key*, which the owner keeps. It signs short-lived *device keys*, so
+  keys can rotate and a lost device can be cut off without losing the
+  identity. The identity's public key *is* the identity. There is no
+  registry, no blockchain and no scarcity.
+- **Names.** Every identity has a pronounceable name derived from its key
+  hash (like Urbit's `~sampel-palnet`), so people can say and check it. On
+  top of that, each owner keeps *petnames* for the identities they know.
+  Names are local and can't be hijacked.
+- **Introductions and recovery.** People vouch for each other by signing
+  introductions (a web of trust, not an authority). Optional *social
+  recovery*: the root key can be split into threshold shares held by trusted
+  friends' instances.
+- **Courier (network).** Messages go *to identities*. Courier keeps the map
+  from identity to current network routes (direct, LAN discovery, or relays
+  run by friends) and opens end-to-end encrypted sessions (a Noise IK
+  handshake over UDP). Changing networks never changes who you are.
+- **Capabilities across instances.** A local capability can be exported as a
+  *sturdy reference*: signed by the issuing Seal, naming the recipient's
+  identity, and backed by a local `Lease`. So remote access can be revoked,
+  and has an expiry and use count, exactly like local access. Courier turns
+  calls on a sturdy reference into IPC on the issuing instance.
+- **Hosted apps.** An app runs on its owner's instance and is shared by
+  handing friends a capability to its interface. Their Envoy and shell reach
+  it through Courier with the same typed descriptors as local services. Data
+  transfer is a Granary object exchange: hashes are verified on arrival, and
+  only missing blocks are sent.
+- **Loyalty across the network.** Every remote grant and use goes into the
+  Ledger. Owners can see who holds what, and revoke it.
 
 ## 4. Where Grain departs from its inspirations
 
@@ -283,14 +326,15 @@ is a **principal** with its own leased capabilities. It is never root.
 | Microkit / Hubris | Static, build-time composition; one attestable image | Manifest checked at `comptime`; a dynamic edge granted as a capability. |
 | Zircon | Handles passed in messages; one IDL for everything | Zig itself is the IDL; protocol ids checked by the kernel; a much smaller kernel. |
 | NixOS | Declarative system, content addressing, generations, rollback | Applies to the whole OS including the kernel's capability graph; plain data, not a language. |
-| Linux | io_uring rings, driver coverage | Rings as a kernel object; Linux kept only as a sandboxed guest. |
+| Linux | io_uring rings | Rings as a kernel object. No Linux code or ABI. |
+| Urbit | Each person runs their own instance; identity is the network address; the OS as a function of its event log; apps hosted on your own node | Self-issued keys instead of scarce blockchain identities; native Zig instead of Nock/Hoon; standard crypto and transports underneath (§3.7). |
 | TigerBeetle | Deterministic simulation; static allocation; Zig | Applied to a kernel: one event door, record and replay. |
 
 ## 5. Explicit non-goals (for now)
 
-- POSIX inside the core. Compatibility comes through the Linux guest, and
-  later perhaps a POSIX layer for porting.
+- Compatibility with Linux or POSIX in any form (owner decision). Software
+  is written for Grain.
 - A formal proof of the kernel. The design aims to make one *possible*
   (small, static, a pure core), and uses simulation, property tests and model
-  checking until then. **[open]**
+  checking until then.
 - Hard real-time certification.
