@@ -63,10 +63,11 @@ pub fn build(b: *std.Build) void {
     };
     const user_imports: []const std.Build.Module.Import = &.{ .{ .name = "grain", .module = grain_lib }, .{ .name = "abi", .module = abi_mod } };
 
-    // The system: a manifest (-Dsystem=path, default system/dev.zon) and the
-    // programs it may name. grain-pack refuses an image missing a program.
-    const system_path = b.option([]const u8, "system", "System manifest (default system/dev.zon)") orelse "system/dev.zon";
-    const programs = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker" };
+    // Systems: each is a manifest plus the programs it names, packed into a
+    // boot image and embedded in its own Steward. grain-pack refuses an image
+    // missing a program, and Steward refuses a miswired manifest at compile time.
+    const system_path = b.option([]const u8, "system", "System manifest for run/steward/check-manifest (default system/dev.zon)") orelse "system/dev.zon";
+    const program_names = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker", "crasher", "waiter" };
 
     const pack = b.addExecutable(.{ .name = "grain-pack", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/pack/main.zig"),
@@ -74,26 +75,34 @@ pub fn build(b: *std.Build) void {
         .optimize = .Debug,
         .imports = &.{ .{ .name = "schema", .module = schema_mod }, .{ .name = "image", .module = image_mod } },
     }) });
-    const pack_run = b.addRunArtifact(pack);
-    const system_img = pack_run.addOutputFileArg("system.img");
-    pack_run.addFileArg(b.path(system_path));
-    for (programs) |name| {
-        const exe = UserProgram.add(b, name, b.fmt("grain/programs/{s}/main.zig", .{name}), user_target, optimize, user_imports);
-        b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{ .dest_sub_path = b.fmt("programs/{s}", .{name}) }).step);
-        pack_run.addPrefixedFileArg(b.fmt("{s}=", .{name}), exe.getEmittedBin());
+    var programs: [program_names.len]*std.Build.Step.Compile = undefined;
+    for (program_names, 0..) |name, i| {
+        programs[i] = UserProgram.add(b, name, b.fmt("grain/programs/{s}/main.zig", .{name}), user_target, optimize, user_imports);
+        b.getInstallStep().dependOn(&b.addInstallArtifact(programs[i], .{ .dest_sub_path = b.fmt("programs/{s}", .{name}) }).step);
     }
-    b.getInstallStep().dependOn(&b.addInstallFile(system_img, "system.img").step);
-
-    const steward = UserProgram.add(b, "steward", "grain/steward/main.zig", user_target, optimize, &.{
+    const steward_imports: []const std.Build.Module.Import = &.{
         .{ .name = "grain", .module = grain_lib },
         .{ .name = "abi", .module = abi_mod },
         .{ .name = "schema", .module = schema_mod },
         .{ .name = "image", .module = image_mod },
         .{ .name = "elf", .module = elf_mod },
         .{ .name = "fdt", .module = fdt_mod },
-    });
-    steward.root_module.addAnonymousImport("system.zon", .{ .root_source_file = b.path(system_path) });
-    steward.root_module.addAnonymousImport("system.img", .{ .root_source_file = system_img });
+    };
+    const System = struct {
+        fn steward(bb: *std.Build, label: []const u8, manifest: []const u8, packer: *std.Build.Step.Compile, progs: []const *std.Build.Step.Compile, names: []const []const u8, target: std.Build.ResolvedTarget, opt: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
+            const pack_run = bb.addRunArtifact(packer);
+            const img = pack_run.addOutputFileArg("system.img");
+            pack_run.addFileArg(bb.path(manifest));
+            for (progs, names) |p, name| pack_run.addPrefixedFileArg(bb.fmt("{s}=", .{name}), p.getEmittedBin());
+            const s = UserProgram.add(bb, bb.fmt("steward-{s}", .{label}), "grain/steward/main.zig", target, opt, imports);
+            s.root_module.addAnonymousImport("system.zon", .{ .root_source_file = bb.path(manifest) });
+            s.root_module.addAnonymousImport("system.img", .{ .root_source_file = img });
+            bb.getInstallStep().dependOn(&bb.addInstallFile(img, bb.fmt("{s}.img", .{label})).step);
+            return s;
+        }
+    };
+    const steward = System.steward(b, "system", system_path, pack, &programs, &program_names, user_target, optimize, steward_imports);
+    const steward_faults = System.steward(b, "faults", "system/tests/faults.zon", pack, &programs, &program_names, user_target, optimize, steward_imports);
     b.installArtifact(steward);
     b.step("steward", "Build Steward for the system manifest (-Dsystem=...)").dependOn(&b.addInstallArtifact(steward, .{}).step);
 
@@ -140,6 +149,7 @@ pub fn build(b: *std.Build) void {
     };
     const kernel = Kernel.add(b, "caravan", steward, kernel_target, optimize, kernel_imports);
     const ktest = Kernel.add(b, "caravan-ktest", ktest_root, kernel_target, optimize, kernel_imports);
+    const kernel_faults = Kernel.add(b, "caravan-faults", steward_faults, kernel_target, optimize, kernel_imports);
 
     // Devices for the system image. virtio-rng reads a fixed pattern file, so
     // runs stay deterministic; the virtio console writes to a file the
@@ -191,6 +201,23 @@ pub fn build(b: *std.Build) void {
     qtest_system.has_side_effects = true;
     qtest_system.step.dependOn(&qtest_kernel.step);
 
+    // The failure path: restart limit, service revocation, no hung client.
+    const qtest_faults = b.addSystemCommand(&.{
+        "python3",   "tools/harness.py",
+        "--timeout", qemu_timeout,
+        "--smp",     smp,
+        "--expect",  "domain_start domain=crasher restart=2",
+        "--expect",  "domain_stopped domain=crasher reason=restart_limit",
+        "--expect",  "service_revoked domain=crasher service=echo",
+        "--expect",  "call_again domain=waiter status=invalid_cap",
+        "--expect",  "domain_exit domain=waiter code=0",
+        "--expect",  "summary failed=0",
+    });
+    qtest_faults.addArtifactArg(kernel_faults);
+    qtest_faults.stdio = .inherit;
+    qtest_faults.has_side_effects = true;
+    qtest_faults.step.dependOn(&qtest_system.step);
+
     // A miswired manifest must fail to compile, with the explanation.
     const miswired = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "check-manifest", "-Dsystem=system/tests/miswired.zon" });
     miswired.expectExitCode(1);
@@ -198,7 +225,7 @@ pub fn build(b: *std.Build) void {
     miswired.has_side_effects = true;
 
     const qtest = b.step("qemu-test", "Boot the kernel test suite and the system in QEMU");
-    qtest.dependOn(&qtest_system.step);
+    qtest.dependOn(&qtest_faults.step);
     qtest.dependOn(&miswired.step);
 
     // Benchmarks: one hart, so QEMU's global instruction counter (-icount)
@@ -231,6 +258,7 @@ pub fn build(b: *std.Build) void {
     const manifest_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/manifest/manifest_test.zig"), .target = host, .optimize = optimize, .imports = &.{.{ .name = "schema", .module = schema_mod }} }) });
     manifest_tests.root_module.addAnonymousImport("dev.zon", .{ .root_source_file = b.path("system/dev.zon") });
     manifest_tests.root_module.addAnonymousImport("miswired.zon", .{ .root_source_file = b.path("system/tests/miswired.zon") });
+    manifest_tests.root_module.addAnonymousImport("faults.zon", .{ .root_source_file = b.path("system/tests/faults.zon") });
     test_step.dependOn(&b.addRunArtifact(manifest_tests).step);
     const image_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/manifest/image.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(image_tests).step);

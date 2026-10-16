@@ -12,6 +12,12 @@ test "system/dev.zon is sound" {
     }
 }
 
+test "system/tests/faults.zon is sound" {
+    const m: schema.Manifest = @import("faults.zon");
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), schema.validate(m, &buf));
+}
+
 test "system/tests/miswired.zon is rejected" {
     const m: schema.Manifest = @import("miswired.zon");
     var buf: [512]u8 = undefined;
