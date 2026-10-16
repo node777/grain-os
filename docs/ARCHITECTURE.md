@@ -77,13 +77,19 @@ A capability is 16 bytes, stored only in kernel-owned CNodes:
 object index : u32   which entry in the object table
 generation   : u32   must equal the entry's current generation
 rights       : u16   read write execute grant send recv revoke configure retype
-protocol     : u16   interface id (carried, not yet checked — planned with Phase 4)
+protocol     : u16   interface id: an endpoint delivers only between matching ids
 badge        : u32   delivered to the receiver with every message or signal
 ```
 
 - **Unforgeable:** userspace names capabilities by slot index only.
 - **Attenuation:** `CNode.mint` copies a capability with a subset of its
-  rights, and can set a badge once. Rights only shrink.
+  rights, and can set a badge once and a protocol id once. Rights only shrink.
+- **Protocol checks:** an endpoint refuses a message whose sender's protocol
+  id differs from the waiting receiver's (both nonzero), with
+  `protocol_mismatch`; a queued sender is refused the same way when the
+  receiver arrives. Steward stamps the low 16 bits of the IDL hash (§3.2) on
+  every endpoint it hands out, so a client built against `kv.v1` cannot
+  talk to a server serving `echo.v1`, whatever slot it was given.
 - **Introspection:** `CNode.identify` returns the kind, rights, badge, the
   kind *behind* a lease, and the object id; `CNode.lease_info` returns a
   lease's remaining uses and expiry. Agents can ask any slot what it is.
@@ -168,6 +174,16 @@ seL4 tracks every derived capability in a derivation tree. Caravan does not.
   has trapped, so no hart keeps running a thread the kernel took away.
   Destroying an address space makes every hart leave that root table before
   the call returns. A multikernel design stays the long-term direction.
+- **TLB shootdowns are targeted.** A page-table change flushes only harts
+  whose *active* root is the root the changed table hangs under; a table not
+  yet linked to any root needs no flush at all. That is sound because
+  switching roots flushes the hart's TLB (there are no ASIDs yet) and roots
+  only change under the kernel lock. *Measured:* this took the dev system's
+  boot under two harts from timing out at 60 s (every page Steward copied
+  cost a remote fence to a hart that had nothing to flush) to a few seconds.
+- **Logical harts.** Hart 0 is whichever hart firmware booted on (SBI may
+  pick any); the others follow in device-tree order. Manifests and the core
+  see only logical indices, and external interrupts go to hart 0.
 - *Planned:* a static time-partitioned scheduling mode for fully
   deterministic systems.
 
@@ -220,6 +236,12 @@ Ten calls: `call`, `send`, `recv`, `reply_recv`, `reply`, `signal`,
 Methods, error codes, thread states and fault kinds are named enums in the
 ABI file, so a person or an agent can read the whole contract in one place.
 
+The debug console's `write` takes up to 32 bytes in registers, or up to 512
+(`abi.max_debug_write`) from the caller's IPC buffer, and writes each call
+whole. libgrain formats a record line and writes it in one call, so records
+from different harts never interleave — the harness parses lines, and a torn
+line is a lost record.
+
 ## 3. Grain, the system above the kernel
 
 ```
@@ -249,7 +271,11 @@ plain data. It lists domains, and for each one: its program, kind (`service`
 or `task`), priority, hart, CPU budget and period, memory, restart policy,
 the services it provides (name and protocol), the services it uses
 (`"<domain>.<service>"` and the protocol it expects), its devices (by virtio
-id), and whether it gets a write-only debug console.
+id and `instance`, counting devices of that kind in device-tree order; a
+device marked `optional` that the machine lacks makes Steward skip the
+domain with `domain_skipped` instead of failing it), and whether it gets a
+write-only debug console. An optional `agent` section says what an AI agent
+may hold (§3.5).
 
 ```zig
 .{ .name = "hello", .program = "hello", .kind = .task,
@@ -327,17 +353,36 @@ an unwritten convention.
 
 ### 3.2 Typed interfaces and the Registry
 
-- Interfaces are defined **as Zig declarations** (structs and enums with doc
-  comments) in `grain/proto/`. `comptime` generates client stubs, server
-  dispatch, and serialisation, plus a machine-readable descriptor: names,
-  types, docs, required rights, and whether a call is pure, idempotent or
-  undoable.
-- A protocol's id is a hash of its descriptor. That is the id the kernel
-  checks on endpoints (§2.2).
-- The **Registry** service maps protocol ids to descriptors, so any holder of
-  a capability can ask what it does and how to call it. This is FIDL's idea
-  with Zig as the IDL, and it is what lets an AI operate the system without
-  guessing.
+> **Status (Phase 4):** implemented and tested.
+
+- Interfaces are defined **as Zig declarations** in `grain/proto/` (`console`,
+  `entropy`, `echo`, `kv`, `registry`). Each method is
+  `idl.Method(.{ .label, .effect, .doc, .undo }, Params, Results)` with
+  per-field docs. Field types are integers, bools, enums and `idl.Bytes(n)`;
+  a message is at most five register words each way, checked at compile time.
+- `grain/lib/idl.zig` generates, at `comptime`, typed client calls
+  (`idl.call(proto.kv.put, ep, .{ .key = 1, .value = 2 })`), server dispatch
+  (`idl.serve(proto.kv, ep, impl)`, which calls `impl.put(params, caller)`
+  with the caller's badge, and replies with an `ErrorCode` on error), the
+  wire encoding, and a **canonical JSON descriptor**: every method, field,
+  type, effect, undo method and doc.
+- **Effects** say what a call does to the world: `pure` (reads only),
+  `mutates` (changes the service's state), `external` (output, devices; it
+  can't be taken back). A `mutates` method may name its **undo** method,
+  whose parameters are filled by name from the call's results, then its
+  arguments (`kv.put` returns `previous, had`; `kv.restore` takes
+  `key, previous, had`). Agents plan with this (§3.5).
+- A protocol's id is the FNV-1a hash of its descriptor; the kernel checks its
+  low 16 bits on endpoints (§2.2). Changing anything an agent could rely on,
+  even a doc string, changes the id. `grain/proto/proto.zig` lists every
+  protocol and rejects id collisions at compile time, and the manifest check
+  rejects a protocol name it doesn't know.
+- The **Registry** domain serves `registry.v1`: `count`, `nth`, `lookup(id)`
+  and `describe(id, offset)`, which returns the descriptor 24 bytes at a
+  time. Any domain can ask what a protocol is and how to call it; Envoy
+  fetches descriptors from it rather than carrying its own. This is FIDL's
+  idea with Zig as the IDL, and it is what lets an AI operate the system
+  without guessing.
 
 ### 3.3 Ledger
 
@@ -359,26 +404,64 @@ an unwritten convention.
 
 ### 3.5 Envoy: the AI interface
 
+> **Status (Phase 4):** implemented and tested end to end
+> (`tools/agent_session.py` in `zig build qemu-test`). Differences from the
+> first plan are marked *changed*.
+
 Envoy is how an AI agent (or a script, or a human) operates Grain. An agent
 is a **principal** with its own leased capabilities. It is never root.
 
+**Authority comes from the manifest.** The `agent` section names the Envoy
+domain, the services it **grants** from boot and the ones that are
+**askable**, each with a lease limit (`uses`, `duration_ms`):
+
+```zig
+.agent = .{ .envoy = "envoy",
+    .grants = .{ .{ .name = "store", .from = "store.kv", .protocol = "kv.v1" },
+                 .{ .name = "echo", .from = "flaky.echo", .protocol = "echo.v1", .duration_ms = 4_000 } },
+    .askable = .{ .{ .name = "entropy", .from = "rng.entropy", .protocol = "entropy.v1", .uses = 2 } } },
+```
+
+Steward mints each service endpoint with the agent's badge (`0xA6E7`, so
+services can tell the agent apart) and the protocol id, wraps it in a kernel
+**lease** (§2.3), and installs it in Envoy's CSpace (slots 48+), listed in
+`DomainInfo.agent`. Leases are made once per boot, so restarting Envoy can't
+refresh them. Envoy has no other authority over services: the kernel
+enforces the limits, and an exhausted or expired lease fails with
+`lease_exhausted` / `lease_expired`.
+
 | Verb | Meaning |
 |---|---|
-| `discover` | List the capabilities I hold, with their schemas (via the Registry). |
-| `describe` | Full typed descriptor of one capability or object. |
-| `plan` | Dry-run a set of calls or a manifest change. Returns the effects, the authority it would use, and a diff. Nothing changes. |
-| `apply` | Run a plan as one transaction. All of it happens or none of it does, and it is recorded in the Ledger. |
-| `observe` | Subscribe to typed events and Ledger entries within my authority. |
-| `undo` | Reverse an undoable transaction, or roll back a generation. |
-| `ask` | Request more authority. The request goes to the owner, who can grant a lease with limits. |
+| `hello` | System name, closure hash, protocol version, verbs. |
+| `discover` | The capabilities I hold or may ask for: name, protocol, methods, lease state (uses left, time left). |
+| `describe` | The full typed descriptor of one capability's protocol, fetched from the Registry. |
+| `call` | One typed call: JSON arguments in, JSON results out. |
+| `plan` | Dry-run a list of calls: each step's effect and undo, whether the whole is **atomic** (every step pure or undoable) and executable with the authority held. Nothing changes. |
+| `apply` | Run a plan. If it is atomic, all of it happens or none of it does: on a failure the steps already done are undone in reverse. A non-atomic plan is refused unless `allow_partial` is set. Every step is recorded. |
+| `undo` | Reverse one recorded action by calling its undo method. |
+| `ask` | Request an askable service. *Changed:* Steward decides on the owner's behalf from the manifest's policy (each askable service once); a live owner prompt is *planned* with Seal. |
+| `observe` | The audit log. *Changed:* a snapshot, not a subscription (*planned*). |
+| `bye` | End the session. Envoy is a task, so this ends the run. |
 
-- **Transport:** at first, a framed protocol on a virtio-console port (which
-  is also how this repository's test harness drives the OS). Later, a local
-  socket and the network, with an **MCP bridge** that projects Registry
-  descriptors into MCP tools automatically.
-- **Structured shell:** the human shell uses the same verbs and works on
-  typed records (like Nushell or PowerShell), so what a human sees and what
-  an agent sees are the same data.
+- **Audit chain.** Every verb that uses authority appends
+  `seq|verb|cap|method|outcome|undo_of` to a BLAKE3 hash chain (starting at
+  32 zero bytes) and emits an `envoy_action` record. `observe` returns the
+  entries and the head; `tools/envoy.py` re-computes the chain to check it.
+  This is the seed of the Ledger (§3.3).
+- **Transport.** JSON lines on a second virtio-console device (§3.6). One
+  request per line, one response per line, `{"id", "ok", "result"|"error"}`.
+  Errors carry a code (`not_granted`, `lease_expired`, `not_atomic`, …) and
+  a sentence.
+- **Host side** (`tools/envoy.py`): a client library (`Session`); **grainsh**,
+  a structured shell on the same verbs (`caps`, `describe store`,
+  `call store put key=1 value=2`, `plan …; …`, `undo 5`, `log` with the
+  chain verified), so a person and an agent see the same typed data; and an **MCP bridge** that turns each method of each held capability
+  into an MCP tool (`store__put`, with a JSON Schema built from the
+  descriptor) plus `grain_discover`, `grain_plan`, `grain_apply`,
+  `grain_undo`, `grain_ask`, `grain_observe`. Nothing about Grain's services
+  is hard-coded on the host: it all comes from `discover` and `describe`.
+- `zig build run` boots the system in real time and prints the socket to
+  connect grainsh or an MCP client to.
 
 ### 3.6 Drivers and hardware
 
@@ -393,10 +476,10 @@ is a **principal** with its own leased capabilities. It is never root.
   DMA with physical addresses from `Frame.info`. Until the IOMMU is in use,
   a driver with a DMA-capable device is trusted with memory; that is the
   main reason drivers are separate domains with their own regions.
-- *Changed from the plan:* the Envoy channel will be a **second
-  virtio-console device** rather than a second port of the first one.
-  Multiport needs a control queue; two devices are simpler and just as
-  isolated.
+- *Changed from the plan:* the Envoy channel is a **second virtio-console
+  device** (`instance = 1`, `optional`) rather than a second port of the
+  first one. Multiport needs a control queue; two devices are simpler and
+  just as isolated. Envoy drives it itself, with no console driver between.
 - **Native drivers only** (owner decision: no compatibility layer). For a
   personal device that means, in order: virtio (all of QEMU), then NVMe,
   xHCI USB with HID and mass storage, a framebuffer and GPU display path,

@@ -17,7 +17,10 @@
 //!                           address(), levelShift(), user_top, user_root_entries
 //!   physToVirt(u64) usize   kernel address of physical memory
 //!   initRootTable(*[N]u64)  install kernel mappings in a new root table
-//!   flushTlb()              after page-table changes (all harts, synchronous)
+//!   flushTlb(root)          after a change to tables under root table `root`
+//!                           (physical address): every hart translating
+//!                           through it, synchronously. Switching roots must
+//!                           itself flush, so other harts need nothing.
 //!   retireRoot(pa)          a root table is being destroyed: no hart may keep
 //!                           translating through it once this returns
 //!   setTimer(hart, ticks)   program a hart's timer (absolute)
@@ -434,7 +437,7 @@ pub fn Kernel(comptime A: type) type {
             const plat = cfg.platform;
             k.now = cfg.now;
             k.timebase_hz = plat.timebase_hz;
-            k.hart_count = @intCast(@max(1, plat.harts_len));
+            k.hart_count = @intCast(@min(max_harts, @max(1, plat.harts_len)));
             k.irq_count = @min(plat.plic_ndev + 1, max_irqs);
 
             var free: [max_free]Range = undefined;
@@ -914,7 +917,7 @@ pub fn Kernel(comptime A: type) type {
             pt.shadow[idx] = child;
             k.table[child].link = parent;
             k.table[child].flags = @intCast(idx);
-            A.flushTlb();
+            if (k.rootAbove(parent)) |root| A.flushTlb(root);
         }
 
         fn installFrame(k: *Self, tbl: ObjId, idx: usize, frame: ObjId, rights: abi.Rights) Error!void {
@@ -926,22 +929,24 @@ pub fn Kernel(comptime A: type) type {
             pt.shadow[idx] = frame;
             fe.link = tbl;
             fe.flags = (fe.flags & flag_device) | @as(u16, @intCast(idx));
-            A.flushTlb();
+            if (k.rootAbove(tbl)) |root| A.flushTlb(root);
         }
 
         fn unmapFrame(k: *Self, frame: ObjId) void {
             const fe = &k.table[frame];
             if (fe.link == 0) return;
             const pt = k.body(Table, fe.link);
+            const root = k.rootAbove(fe.link);
             const idx = fe.flags & slot_mask;
             pt.ptes[idx] = 0;
             pt.shadow[idx] = 0;
             fe.link = 0;
             fe.flags &= flag_device;
-            A.flushTlb();
+            if (root) |r| A.flushTlb(r);
         }
 
         fn destroyTable(k: *Self, id: ObjId) void {
+            const root = k.rootAbove(id);
             const pt = k.body(Table, id);
             const is_leaf_level = k.table[id].size_bits == 0;
             for (&pt.shadow, 0..) |*s, i| {
@@ -970,7 +975,20 @@ pub fn Kernel(comptime A: type) type {
                 if (h.current != 0 and k.thread(h.current).vspace.object == id) k.kick(@intCast(hi));
             }
             if (k.table[id].size_bits == levels - 1) A.retireRoot(k.table[id].addr);
-            A.flushTlb();
+            if (root) |r| A.flushTlb(r);
+        }
+
+        /// The physical address of the root table `tbl` hangs under (itself if
+        /// it is one), or null if it is not attached to a root: then no hart
+        /// can translate through it and a change needs no TLB flush.
+        fn rootAbove(k: *Self, tbl: ObjId) ?u64 {
+            var t = tbl;
+            var steps: u8 = 0;
+            while (k.table[t].size_bits != levels - 1) : (steps += 1) {
+                if (k.table[t].link == 0 or steps >= levels) return null;
+                t = k.table[t].link;
+            }
+            return k.table[t].addr;
         }
 
         /// Walk to the table at `level` for `va` below root `root`.
@@ -2112,12 +2130,20 @@ pub fn Kernel(comptime A: type) type {
                 .write => {
                     try need(c, .{ .write = true });
                     // a1 carries the method, so the byte count rides in a2 and
-                    // up to 32 bytes follow in a3..a6.
-                    const n = @min(arg(t, .a2), 32);
-                    var buf: [32]u8 = undefined;
-                    const regs = [_]Reg{ .a3, .a4, .a5, .a6 };
-                    for (regs, 0..) |r, i| std.mem.writeInt(u64, buf[i * 8 ..][0..8], t.ctx.get(r), .little);
-                    A.debugWrite(buf[0..@intCast(n)]);
+                    // up to 32 bytes follow in a3..a6; longer writes come from
+                    // the IPC buffer. One call, one uninterrupted write.
+                    const n = arg(t, .a2);
+                    if (n > abi.max_debug_write) return error.InvalidArgument;
+                    if (n > 32) {
+                        const ib = k.ipcBuffer(t) orelse return error.InvalidArgument;
+                        const bytes: *const [abi.max_debug_write]u8 = @ptrCast(&ib.words);
+                        A.debugWrite(bytes[0..@intCast(n)]);
+                    } else {
+                        var buf: [32]u8 = undefined;
+                        const regs = [_]Reg{ .a3, .a4, .a5, .a6 };
+                        for (regs, 0..) |r, i| std.mem.writeInt(u64, buf[i * 8 ..][0..8], t.ctx.get(r), .little);
+                        A.debugWrite(buf[0..@intCast(n)]);
+                    }
                     setResult(t, .ok, &.{});
                 },
                 .exit => {

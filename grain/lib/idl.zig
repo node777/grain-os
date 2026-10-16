@@ -197,14 +197,15 @@ pub fn decode(comptime T: type, w: [register_words]usize) error{InvalidArgs}!T {
 
 /// Method declaration names of a protocol, in declaration order.
 pub fn methodNames(comptime P: type) []const []const u8 {
-    comptime {
-        var names: []const []const u8 = &.{};
+    const names = comptime blk: {
+        var list: []const []const u8 = &.{};
         for (@typeInfo(P).@"struct".decl_names) |n| {
             const d = @field(P, n);
-            if (@TypeOf(d) == type and @typeInfo(d) == .@"struct" and @hasDecl(d, "idl_method")) names = names ++ .{n};
+            if (@TypeOf(d) == type and @typeInfo(d) == .@"struct" and @hasDecl(d, "idl_method")) list = list ++ .{n};
         }
-        return names;
-    }
+        break :blk list;
+    };
+    return names;
 }
 
 pub fn fullName(comptime P: type) []const u8 {
@@ -212,10 +213,11 @@ pub fn fullName(comptime P: type) []const u8 {
 }
 
 pub fn id(comptime P: type) u64 {
-    comptime {
+    const h = comptime blk: {
         @setEvalBranchQuota(1_000_000);
-        return std.hash.Fnv1a_64.hash(descriptor(P));
-    }
+        break :blk std.hash.Fnv1a_64.hash(descriptor(P));
+    };
+    return h;
 }
 
 /// The 16 bits of the id the kernel checks on endpoint capabilities (never 0).
@@ -266,6 +268,11 @@ fn fieldsJson(comptime T: type) []const u8 {
 
 /// Canonical JSON describing the protocol (stable field order, no spaces).
 pub fn descriptor(comptime P: type) []const u8 {
+    const d = comptime descriptorText(P);
+    return d;
+}
+
+fn descriptorText(comptime P: type) []const u8 {
     comptime {
         @setEvalBranchQuota(1_000_000);
         var s: []const u8 = "{\"protocol\":" ++ jsonString(fullName(P)) ++ ",\"doc\":" ++ jsonString(P.doc) ++ ",\"methods\":[";

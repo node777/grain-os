@@ -269,6 +269,16 @@ fn testProtocolCheck() !void {
     _ = g.invoke(w.thread, abi.ThreadMethod.suspend_thread, .{});
 }
 
+/// One long write reaches the console whole (here: a record line longer
+/// than the 32 register bytes); more than the IPC buffer holds is refused.
+fn testLongDebugWrite() !void {
+    const line = "@grain long_write_ok text=" ++ "01234567890123456789012345678901234567890123456789012345678901234567890123456789" ++ "\n";
+    comptime std.debug.assert(line.len > 32 and line.len <= abi.max_debug_write);
+    g.write(line);
+    const too_long = g.syscall(.invoke, S.debug_console, @backingInt(abi.DebugMethod.write), .{ abi.max_debug_write + 1, 0, 0, 0, 0 });
+    try expectStatus(.invalid_argument, too_long.status);
+}
+
 fn testPassiveServerCall() !void {
     const ep = try retype(.endpoint, 0);
     const badged = slot();
@@ -537,6 +547,7 @@ export fn rootMain(bi: *const abi.BootInfo) callconv(.c) noreturn {
     run("thread_signal", testThreadSignal);
     run("syscall_cost", testSyscallCost);
     run("protocol_check", testProtocolCheck);
+    run("long_debug_write", testLongDebugWrite);
     run("call_passive_server", testPassiveServerCall);
     run("fault_handler", testFaultHandling);
     run("leases", testLeases);

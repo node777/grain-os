@@ -78,7 +78,8 @@ pub fn initRootTable(ptes: *[Paging.entries]u64) void {
     ptes[510] = Paging.makeKernelLeaf(ram_base, true, true, true);
 }
 
-pub fn flushTlb() void {
+pub fn flushTlb(root: u64) void {
+    _ = root;
     tlb_flushes += 1;
 }
 

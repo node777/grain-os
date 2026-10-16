@@ -2,9 +2,11 @@
 //!
 //!   zig build              build everything: zig-out/bin/caravan (the system: kernel +
 //!                          Steward + the manifest's programs), caravan-ktest (kernel tests)
-//!   zig build run          boot the system in QEMU and show its output
+//!   zig build run          boot the system in QEMU in real time with an Envoy socket
+//!                          (connect: python3 tools/envoy.py shell --socket PATH)
 //!   zig build test         host tests: kernel core, scenarios, manifest, image, simulator
-//!   zig build qemu-test    boot both images in QEMU deterministically and check them
+//!   zig build qemu-test    boot the images in QEMU and check them: kernel tests,
+//!                          system and faults deterministically, an agent session in real time
 //!   zig build check-manifest -Dsystem=path   check a manifest at compile time
 //!   zig build sim          run the deterministic simulator (-Dseed=N -Dsteps=N)
 //!   zig build bench        one-hart run printing benchmark records (use -Doptimize=ReleaseFast)
@@ -68,7 +70,7 @@ pub fn build(b: *std.Build) void {
     // boot image and embedded in its own Steward. grain-pack refuses an image
     // missing a program, and Steward refuses a miswired manifest at compile time.
     const system_path = b.option([]const u8, "system", "System manifest for run/steward/check-manifest (default system/dev.zon)") orelse "system/dev.zon";
-    const program_names = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker", "crasher", "waiter" };
+    const program_names = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker", "crasher", "waiter", "registry", "kv", "envoy" };
 
     const pack = b.addExecutable(.{ .name = "grain-pack", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/pack/main.zig"),
@@ -165,7 +167,9 @@ pub fn build(b: *std.Build) void {
         "-nographic",          "-bios",    "default", "-no-reboot",
     };
 
-    const run = b.addSystemCommand(&.{ "python3", "tools/harness.py", "--raw", "--timeout", qemu_timeout, "--smp", smp, "--virtio-console", "--show-console" });
+    // Interactive: real time, and an Envoy socket to connect an agent or
+    // grainsh to (the harness prints the command). `bye` ends the run.
+    const run = b.addSystemCommand(&.{ "python3", "tools/harness.py", "--interactive", "--smp", smp, "--virtio-console" });
     run.addPrefixedFileArg("--virtio-rng=", rng_file);
     run.addArtifactArg(kernel);
     run.stdio = .inherit;
@@ -176,32 +180,54 @@ pub fn build(b: *std.Build) void {
     // to instructions retired, so the same image gives the same trace on every
     // run. The harness prints the records and fails on a nonzero exit, a
     // timeout, a missing expected record or missing console text.
-    const qtest_kernel = b.addSystemCommand(&.{ "python3", "tools/harness.py", "--timeout", qemu_timeout, "--smp", smp, "--expect", "summary failed=0" });
+    const qtest_kernel = b.addSystemCommand(&.{ "python3", "tools/harness.py", "--timeout", qemu_timeout, "--smp", smp, "--expect", "summary failed=0", "--expect", "long_write_ok text=01234567890123456789012345678901234567890123456789012345678901234567890123456789" });
     qtest_kernel.addArtifactArg(ktest);
     qtest_kernel.stdio = .inherit;
     qtest_kernel.has_side_effects = true;
 
     const qtest_system = b.addSystemCommand(&.{
-        "python3",                                    "tools/harness.py",
-        "--timeout",                                  qemu_timeout,
-        "--smp",                                      smp,
-        "--virtio-console",                           "--expect",
-        "steward_start verified=true",                "--expect",
-        "driver_ready domain=console",                "--expect",
-        "driver_ready domain=rng",                    "--expect",
-        "domain_fault domain=flaky",                  "--expect",
-        "domain_start domain=flaky restart=1",        "--expect",
-        "echo_ok domain=checker answer=42",           "--expect",
-        "domain_exit domain=hello code=0",            "--expect",
-        "summary failed=0",                           "--expect-console",
-        "hello from grain! entropy 00f3e6dacdc0b4a7", "--expect-console",
-        "checker: flaky.echo answered 42",
+        "python3",                                           "tools/harness.py",
+        "--timeout",                                         qemu_timeout,
+        "--smp",                                             smp,
+        "--virtio-console",                                  "--expect",
+        "steward_start verified=true",                       "--expect",
+        "driver_ready domain=console",                       "--expect",
+        "driver_ready domain=rng",                           "--expect",
+        "domain_fault domain=flaky",                         "--expect",
+        "domain_start domain=flaky restart=1",               "--expect",
+        "echo_ok domain=checker answer=42",                  "--expect",
+        "domain_exit domain=hello code=0",                   "--expect",
+        "summary failed=0",                                  "--expect-console",
+        "hello from grain! entropy 00f3e6dacdc0b4a7",        "--expect-console",
+        "checker: flaky.echo answered 42",                   "--expect",
+        "domain_skipped domain=envoy reason=device_missing",
     });
     qtest_system.addPrefixedFileArg("--virtio-rng=", rng_file);
     qtest_system.addArtifactArg(kernel);
     qtest_system.stdio = .inherit;
     qtest_system.has_side_effects = true;
     qtest_system.step.dependOn(&qtest_kernel.step);
+
+    // The same system with an agent attached to Envoy: tools/agent_session.py
+    // exercises every verb, the leases' limits and the audit chain. Real time
+    // (leases expire by the clock), so this run is not deterministic.
+    const qtest_agent = b.addSystemCommand(&.{
+        "python3",          "tools/harness.py",
+        "--timeout",        qemu_timeout,
+        "--smp",            smp,
+        "--virtio-console", "--realtime",
+        "--agent",          "tools/agent_session.py",
+        "--expect",         "envoy_ready domain=envoy capabilities=4",
+        "--expect",         "envoy_bye domain=envoy",
+        "--expect",         "domain_exit domain=envoy code=0",
+        "--expect",         "summary failed=0",
+        "--expect-console", "agent was here",
+    });
+    qtest_agent.addPrefixedFileArg("--virtio-rng=", rng_file);
+    qtest_agent.addArtifactArg(kernel);
+    qtest_agent.stdio = .inherit;
+    qtest_agent.has_side_effects = true;
+    qtest_agent.step.dependOn(&qtest_system.step);
 
     // The failure path: restart limit, service revocation, no hung client.
     const qtest_faults = b.addSystemCommand(&.{
@@ -218,7 +244,7 @@ pub fn build(b: *std.Build) void {
     qtest_faults.addArtifactArg(kernel_faults);
     qtest_faults.stdio = .inherit;
     qtest_faults.has_side_effects = true;
-    qtest_faults.step.dependOn(&qtest_system.step);
+    qtest_faults.step.dependOn(&qtest_agent.step);
 
     // A miswired manifest must fail to compile, with the explanation.
     const miswired = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "check-manifest", "-Dsystem=system/tests/miswired.zon" });

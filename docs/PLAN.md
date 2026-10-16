@@ -70,26 +70,49 @@ Each phase ends with something that boots and a test that proves it.
   explanation.
 
 ### Left over from Phase 3
-- A second virtio-console device for Envoy (Phase 4).
+- A second virtio-console device for Envoy: done in Phase 4.
 - Passive services (running on their clients' time) as a manifest option.
 - Frame aliases, so shared-memory channels can carry bulk data instead of
   32-byte messages.
 - Bit-exact replay with devices attached: under plain `-icount`, host I/O
   timing (the rng backend) changes instruction counts between runs. What
   happens is identical every run, but exact counts need QEMU record/replay.
-- Plus the items still open from Phases 1–2 (fastpath, ASIDs, protocol ids
-  checked by the kernel, multi-level CSpaces, …).
+- Plus the items still open from Phases 1–2 (fastpath, ASIDs, multi-level
+  CSpaces, …). Protocol ids checked by the kernel: done in Phase 4.
 
-## Phase 4: typed interfaces, Registry, Envoy
-- Zig-as-IDL protocol definitions → generated stubs and descriptors; protocol
-  ids checked on endpoints.
-- Registry service; Envoy protocol (`discover`, `describe`, `plan`, `apply`,
-  `observe`, `undo`, `ask`) over virtio-console.
-- The harness becomes the Envoy driver; the first interactive session drives
-  Grain over Envoy from the host.
-- Structured shell over the same protocol.
-- Exit: an agent on the host discovers and calls a service it was leased,
-  and is refused after the lease expires.
+## Phase 4: typed interfaces, Registry, Envoy ✅ (Brix in progress)
+Built:
+- Zig as the IDL (`grain/lib/idl.zig`, `grain/proto/`): typed calls, server
+  dispatch, wire encoding, canonical JSON descriptors with effects and undo
+  methods, and protocol ids. `CNode.mint` stamps a protocol id; the kernel
+  refuses mismatched senders (`protocol_mismatch`).
+- Services: the Registry (descriptors by id, served in chunks) and a
+  key-value store whose writes can be undone.
+- The manifest's `agent` section; device `instance` and `optional`. Steward
+  creates the agent's leases once per boot (badged, protocol-stamped,
+  use- and time-limited) and answers `ask` within the manifest's policy.
+- Envoy on its own virtio console: `hello`, `discover`, `describe`, `call`,
+  `plan`, `apply` (all-or-nothing, with rollback), `undo`, `ask`, `observe`
+  (a BLAKE3-chained audit log), `bye`.
+- Host side: `tools/envoy.py` (client library, grainsh, an MCP bridge that
+  makes every held method an MCP tool); the harness drives agent scripts.
+- Kernel and harness fixes the agent run exposed: targeted TLB shootdowns,
+  whole-line debug writes, any boot hart. See TESTING.md.
+- Exit, met: `tools/agent_session.py` (in `zig build qemu-test`) discovers
+  and calls services it was leased, is refused once a use-limited lease is
+  exhausted and once a timed lease expires, and verifies the audit chain.
+
+In progress (owner decision, 2026-10-16): **Brix**, a declaring language for
+manifests that evaluates to the same checked data.
+
+### Left over from Phase 4
+- `ask` decided by a live owner prompt instead of manifest policy (with Seal).
+- `observe` as a subscription to typed events, not a snapshot.
+- Descriptors carry no required rights yet; plans don't report a diff of
+  service state.
+- Envoy reachable over a local socket or the network, not only a virtio console.
+- Why `-icount sleep=on` stalls two-hart boots under QEMU 8.2 is not pinned
+  down; real-time runs use free-running TCG instead.
 
 ## Phase 5: storage, Ledger, generations, identity
 - virtio-blk driver; Granary (content-addressed, encrypted); Ledger

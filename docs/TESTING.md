@@ -15,16 +15,18 @@ terminal, by a human or an AI, with a pass or fail answer in seconds.**
 
 `tools/setup.sh` installs all of these on Debian/Ubuntu.
 
-## The loop today (Phase 3)
+## The loop today (Phase 4)
 
 ```sh
-zig build test        # host: unit tests, kernel scenarios, manifest + image tests, short simulator run
-zig build qemu-test   # QEMU riscv64, 2 harts: kernel suite, the dev system, the faults system,
-                      # and a miswired manifest that must fail to compile
+zig build test        # host: unit tests, kernel scenarios, manifest, image and IDL tests, short simulator run
+zig build qemu-test   # QEMU riscv64, 2 harts: kernel suite, the dev system, the dev system with an
+                      # agent driving Envoy, the faults system, and a miswired manifest that must fail
 zig build check-manifest -Dsystem=system/my.zon   # check a manifest at compile time
 zig build sim         # the deterministic simulator (16 seeds × 50k steps); -Dseed=N replays one
 zig build bench -Doptimize=ReleaseFast   # one hart: benchmark and kernel-profile records
-zig build run         # boot interactively (Ctrl-A X quits QEMU)
+zig build run         # boot in real time with an Envoy socket; connect grainsh or an MCP client
+python3 tools/envoy.py shell --socket PATH    # grainsh, the structured shell
+python3 tools/envoy.py mcp --socket PATH      # MCP server (stdio) for any MCP-capable agent
 zig build debug       # boot halted with a GDB stub on :1234
 python3 tools/harness.py --json zig-out/bin/caravan   # records as JSON lines
 ```
@@ -56,21 +58,44 @@ The four layers, from fastest to most real:
 5. **QEMU, whole systems** (`caravan`, `caravan-faults`): Steward boots a
    manifest, and the harness checks the records. For the dev system that
    means: the image verified, both drivers ready, flaky faulted and was
-   rebuilt (restart=1), checker's echo answered 42, hello exited 0, and
+   rebuilt (restart=1), checker's echo answered 42, hello exited 0, Envoy
+   was skipped (no agent port attached: its device is `optional`), and
    the summary. It also checks the virtio console's output file: hello's
    greeting, with the entropy bytes the virtio-rng device read from a
    fixed pattern file, and checker's line. The faults system checks the
    restart limit, service revocation and that the client was not left
    hanging.
-6. **Manifest compile failure:** `zig build check-manifest
+6. **QEMU, an agent session** (`--agent tools/agent_session.py`): the same
+   dev system with a second virtio console exposed as a Unix socket, which
+   the harness connects to as the agent. The script drives every Envoy verb
+   and reports `@agent check name=… result=pass|fail`: discover (grants,
+   askable, lease limits), describe (from the Registry), a typed call (the
+   service sees the agent's badge), the MCP bridge's tools, plan changes
+   nothing, apply is all-or-nothing, undo, a non-atomic plan is refused,
+   ask then exhaust a use-limited lease, refusal once a timed lease expires,
+   grainsh on the same session, and the audit hash chain recomputed on the
+   host. Then `bye`, Envoy exits 0, and the summary must be clean. This run
+   uses real time (`--realtime`), so leases expire by the clock; it is the
+   one QEMU run that is not deterministic.
+7. **Manifest compile failure:** `zig build check-manifest
    -Dsystem=system/tests/miswired.zon` must fail, and its stderr must name
    the missing service.
 
 Devices in QEMU (added by the harness): `--virtio-console` attaches a
 virtio console whose output goes to a temporary file (`--show-console`
 prints it, `--expect-console TEXT` checks it). `--virtio-rng=FILE` attaches
-a virtio entropy device reading FILE. Both use the modern transport
+a virtio entropy device reading FILE. `--envoy-socket` (implied by
+`--agent` and `--interactive`) adds a second virtio console, on its own
+virtio-serial bus, backed by a Unix socket; it comes second in device-tree
+order, so the manifest names it `instance = 1`. All use the modern transport
 (`-global virtio-mmio.force-legacy=false`).
+
+**Real time:** `--realtime` (and `--interactive`) run QEMU without `-icount`,
+one host thread per hart, so guest time is wall-clock time. Not
+`-icount sleep=on`: with QEMU 8.2 and two harts that stalls the boot once a
+hart-1 domain starts. Without `-icount`, OpenSBI's boot-hart lottery can
+pick either hart; the kernel makes the boot hart logical hart 0 either way,
+and repeated real-time runs cover both outcomes.
 
 **Determinism with devices:** the kernel suite is byte-identical run to run.
 For whole systems, the sequence of records is identical every run, but
@@ -91,7 +116,9 @@ How a QEMU test reports:
    and exits non-zero on failure, timeout or silence.
 4. `-icount shift=0,sleep=off` makes virtual time follow instruction count,
    so runs are **deterministic**, SMP included. Idle harts skip virtual time
-   forward, so timer tests take milliseconds.
+   forward, so timer tests take milliseconds. The flip side: a guest waiting
+   on the host (an agent's next message) sees no time pass, which is why
+   the agent run uses real time.
 
 **When the system hangs:** if every hart is idle with no timer armed, the
 kernel prints `@caravan stuck`, then one `thread` record (state, priority,
@@ -112,6 +139,20 @@ regression test):
 - review: the trap path touched a thread's saved context before taking the
   kernel lock, racing with another hart destroying that thread.
 
+**Found while Phase 4 was built:**
+- QEMU plus gdb (a hardware breakpoint on Steward's system-call stub, with
+  a backtrace per hit): the dev system "hung" under two harts. It was busy,
+  not stuck: every page-table change sent a remote TLB fence to the other
+  hart, and Steward copies every program page through a scratch mapping.
+  Flushes now go only to harts on the affected root (ARCHITECTURE §2.5).
+- the agent run: records from two harts tore mid-line, because the debug
+  console took 32 bytes per call; one call now writes a whole line
+  (scenario test and a `long_write_ok` record the harness checks).
+- real-time runs: the kernel panicked when firmware booted on hart 1.
+- the QEMU trace (`-trace 'virtio_serial*'`): both virtconsoles sat on the
+  first virtio-serial bus, so Envoy's device had no port; each now names
+  its bus.
+
 **Benchmarks:** under `-icount`, QEMU's cycle and instret counters count
 the instructions of *all* harts, and a hart waiting for the kernel lock
 spins through its time slices. So benchmarks run on one hart (`zig build
@@ -123,6 +164,19 @@ Debugging:
 ```sh
 zig build debug &                                   # QEMU waits for GDB
 gdb-multiarch zig-out/bin/caravan -ex 'target remote :1234' -ex 'break kmain' -ex c
+```
+
+User space: a domain's program has its own symbols. To see what one is
+doing, boot with `--qemu-arg=-s`, load the program (Steward is
+`zig-out/bin/steward-system`) and put a *hardware* breakpoint on an address
+in it (`llvm-objdump -d` finds one, e.g. the `ecall` of the inlined
+system-call stub; other domains map different programs at the same
+addresses, so pick one only that program uses). Each hit gives a source
+backtrace:
+
+```sh
+gdb-multiarch -batch zig-out/bin/steward-system -ex 'target remote :1234' \
+    -ex 'hbreak *0x7e65e' -ex c -ex 'bt 12'
 ```
 
 Use `--qemu-arg -d --qemu-arg int,guest_errors` to have QEMU log every
@@ -139,7 +193,7 @@ start `Trace <cpu>:`, so you can profile one hart at a time.
 | 1 Core objects | capability tables, untyped retype, generations, page tables | unit and scenario tests on `core/` ✅ |
 | 2 IPC and scheduling | call/reply, signals, MCS budgets, SMP | `caravan-sim` with invariants after every step; the root-task suite on 2 QEMU harts ✅ |
 | 3 Userspace and drivers | virtio-console, blk, net | QEMU with virtio devices; block images built by `zig build`; networking through QEMU user-mode net with port forwards |
-| 4 Envoy | the AI interface end to end | the harness grows into a **driver**: it opens the Envoy virtio-console port as a socket (`-chardev socket`) and speaks the protocol (`discover`, `plan`, `apply`). Tests are scripts of Envoy calls with expected typed results. This is also how I interactively operate the OS while building it. |
+| 4 Envoy | the AI interface end to end | the harness is a **driver**: it opens Envoy's virtio console as a socket (`-chardev socket`) and runs an agent script of Envoy calls with expected typed results (`tools/agent_session.py`). `zig build run` plus grainsh or the MCP bridge is how to operate the OS interactively ✅ |
 | 5 Storage and identity | Granary, Ledger, generations, Seal | virtio-blk images; power-cut injection (kill QEMU at random instructions, reboot, verify) |
 | 6 Desktop | compositor, UI | virtio-gpu; QMP `screendump` writes PNGs the agent can look at; input injected through QMP |
 | 7 Social | two or more instances | several QEMU instances on a QEMU socket network (`-netdev socket`/`dgram`); tests script introductions, app hosting, transfer and revocation |

@@ -1,5 +1,7 @@
 // The development system: two virtio drivers, a service that crashes on
-// its first run (to exercise restarts), and two tasks that use them.
+// its first run (to exercise restarts), two tasks that use them, a
+// registry of protocol descriptors, a key-value store, and Envoy, through
+// which an AI agent operates the system with leased, limited authority.
 // Steward builds exactly this at boot; `zig build` refuses to build it if
 // the wiring is wrong.
 .{
@@ -41,7 +43,6 @@
             .name = "hello",
             .program = "hello",
             .kind = .task,
-            .budget_us = 2_000,
             .period_us = 10_000,
             .debug_console = true,
             .uses = .{
@@ -50,16 +51,58 @@
             },
         },
         .{
+            .name = "registry",
+            .program = "registry",
+            .priority = 180,
+            .hart = 1,
+            .debug_console = true,
+            .provides = .{.{ .name = "registry", .protocol = "registry.v1" }},
+        },
+        .{
+            .name = "store",
+            .program = "kv",
+            .priority = 160,
+            .hart = 1,
+            .debug_console = true,
+            .provides = .{.{ .name = "kv", .protocol = "kv.v1" }},
+        },
+        .{
+            // Envoy runs as a task: the session ends when the agent says bye.
+            .name = "envoy",
+            .program = "envoy",
+            .kind = .task,
+            .priority = 120,
+            .hart = 1,
+            .budget_us = 2_000,
+            .period_us = 10_000,
+            .memory_kib = 128,
+            .debug_console = true,
+            .devices = .{.{ .name = "port", .virtio = 3, .instance = 1, .optional = true }},
+            .uses = .{.{ .name = "registry", .from = "registry.registry", .protocol = "registry.v1" }},
+        },
+        .{
             .name = "checker",
             .program = "checker",
             .kind = .task,
-            .budget_us = 2_000,
             .period_us = 10_000,
             .debug_console = true,
             .uses = .{
                 .{ .name = "echo", .from = "flaky.echo", .protocol = "echo.v1" },
                 .{ .name = "console", .from = "console.console", .protocol = "console.v1" },
             },
+        },
+    },
+    // The agent holds these leases from boot, and may ask for the askable
+    // ones once each. It never holds anything else.
+    .agent = .{
+        .envoy = "envoy",
+        .grants = .{
+            .{ .name = "echo", .from = "flaky.echo", .protocol = "echo.v1", .duration_ms = 4_000 },
+            .{ .name = "store", .from = "store.kv", .protocol = "kv.v1" },
+            .{ .name = "console", .from = "console.console", .protocol = "console.v1", .uses = 20 },
+        },
+        .askable = .{
+            .{ .name = "entropy", .from = "rng.entropy", .protocol = "entropy.v1", .uses = 2 },
         },
     },
 }

@@ -123,30 +123,50 @@ pub inline fn instret() u64 {
 
 pub var console: CPtr = S.debug_console;
 
+/// Write to the debug console. Up to `abi.max_debug_write` bytes go out in
+/// one uninterrupted write, so a whole record line never interleaves with
+/// another hart's. Longer writes pass through the IPC buffer, which every
+/// thread started by the kernel or Steward has at `ipc_buffer`.
 pub fn write(bytes: []const u8) void {
     var rest = bytes;
     while (rest.len > 0) {
-        const n = @min(rest.len, 32);
-        var chunk: [32]u8 = @splat(0);
-        @memcpy(chunk[0..n], rest[0..n]);
-        var w: [5]usize = undefined;
+        const n = @min(rest.len, abi.max_debug_write);
+        var w: [5]usize = @splat(0);
         w[0] = n;
-        for (0..4) |i| w[i + 1] = std.mem.readInt(u64, chunk[i * 8 ..][0..8], .little);
-        _ = syscall(.invoke, console, @backingInt(abi.DebugMethod.write), w);
+        if (n <= 32) {
+            var chunk: [32]u8 = @splat(0);
+            @memcpy(chunk[0..n], rest[0..n]);
+            for (0..4) |i| w[i + 1] = std.mem.readInt(u64, chunk[i * 8 ..][0..8], .little);
+        } else {
+            const ib: *[abi.max_debug_write]u8 = @ptrFromInt(ipc_buffer);
+            @memcpy(ib[0..n], rest[0..n]);
+        }
+        if (syscall(.invoke, console, @backingInt(abi.DebugMethod.write), w).status != .ok and n > 32) {
+            // No IPC buffer bound: fall back to 32-byte writes.
+            var small = rest[0..n];
+            while (small.len > 0) {
+                const m = @min(small.len, 32);
+                write(small[0..m]);
+                small = small[m..];
+            }
+        }
         rest = rest[n..];
     }
 }
+
+/// Where the IPC buffer is mapped, in the root task and in every domain.
+pub const ipc_buffer: usize = abi.RootLayout.ipc_buffer;
 
 var record_buf: [256]u8 = undefined;
 
 /// Print `@grain <event> k=v ...` — the same record format the kernel uses.
 pub fn record(comptime event: []const u8, fields: anytype) void {
-    const line = klog.formatPrefixed("@grain", &record_buf, event, fields) catch {
+    const line = klog.formatPrefixed("@grain", record_buf[0 .. record_buf.len - 1], event, fields) catch {
         write("@grain record_truncated event=" ++ event ++ "\n");
         return;
     };
-    write(line);
-    write("\n");
+    record_buf[line.len] = '\n';
+    write(record_buf[0 .. line.len + 1]);
 }
 
 pub fn exit(code: u16) noreturn {

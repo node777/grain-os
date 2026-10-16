@@ -18,9 +18,12 @@ import argparse
 import json
 import os
 import shlex
+import importlib.util
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 PREFIXES = ("@caravan", "@grain")
 
@@ -79,27 +82,89 @@ def main():
     ap.add_argument("--show-console", action="store_true", help="print the virtio console output afterwards")
     ap.add_argument("--expect-console", action="append", default=[], help="text the virtio console must contain")
     ap.add_argument("--virtio-rng", default=None, help="attach a virtio entropy device reading this file")
+    ap.add_argument("--envoy-socket", action="store_true",
+                    help="attach a second virtio console for Envoy, as a Unix socket")
+    ap.add_argument("--agent", default=None,
+                    help="Python file with run(session, check): an agent session to run against Envoy")
+    ap.add_argument("--realtime", action="store_true",
+                    help="run QEMU free (no -icount): guest time is real time, for lease durations "
+                         "and interactive use; not deterministic")
+    ap.add_argument("--interactive", action="store_true",
+                    help="print the Envoy socket and wait (connect with tools/envoy.py shell)")
     args = ap.parse_args()
 
     devices = []
     console_path = None
-    if args.virtio_console or args.virtio_rng:
+    tmpdir = tempfile.mkdtemp(prefix="grain-")
+    envoy_path = os.path.join(tmpdir, "envoy.sock")
+    if args.agent or args.interactive:
+        args.envoy_socket = True
+    if args.virtio_console or args.virtio_rng or args.envoy_socket:
         devices += ["-global", "virtio-mmio.force-legacy=false"]
     if args.virtio_rng:
         devices += ["-object", f"rng-random,id=rng0,filename={args.virtio_rng}", "-device", "virtio-rng-device,rng=rng0"]
     if args.virtio_console or args.expect_console:
         fd, console_path = tempfile.mkstemp(prefix="grain-console-")
         os.close(fd)
-        devices += ["-device", "virtio-serial-device", "-chardev", f"file,id=con0,path={console_path}",
-                    "-device", "virtconsole,chardev=con0"]
-    cmd = QEMU_RISCV64 + ["-smp", args.smp] + devices + args.qemu_arg + ["-kernel", args.kernel]
+        devices += ["-device", "virtio-serial-device,id=vser0", "-chardev", f"file,id=con0,path={console_path}",
+                    "-device", "virtconsole,chardev=con0,bus=vser0.0"]
+    if args.envoy_socket:
+        # Created after the first console, so it is the second virtio console
+        # in device-tree order (manifest: instance = 1).
+        devices += ["-device", "virtio-serial-device,id=vser1", "-chardev", f"socket,id=envoy0,path={envoy_path},server=on,wait=off",
+                    "-device", "virtconsole,chardev=envoy0,bus=vser1.0"]
+    qemu = list(QEMU_RISCV64)
+    if args.realtime or args.interactive:
+        # Not -icount sleep=on: with QEMU 8.2 and two harts that stalls the
+        # boot (no progress once a hart-1 domain starts; the same image runs
+        # under sleep=off and free-running TCG). Free TCG is real time anyway.
+        i = qemu.index("-icount")
+        del qemu[i:i + 2]
+    cmd = qemu + ["-smp", args.smp] + devices + args.qemu_arg + ["-kernel", args.kernel]
+    if args.interactive and not args.agent:
+        # A person drives this run: stream the output, wait for the guest to
+        # halt (the agent's `bye` ends Envoy) or for ^C.
+        print(f"harness: Envoy socket: {envoy_path}", flush=True)
+        print(f"harness: connect with: python3 tools/envoy.py shell --socket {envoy_path}", flush=True)
+        try:
+            return subprocess.call(cmd, stdin=subprocess.DEVNULL)
+        except KeyboardInterrupt:
+            return 130
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    chunks = []
+    reader = threading.Thread(target=lambda: chunks.append(proc.stdout.read()), daemon=True)
+    reader.start()
+
+    agent_failures = []
+    if args.agent:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import envoy
+        spec = importlib.util.spec_from_file_location("agent_script", args.agent)
+        script = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(script)
+
+        def check(name, ok, detail=""):
+            print(f"@agent check name={name} result={'pass' if ok else 'fail'}"
+                  + ("" if ok else f" detail={json.dumps(str(detail))}"))
+            if not ok:
+                agent_failures.append(name)
+        try:
+            script.run(envoy.Session(envoy_path, connect_timeout=args.timeout), check)
+        except Exception as e:  # report and fail, don't hang
+            print(f"@agent error={type(e).__name__} detail={json.dumps(str(e))}")
+            agent_failures.append("exception")
+
     try:
-        proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, timeout=args.timeout)
-        status = proc.returncode
-        out = proc.stdout
-    except subprocess.TimeoutExpired as e:
+        status = proc.wait(timeout=args.timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
         status = 124
-        out = e.stdout or b""
+    reader.join(timeout=5)
+    out = b"".join(chunks)
+    if agent_failures:
+        print(f"harness: agent checks failed: {', '.join(agent_failures)}", file=sys.stderr)
+        status = status or 1
 
     records = []
     for raw in out.decode("utf-8", "replace").splitlines():

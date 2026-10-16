@@ -424,6 +424,25 @@ test "frame info reports physical address; exit needs configure" {
     try std.testing.expect(m.k.exitRequested() == null);
 }
 
+test "a long debug write comes whole from the IPC buffer" {
+    var m = try bootMachine();
+    defer m.deinit();
+    const info = try m.invoke(0, S.ipc_buffer_frame, abi.FrameMethod.info, &.{});
+    try expectEqual(abi.Status.ok, info.status);
+    const ib: *abi.IpcBuffer = @ptrFromInt(machine.arch.physToVirt(info.words[0]));
+    const bytes: *[abi.max_debug_write]u8 = @ptrCast(&ib.words);
+    for (bytes, 0..) |*c, i| c.* = 'a' + @as(u8, @intCast(i % 26));
+    machine.arch.output.clearRetainingCapacity();
+    try expectEqual(abi.Status.ok, (try m.invoke(0, S.debug_console, abi.DebugMethod.write, &.{100})).status);
+    try std.testing.expectEqualSlices(u8, bytes[0..100], machine.arch.output.items);
+    // The whole buffer is the limit; one byte more is refused, not cut.
+    try expectEqual(abi.Status.ok, (try m.invoke(0, S.debug_console, abi.DebugMethod.write, &.{abi.max_debug_write})).status);
+    try expectEqual(@as(usize, 100 + abi.max_debug_write), machine.arch.output.items.len);
+    try expectEqual(abi.Status.invalid_argument, (try m.invoke(0, S.debug_console, abi.DebugMethod.write, &.{abi.max_debug_write + 1})).status);
+    try expectEqual(@as(usize, 100 + abi.max_debug_write), machine.arch.output.items.len);
+    try m.check();
+}
+
 test "endpoints refuse a sender whose protocol differs from the receiver's" {
     var m = try bootMachine();
     defer m.deinit();

@@ -90,6 +90,8 @@ pub const Tag = packed struct(usize) {
 };
 
 pub const register_words = 5;
+/// The most bytes one `DebugMethod.write` takes (the IPC buffer's words).
+pub const max_debug_write = max_message_words * 8;
 pub const max_message_words = 64;
 pub const max_message_caps = 4;
 
@@ -293,7 +295,10 @@ pub const LeaseMethod = enum(u32) {
 };
 
 pub const DebugMethod = enum(u32) {
-    /// (byte count ≤ 32, then up to 32 bytes packed little-endian in a3..a6)
+    /// (byte count, then up to 32 bytes packed little-endian in a3..a6).
+    /// A count of 33..`max_debug_write` takes the bytes from the start of the
+    /// caller's IPC buffer instead. Either way one call is written whole, so
+    /// lines from different harts never interleave.
     write = 1,
     /// (code) power off; code 0 means success. Needs the `configure` right,
     /// so a write-only console capability can be handed out safely.

@@ -59,13 +59,16 @@ pub fn initRootTable(ptes: *[Paging.entries]u64) void {
     @memcpy(ptes[Paging.user_root_entries..], boot.boot_root[Paging.user_root_entries..]);
 }
 
-/// Flush this hart's TLB and, synchronously, every other online hart's.
-pub fn flushTlb() void {
+/// Flush the TLB of every hart translating through root table `root`,
+/// synchronously. A hart on another root has nothing cached for it: `setRoot`
+/// flushes, and roots only change under the kernel lock, which the caller
+/// holds.
+pub fn flushTlb(root: u64) void {
     csr.sfenceAll();
     var mask: usize = 0;
     const me = self();
-    for (harts[0..hart_count]) |h| {
-        if (h.online and h.index != me.index and h.hart_id < 64) mask |= @as(usize, 1) << @intCast(h.hart_id);
+    for (harts[0..hart_count]) |*h| {
+        if (h.online and h.index != me.index and h.hart_id < 64 and h.active_root.load(.acquire) == root) mask |= @as(usize, 1) << @intCast(h.hart_id);
     }
     if (mask != 0) sbi.remoteSfence(mask, 0);
 }

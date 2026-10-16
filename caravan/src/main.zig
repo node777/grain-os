@@ -267,17 +267,24 @@ export fn kmain(hart_id: usize, dtb_pa: usize) callconv(.c) noreturn {
     platform = core.fdt.parsePlatform(fdt) catch @panic("unreadable device tree");
     if (platform.test_finisher) |f| board.finisher = arch.physToVirt(f);
 
-    // Number harts in device-tree order, the boot hart's index taken from it.
-    arch.hart_count = @intCast(@min(platform.harts_len, arch.max_harts));
-    const boot_index = platform.hartIndex(@intCast(hart_id)) orelse 0;
-    if (boot_index != 0) @panic("boot hart must be the first hart in the device tree");
-    for (platform.hartList()[0..arch.hart_count], 0..) |ph, i| {
-        const h = &arch.harts[i];
-        h.index = @intCast(i);
-        h.hart_id = ph.id;
-        h.plic_context = ph.plic_context;
-        h.stack_top = @intFromPtr(&__stacks_start) + (i + 1) * boot.stack_size;
+    // Logical hart 0 is whichever hart SBI booted us on (any hart may win
+    // the boot lottery); the others follow in device-tree order. Manifests
+    // and the core only ever see logical indices.
+    const harts = platform.hartList();
+    const boot_index = platform.hartIndex(@intCast(hart_id)) orelse @panic("boot hart is not in the device tree");
+    var n: usize = 0;
+    for (0..harts.len) |k| {
+        // k = 0 places the boot hart; after that, device-tree order without it.
+        const di = if (k == 0) boot_index else if (k <= boot_index) k - 1 else k;
+        if (n == arch.max_harts) break;
+        const h = &arch.harts[n];
+        h.index = @intCast(n);
+        h.hart_id = harts[di].id;
+        h.plic_context = harts[di].plic_context;
+        h.stack_top = @intFromPtr(&__stacks_start) + (n + 1) * boot.stack_size;
+        n += 1;
     }
+    arch.hart_count = @intCast(n);
     if (platform.plic) |p| plic.init(arch.physToVirt(p.base), platform.plic_ndev);
     setupHart(h0);
 

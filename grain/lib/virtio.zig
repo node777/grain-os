@@ -187,6 +187,18 @@ pub const Queue = struct {
         return id;
     }
 
+    /// Offer a buffer on a specific descriptor (for fixed receive buffers
+    /// that are handed back to the device as soon as they are read).
+    pub fn submitDesc(q: *Queue, id: u16, pa: u64, len: u32, device_writes: bool) void {
+        q.desc[id] = .{ .addr = pa, .len = len, .flags = if (device_writes) Desc.flag_write else 0, .next = 0 };
+        const slot = q.avail.idx % queue_size;
+        q.avail.ring[slot] = id;
+        grain.fence();
+        q.avail.idx +%= 1;
+        grain.fence();
+        q.dev.write(.queue_notify, q.index);
+    }
+
     /// A completed buffer, if the device has returned one.
     pub fn poll(q: *Queue) ?UsedElem {
         grain.fence();

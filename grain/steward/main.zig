@@ -193,20 +193,111 @@ fn probeDevices() !void {
     }
 }
 
-fn claimDevice(virtio_id: u32, owner: usize) ?*VirtioDevice {
-    // A restarted domain gets its own devices back.
-    for (devices[0..device_count]) |*d| if (d.owner == owner and d.virtio_id == virtio_id) return d;
-    for (devices[0..device_count]) |*d| if (d.owner == null and d.virtio_id == virtio_id) {
-        d.owner = owner;
-        return d;
+/// The `instance`-th device with this virtio id, in device-tree order.
+/// The validator guarantees no two domains claim the same one.
+fn devicePresent(virtio_id: u32, instance: u8) bool {
+    var seen: u8 = 0;
+    for (devices[0..device_count]) |d| if (d.virtio_id == virtio_id) {
+        if (seen == instance) return true;
+        seen += 1;
+    };
+    return false;
+}
+
+/// The first optional device of domain `i` that this machine lacks.
+fn absentOptional(comptime i: usize) ?[]const u8 {
+    inline for (manifest.domains[i].devices) |want| {
+        if (want.optional and !devicePresent(want.virtio, want.instance)) return want.name;
+    }
+    return null;
+}
+
+fn claimDevice(virtio_id: u32, instance: u8, owner: usize) ?*VirtioDevice {
+    var seen: u8 = 0;
+    for (devices[0..device_count]) |*d| if (d.virtio_id == virtio_id) {
+        if (seen == instance) {
+            if (d.owner != null and d.owner.? != owner) return null;
+            d.owner = owner;
+            return d;
+        }
+        seen += 1;
     };
     return null;
 }
 
 // ---------------------------------------------------------------------------
+// The agent's authority: leases on service endpoints, created by Steward
+// once per boot so restarting Envoy cannot refresh or extend them.
+
+const agent = manifest.agent;
+const agent_grants: []const schema.Grant = if (agent) |a| a.grants else &.{};
+const agent_askable: []const schema.Grant = if (agent) |a| a.askable else &.{};
+const agent_caps = agent_grants.len + agent_askable.len;
+const envoy_index: ?usize = if (agent) |a| schema.findDomain(manifest, a.envoy) else null;
+
+var agent_leases: [agent_caps]g.CPtr = @splat(0);
+
+fn agentGrant(comptime k: usize) schema.Grant {
+    return if (k < agent_grants.len) agent_grants[k] else agent_askable[k - agent_grants.len];
+}
+
+/// Make the lease for agent service `k`: an endpoint capability badged as
+/// the agent and stamped with its protocol, behind a lease with the
+/// manifest's limits.
+fn makeAgentLease(comptime k: usize) !void {
+    const gr = comptime agentGrant(k);
+    const t = comptime schema.resolveUse(manifest, gr.from).?;
+    const target = slot();
+    try mintProtocol(S.cnode, target, domains[t.domain].endpoints[t.service], .{ .send = true, .grant = true }, D.agent_badge, comptime proto.kernelIdOf(gr.protocol));
+    const lease = try retypeFrom(pool, .lease, 0);
+    try ok(g.invoke(lease, abi.LeaseMethod.arm, .{ target, (abi.Rights{ .send = true, .grant = true }).bits(), ticks(@as(u64, gr.duration_ms) * 1000), gr.uses }));
+    agent_leases[k] = lease;
+    g.record("agent_lease", .{ .service = gr.name, .from = gr.from, .uses = gr.uses, .duration_ms = gr.duration_ms, .askable = k >= agent_grants.len });
+}
+
+/// Give Envoy (in its CNode) every lease made so far.
+fn installAgentLeases(cnode: g.CPtr, info: *D.DomainInfo) !void {
+    inline for (0..agent_caps) |k| {
+        const gr = comptime agentGrant(k);
+        var c: D.AgentCap = std.mem.zeroes(D.AgentCap);
+        D.setName(&c.name, gr.name);
+        D.setName(&c.protocol, gr.protocol);
+        c.uses = gr.uses;
+        c.duration_ms = gr.duration_ms;
+        c.protocol_id = comptime proto.idOf(gr.protocol);
+        c.flags = if (k < agent_grants.len) 0 else D.AgentCap.askable;
+        if (agent_leases[k] != 0) {
+            c.slot = D.Slot.first_agent + k;
+            c.flags |= D.AgentCap.granted;
+            try mint(cnode, c.slot, agent_leases[k], .{ .send = true, .grant = true }, 0);
+        }
+        info.agent[k] = c;
+    }
+    info.agent_count = agent_caps;
+}
+
+const AskOutcome = union(enum) { slot: u32, refused: D.AskRefusal };
+
+/// Envoy asks for agent service `index` (counting over grants, then
+/// askables). Returns the slot of the new lease or a refusal.
+fn onAsk(i: usize, index: usize) AskOutcome {
+    if (envoy_index == null or envoy_index.? != i) return .{ .refused = .not_envoy };
+    inline for (0..agent_caps) |k| if (k == index) {
+        if (k < agent_grants.len) return .{ .refused = .not_askable };
+        if (agent_leases[k] != 0) return .{ .refused = .already_granted };
+        makeAgentLease(k) catch return .{ .refused = .failed };
+        const s_ = D.Slot.first_agent + k;
+        mint(domains[i].cnode, s_, agent_leases[k], .{ .send = true, .grant = true }, 0) catch return .{ .refused = .failed };
+        g.record("agent_ask", .{ .service = comptime agentGrant(k).name, .granted = true, .slot = s_ });
+        return .{ .slot = s_ };
+    };
+    return .{ .refused = .not_askable };
+}
+
+// ---------------------------------------------------------------------------
 // Domains
 
-const Status = enum { not_started, running, exited, failed };
+const Status = enum { not_started, running, exited, failed, skipped };
 
 const Domain = struct {
     region: g.CPtr = 0,
@@ -217,6 +308,8 @@ const Domain = struct {
     /// survives the provider's restarts.
     endpoints: [schema.max_provides]g.CPtr = @splat(0),
     thread_id: u64 = 0,
+    /// Steward's copy of the domain's CNode (to install later grants).
+    cnode: g.CPtr = 0,
 };
 
 var domains: [ndomains]Domain = @splat(.{});
@@ -279,7 +372,9 @@ fn build(comptime i: usize) !void {
             return s;
         }
     };
-    const cnode = try R.make(region, &owned, .cnode, D.cnode_bits);
+    const cnode = try retypeFrom(region, .cnode, D.cnode_bits);
+    if (st.cnode != 0) release(st.cnode);
+    st.cnode = cnode;
     const vspace = try R.make(region, &owned, .page_table, 2);
     const thread = try R.make(region, &owned, .thread, 0);
     const sc = try R.make(region, &owned, .sched_context, 0);
@@ -336,21 +431,21 @@ fn build(comptime i: usize) !void {
         const t = comptime schema.resolveUse(manifest, u.from).?;
         const ep = domains[t.domain].endpoints[t.service];
         try mintProtocol(cnode, D.Slot.first_use + ui, ep, .{ .send = true, .grant = true }, i + 1, comptime proto.kernelIdOf(u.protocol));
-        info.uses[ui] = .{ .name = undefined, .protocol = undefined, .slot = D.Slot.first_use + ui };
+        info.uses[ui] = .{ .name = undefined, .protocol = undefined, .slot = D.Slot.first_use + ui, .protocol_id = comptime proto.idOf(u.protocol) };
         D.setName(&info.uses[ui].name, u.name);
         D.setName(&info.uses[ui].protocol, u.protocol);
     }
     info.use_count = md.uses.len;
     inline for (md.provides, 0..) |p, pi| {
         try mintProtocol(cnode, D.Slot.first_provide + pi, st.endpoints[pi], .{ .send = true, .recv = true, .grant = true }, 0, comptime proto.kernelIdOf(p.protocol));
-        info.provides[pi] = .{ .name = undefined, .protocol = undefined, .slot = D.Slot.first_provide + pi };
+        info.provides[pi] = .{ .name = undefined, .protocol = undefined, .slot = D.Slot.first_provide + pi, .protocol_id = comptime proto.idOf(p.protocol) };
         D.setName(&info.provides[pi].name, p.name);
         D.setName(&info.provides[pi].protocol, p.protocol);
     }
     info.provide_count = md.provides.len;
     inline for (md.devices, 0..) |want, di| {
-        const dev = claimDevice(want.virtio, i) orelse {
-            g.record("device_missing", .{ .domain = md.name, .device = want.name, .virtio_id = want.virtio });
+        const dev = claimDevice(want.virtio, want.instance, i) orelse {
+            g.record("device_missing", .{ .domain = md.name, .device = want.name, .virtio_id = want.virtio, .instance = want.instance });
             return error.DeviceMissing;
         };
         if (dev.irq == 0) {
@@ -366,6 +461,7 @@ fn build(comptime i: usize) !void {
         D.setName(&info.devices[di].name, want.name);
     }
     info.device_count = md.devices.len;
+    if (envoy_index != null and envoy_index.? == i) try installAgentLeases(cnode, &info);
     try withScratch(info_frame, InfoFill{ .info = &info }, fillInfo);
     try mapInto(region, vspace, info_frame, D.Layout.info, .{ .read = true }, &owned);
 
@@ -416,6 +512,10 @@ fn servicesDown(i: usize) void {
 /// Tear the domain down: everything it was made of goes back to its region.
 fn teardown(i: usize) void {
     _ = g.invoke(domains[i].region, abi.UntypedMethod.reset, .{});
+    if (domains[i].cnode != 0) {
+        release(domains[i].cnode);
+        domains[i].cnode = 0;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -459,15 +559,20 @@ fn tasksDone() bool {
 fn summary() noreturn {
     var tasks: u32 = 0;
     var failed: u32 = 0;
+    var skipped: u32 = 0;
     inline for (manifest.domains, 0..) |md, i| {
         const st = domains[i];
         if (md.kind == .task) {
-            tasks += 1;
-            if (st.status != .exited or st.exit_code != 0) failed += 1;
+            if (st.status == .skipped) {
+                skipped += 1;
+            } else {
+                tasks += 1;
+                if (st.status != .exited or st.exit_code != 0) failed += 1;
+            }
         }
         g.record("domain_status", .{ .domain = md.name, .status = @tagName(st.status), .code = st.exit_code, .restarts = st.restarts });
     }
-    g.record("summary", .{ .tests = tasks, .failed = failed });
+    g.record("summary", .{ .tests = tasks, .failed = failed, .skipped = skipped });
     g.exit(@intCast(@min(failed, 0xfe)));
 }
 
@@ -516,8 +621,13 @@ export fn stewardMain(bi: *const abi.BootInfo) callconv(.c) noreturn {
     inline for (manifest.domains, 0..) |md, i| {
         inline for (md.provides, 0..) |_, pi| domains[i].endpoints[pi] = retypeFrom(pool, .endpoint, 0) catch @panic("no endpoint");
     }
+    inline for (0..agent_grants.len) |k| makeAgentLease(k) catch |e| g.record("agent_lease_failed", .{ .service = agent_grants[k].name, .err = @errorName(e) });
     inline for (0..ndomains) |i| {
-        build(i) catch |e| {
+        if (absentOptional(i)) |dev| {
+            domains[i].status = .skipped;
+            g.record("domain_skipped", .{ .domain = manifest.domains[i].name, .reason = "device_missing", .device = dev });
+            servicesDown(i);
+        } else build(i) catch |e| {
             domains[i].status = .failed;
             g.record("domain_build_failed", .{ .domain = manifest.domains[i].name, .err = @errorName(e) });
             teardown(i);
@@ -536,6 +646,13 @@ export fn stewardMain(bi: *const abi.BootInfo) callconv(.c) noreturn {
         } else if (m.badge >= 1 and m.badge <= ndomains) {
             const i = m.badge - 1;
             if (m.tag.label == @backingInt(D.Lifecycle.exit)) onExit(i, @truncate(m.w[0]));
+            if (m.tag.label == @backingInt(D.Lifecycle.ask)) switch (onAsk(i, m.w[0])) {
+                .slot => |s_| _ = g.reply(.{ .label = 0, .length = 1 }, .{s_}),
+                .refused => |why| {
+                    g.record("agent_ask", .{ .index = m.w[0], .granted = false, .reason = @tagName(why) });
+                    _ = g.reply(.{ .label = 1, .length = 1 }, .{@backingInt(why)});
+                },
+            };
         }
     }
 }

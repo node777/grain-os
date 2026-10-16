@@ -15,6 +15,32 @@ pub const Manifest = struct {
     /// Power off once every task has finished (development and test systems).
     halt_when_tasks_finish: bool = false,
     domains: []const Domain,
+    /// What an AI agent (or any client of Envoy) may do on this system.
+    agent: ?Agent = null,
+};
+
+/// The agent's authority. It is never root: it holds exactly these services,
+/// each as a kernel lease with optional limits, and may ask for the askable
+/// ones. Steward approves asks on the owner's behalf within this policy.
+pub const Agent = struct {
+    /// The domain that speaks the Envoy protocol for the agent.
+    envoy: []const u8,
+    /// Services the agent holds from boot.
+    grants: []const Grant = &.{},
+    /// Services the agent may request, once each.
+    askable: []const Grant = &.{},
+};
+
+pub const Grant = struct {
+    /// The name the agent knows it by.
+    name: []const u8,
+    /// "<domain>.<service>"
+    from: []const u8,
+    protocol: []const u8,
+    /// Calls allowed (0 = unlimited).
+    uses: u32 = 0,
+    /// Lifetime from boot or from approval, in milliseconds (0 = forever).
+    duration_ms: u32 = 0,
 };
 
 pub const Kind = enum {
@@ -71,6 +97,11 @@ pub const Device = struct {
     name: []const u8,
     /// virtio device id: 3 = console, 4 = entropy source.
     virtio: u32,
+    /// Which device of that kind, counting from 0 in device-tree order.
+    instance: u8 = 0,
+    /// If the machine lacks it, the domain is skipped (`domain_skipped`), not
+    /// failed: for hardware that is often absent, like a host agent port.
+    optional: bool = false,
 };
 
 pub const max_domains = 16;
@@ -78,6 +109,7 @@ pub const max_provides = 8;
 pub const max_uses = 8;
 pub const max_devices = 4;
 pub const max_name = 23;
+pub const max_agent_caps = 16;
 /// Steward keeps a tenth of every hart for itself and the kernel.
 pub const max_hart_load_ppm = 900_000;
 
@@ -188,6 +220,33 @@ pub fn validate(m: Manifest, buf: []u8) ?[]const u8 {
         }
     }
 
+    // Two domains cannot drive the same device.
+    for (m.domains, 0..) |d, i| for (d.devices, 0..) |dev, di| {
+        for (m.domains[0 .. i + 1], 0..) |e, j| for (e.devices, 0..) |other, k| {
+            if (j == i and k >= di) break;
+            if (other.virtio == dev.virtio and other.instance == dev.instance)
+                return f.msg("domains '{s}' and '{s}' both claim virtio device {d} instance {d}", .{ e.name, d.name, dev.virtio, dev.instance });
+        };
+    };
+
+    if (m.agent) |a| {
+        if (findDomain(m, a.envoy) == null) return f.msg("agent.envoy names '{s}', which is not a domain", .{a.envoy});
+        if (a.grants.len + a.askable.len > max_agent_caps) return f.msg("the agent has {d} grants and askable services; at most {d}", .{ a.grants.len + a.askable.len, max_agent_caps });
+        const lists = [_][]const Grant{ a.grants, a.askable };
+        for (lists, 0..) |list, li| for (list, 0..) |g, gi| {
+            const what = if (li == 0) "grant" else "askable service";
+            if (!isName(g.name)) return f.msg("agent {s} name '{s}' must be 1-{d} characters of a-z, 0-9 and _", .{ what, g.name, max_name });
+            for (lists[0 .. li + 1], 0..) |earlier, ej| for (earlier, 0..) |h, hi| {
+                if (ej == li and hi >= gi) break;
+                if (std.mem.eql(u8, h.name, g.name)) return f.msg("the agent has two services named '{s}'", .{g.name});
+            };
+            const t = resolveUse(m, g.from) orelse return f.msg("agent {s} '{s}' comes from '{s}', but no domain provides it", .{ what, g.name, g.from });
+            const provided = m.domains[t.domain].provides[t.service];
+            if (!std.mem.eql(u8, provided.protocol, g.protocol))
+                return f.msg("agent {s} '{s}' expects {s}, but '{s}' speaks {s}", .{ what, g.name, g.protocol, g.from, provided.protocol });
+        };
+    }
+
     if (m.halt_when_tasks_finish and tasks == 0) return f.msg("halt_when_tasks_finish is set but no domain is a task", .{});
     return null;
 }
@@ -254,6 +313,25 @@ test "each mistake gets its own explanation" {
         .{ .name = "b", .program = "x", .budget_us = 4_000, .period_us = 10_000 },
     } }, "hart 0 is overcommitted: its domains ask for 100.0%");
     try expectError(.{ .name = "t", .halt_when_tasks_finish = true, .domains = &.{console} }, "no domain is a task");
+}
+
+test "agent grants and device claims are checked" {
+    const rng: Domain = .{ .name = "rng", .program = "virtio_rng", .devices = &.{.{ .name = "source", .virtio = 4 }}, .provides = &.{.{ .name = "entropy", .protocol = "entropy.v1" }} };
+    const envoy: Domain = .{ .name = "envoy", .program = "envoy", .devices = &.{.{ .name = "port", .virtio = 3, .instance = 1 }} };
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), validate(.{ .name = "t", .domains = &.{ console, rng, envoy }, .agent = .{
+        .envoy = "envoy",
+        .grants = &.{.{ .name = "console", .from = "console.console", .protocol = "console.v1", .uses = 5 }},
+        .askable = &.{.{ .name = "entropy", .from = "rng.entropy", .protocol = "entropy.v1" }},
+    } }, &buf));
+    try expectError(.{ .name = "t", .domains = &.{console}, .agent = .{ .envoy = "nobody" } }, "agent.envoy names 'nobody'");
+    try expectError(.{ .name = "t", .domains = &.{ console, envoy }, .agent = .{ .envoy = "envoy", .grants = &.{.{ .name = "x", .from = "console.console", .protocol = "echo.v1" }} } }, "agent grant 'x' expects echo.v1, but 'console.console' speaks console.v1");
+    try expectError(.{ .name = "t", .domains = &.{ console, envoy }, .agent = .{ .envoy = "envoy", .grants = &.{
+        .{ .name = "x", .from = "console.console", .protocol = "console.v1" },
+    }, .askable = &.{.{ .name = "x", .from = "console.console", .protocol = "console.v1" }} } }, "two services named 'x'");
+    const con_a: Domain = .{ .name = "con_a", .program = "virtio_console", .devices = &.{.{ .name = "port", .virtio = 3 }} };
+    const con_b: Domain = .{ .name = "con_b", .program = "virtio_console", .devices = &.{.{ .name = "port", .virtio = 3 }} };
+    try expectError(.{ .name = "t", .domains = &.{ con_a, con_b } }, "domains 'con_a' and 'con_b' both claim virtio device 3 instance 0");
 }
 
 test "call cycles are found and spelled out" {

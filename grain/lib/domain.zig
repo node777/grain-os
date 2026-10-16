@@ -23,8 +23,10 @@ pub const Slot = struct {
     pub const first_provide: u32 = 24;
     /// Each device takes two slots: its MMIO frame, then its Irq.
     pub const first_device: u32 = 32;
+    /// Envoy only: the agent's leased services (granted, then asked for).
+    pub const first_agent: u32 = 48;
     /// The first slot the domain may use for its own objects.
-    pub const first_free: u32 = 48;
+    pub const first_free: u32 = 64;
 };
 
 pub const cnode_bits = 8;
@@ -46,7 +48,21 @@ pub const Layout = struct {
 pub const Lifecycle = enum(u32) {
     /// w0 = exit code. The domain is torn down; the call never returns.
     exit = 1,
+    /// Envoy only: w0 = index of an askable agent service. Steward approves
+    /// within the manifest's policy (once per service) and replies label 0
+    /// with w0 = the slot of the new lease, or label 1 with w0 = a reason.
+    ask = 2,
 };
+
+pub const AskRefusal = enum(u32) {
+    not_askable = 1,
+    already_granted = 2,
+    not_envoy = 3,
+    failed = 4,
+};
+
+/// The badge services see when the agent calls them through Envoy.
+pub const agent_badge: usize = 0xA6E7;
 
 pub const name_len = 24;
 pub const max_services = 8;
@@ -69,7 +85,25 @@ pub const Service = extern struct {
     protocol: Name,
     slot: u32,
     _pad: u32 = 0,
+    /// The protocol's id (hash of its IDL descriptor).
+    protocol_id: u64 = 0,
 };
+
+pub const AgentCap = extern struct {
+    name: Name,
+    protocol: Name,
+    /// Where the lease lives in Envoy's CSpace (0 until granted).
+    slot: u32,
+    uses: u32,
+    duration_ms: u32,
+    flags: u32,
+    protocol_id: u64,
+
+    pub const granted: u32 = 1;
+    pub const askable: u32 = 2;
+};
+
+pub const max_agent_caps = 16;
 
 pub const Device = extern struct {
     name: Name,
@@ -108,6 +142,10 @@ pub const DomainInfo = extern struct {
     uses: [max_services]Service,
     provides: [max_services]Service,
     devices: [max_devices]Device,
+    /// Envoy only: the agent's services.
+    agent_count: u32,
+    _pad: u32 = 0,
+    agent: [max_agent_caps]AgentCap,
 };
 
 comptime {
