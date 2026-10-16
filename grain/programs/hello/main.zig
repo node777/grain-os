@@ -3,6 +3,7 @@
 //! the manifest, by name.
 const std = @import("std");
 const g = @import("grain");
+const proto = @import("proto");
 
 pub const panic = g.panic;
 comptime {
@@ -12,12 +13,11 @@ comptime {
 pub fn main() !u16 {
     const console = g.use("console") orelse return error.NoConsole;
     const entropy = g.use("entropy") orelse return error.NoEntropy;
-    var random: [32]u8 = undefined;
-    try g.proto.entropy.fill(entropy, &random);
-    const hex = std.fmt.bytesToHex(random[0..8], .lower);
+    const random = try g.idl.call(proto.entropy.get, entropy, .{});
+    const hex = std.fmt.bytesToHex(random.bytes.slice()[0..8].*, .lower);
     var line: [96]u8 = undefined;
     const text = try std.fmt.bufPrint(&line, "hello from grain! entropy {s}\n", .{&hex});
-    try g.proto.console.print(console, text);
+    try proto.console.print(console, text);
     g.log("hello", .{ .entropy = @as([]const u8, &hex), .console_bytes = text.len });
     return 0;
 }

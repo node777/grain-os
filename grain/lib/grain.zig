@@ -5,7 +5,7 @@ pub const abi = @import("abi");
 pub const klog = @import("klog");
 pub const domain = @import("domain.zig");
 pub const virtio = @import("virtio.zig");
-pub const proto = @import("protocols.zig");
+pub const idl = @import("idl.zig");
 
 pub const CPtr = abi.CPtr;
 pub const Status = abi.Status;

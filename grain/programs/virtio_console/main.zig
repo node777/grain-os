@@ -6,6 +6,7 @@
 //! lines (or a full buffer). Lines from different clients never interleave.
 const std = @import("std");
 const g = @import("grain");
+const proto = @import("proto");
 const virtio = g.virtio;
 const Slot = g.domain.Slot;
 
@@ -43,6 +44,17 @@ const Driver = struct {
         return &d.lines[0];
     }
 
+    /// console.write
+    pub fn write(d: *Driver, p: proto.console.write.Params, caller: g.idl.Caller) !proto.console.write.Results {
+        const l = d.lineFor(caller.badge);
+        for (p.text.slice()) |c| {
+            l.data[l.len] = c;
+            l.len += 1;
+            if (c == '\n' or l.len == line_max) d.flush(l);
+        }
+        return .{};
+    }
+
     fn flush(d: *Driver, l: *Line) void {
         if (l.len == 0) return;
         @memcpy(d.buf.bytes()[0..l.len], l.data[0..l.len]);
@@ -68,18 +80,5 @@ pub fn main() !u16 {
     dev.ready();
     g.log("driver_ready", .{ .device = "virtio_console", .mmio = g.klog.hex(info.phys), .irq = info.irq_line });
     var d: Driver = .{ .dev = dev, .tx = tx, .buf = buf, .signal = signal, .irq = info.irq_slot };
-    g.serve(g.provided("console") orelse return error.NoService, &d, handle);
-}
-
-fn handle(d: *Driver, m: g.Message) g.Reply {
-    if (m.label != g.proto.console.write) return .{ .label = g.proto.failed };
-    var tmp: [32]u8 = undefined;
-    const text = g.proto.console.bytesOf(m.w, &tmp);
-    const l = d.lineFor(m.badge);
-    for (text) |c| {
-        l.data[l.len] = c;
-        l.len += 1;
-        if (c == '\n' or l.len == line_max) d.flush(l);
-    }
-    return .{};
+    g.idl.serve(proto.console, g.provided("console") orelse return error.NoService, &d);
 }

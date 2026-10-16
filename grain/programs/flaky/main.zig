@@ -2,6 +2,7 @@
 //! restart policy. Its clients keep their endpoint across the restart.
 const std = @import("std");
 const g = @import("grain");
+const proto = @import("proto");
 
 pub const panic = g.panic;
 comptime {
@@ -14,10 +15,12 @@ pub fn main() !u16 {
         @as(*volatile u8, @ptrFromInt(0x10)).* = 1; // store page fault
     }
     g.log("serving", .{ .restart_count = g.env().restart_count });
-    g.serve(g.provided("echo") orelse return error.NoService, {}, handle);
+    var server: Echo = .{};
+    g.idl.serve(proto.echo, g.provided("echo") orelse return error.NoService, &server);
 }
 
-fn handle(_: void, m: g.Message) g.Reply {
-    if (m.label != g.proto.echo.ping) return .{ .label = g.proto.failed };
-    return .{ .length = 2, .w = .{ m.w[0] + 1, m.badge, 0, 0, 0 } };
-}
+const Echo = struct {
+    pub fn ping(_: *Echo, p: proto.echo.ping.Params, caller: g.idl.Caller) !proto.echo.ping.Results {
+        return .{ .value = p.value +% 1, .badge = caller.badge };
+    }
+};

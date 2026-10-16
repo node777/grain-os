@@ -61,7 +61,8 @@ pub fn build(b: *std.Build) void {
             return exe;
         }
     };
-    const user_imports: []const std.Build.Module.Import = &.{ .{ .name = "grain", .module = grain_lib }, .{ .name = "abi", .module = abi_mod } };
+    const proto_mod = b.createModule(.{ .root_source_file = b.path("grain/proto/proto.zig"), .imports = &.{.{ .name = "grain", .module = grain_lib }} });
+    const user_imports: []const std.Build.Module.Import = &.{ .{ .name = "grain", .module = grain_lib }, .{ .name = "abi", .module = abi_mod }, .{ .name = "proto", .module = proto_mod } };
 
     // Systems: each is a manifest plus the programs it names, packed into a
     // boot image and embedded in its own Steward. grain-pack refuses an image
@@ -87,6 +88,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "image", .module = image_mod },
         .{ .name = "elf", .module = elf_mod },
         .{ .name = "fdt", .module = fdt_mod },
+        .{ .name = "proto", .module = proto_mod },
     };
     const System = struct {
         fn steward(bb: *std.Build, label: []const u8, manifest: []const u8, packer: *std.Build.Step.Compile, progs: []const *std.Build.Step.Compile, names: []const []const u8, target: std.Build.ResolvedTarget, opt: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
@@ -260,6 +262,8 @@ pub fn build(b: *std.Build) void {
     manifest_tests.root_module.addAnonymousImport("miswired.zon", .{ .root_source_file = b.path("system/tests/miswired.zon") });
     manifest_tests.root_module.addAnonymousImport("faults.zon", .{ .root_source_file = b.path("system/tests/faults.zon") });
     test_step.dependOn(&b.addRunArtifact(manifest_tests).step);
+    const idl_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/idl.zig"), .target = host, .optimize = optimize, .imports = &.{ .{ .name = "abi", .module = abi_mod }, .{ .name = "klog", .module = klog_mod } } }) });
+    test_step.dependOn(&b.addRunArtifact(idl_tests).step);
     const image_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/manifest/image.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(image_tests).step);
 
