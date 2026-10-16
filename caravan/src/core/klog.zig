@@ -23,11 +23,16 @@ pub fn hex(value: anytype) Hex(@TypeOf(value)) {
 
 pub const Error = error{NoSpaceLeft};
 
-/// Format one record (no trailing newline) into `buf`.
+/// Format one kernel record (no trailing newline) into `buf`.
 pub fn format(buf: []u8, comptime event: []const u8, fields: anytype) Error![]u8 {
+    return formatPrefixed(prefix, buf, event, fields);
+}
+
+/// Format a record with another source prefix (user programs use `@grain`).
+pub fn formatPrefixed(comptime source: []const u8, buf: []u8, comptime event: []const u8, fields: anytype) Error![]u8 {
     comptime validateName(event);
     var len: usize = 0;
-    len += (try std.fmt.bufPrint(buf[len..], prefix ++ " " ++ event, .{})).len;
+    len += (try std.fmt.bufPrint(buf[len..], source ++ " " ++ event, .{})).len;
     inline for (comptime std.meta.fieldNames(@TypeOf(fields))) |name| {
         comptime validateName(name);
         len += (try std.fmt.bufPrint(buf[len..], " " ++ name ++ "=", .{})).len;

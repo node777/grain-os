@@ -41,3 +41,17 @@ pub inline fn time() u64 {
 pub inline fn wfi() void {
     asm volatile ("wfi");
 }
+
+pub const sie_ssie: usize = 1 << 1;
+pub const sie_seie: usize = 1 << 9;
+pub const sip_ssip: usize = 1 << 1;
+
+/// Switch to the Sv39 root table at physical address `root` and flush.
+pub inline fn setRoot(root: u64) void {
+    write("satp", (8 << 60) | (root >> 12));
+    sfenceAll();
+}
+
+pub inline fn sfenceAll() void {
+    asm volatile ("sfence.vma" ::: .{ .memory = true });
+}
