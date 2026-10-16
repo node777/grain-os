@@ -1,7 +1,7 @@
 //! virtio-console driver: serves console.v1 by writing to the device's
 //! port 0 transmit queue.
 //!
-//! Writes arrive in 32-byte pieces, and several clients write at once, so
+//! Writes arrive in pieces of up to 256 bytes, and several clients write at once, so
 //! the driver keeps a line buffer per client (by badge) and sends only whole
 //! lines (or a full buffer). Lines from different clients never interleave.
 const std = @import("std");

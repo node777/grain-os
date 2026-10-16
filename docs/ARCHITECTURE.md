@@ -346,7 +346,7 @@ every hash at boot and refuses to start if any differs.
 (the domain's own CNode, address space, thread, memory and lifecycle
 endpoint, then uses at 16+, provides at 24+, devices at 32+), fixed
 addresses (program at 0x10000, devices at 0x7000_0000, `DomainInfo` at
-0x7ff0_0000, stack below 0x7fff_0000), and the `DomainInfo` page, which
+0x7ff0_0000, the manifest's `stack_kib` of stack below 0x7fff_0000), and the `DomainInfo` page, which
 names everything the domain was given: its uses and provides with
 protocols and slots, its devices with MMIO address, IRQ line and slots,
 its program hash and the system's closure hash. Programs look things up by
@@ -366,8 +366,11 @@ an unwritten convention.
 - Interfaces are defined **as Zig declarations** in `grain/proto/` (`console`,
   `entropy`, `echo`, `kv`, `registry`). Each method is
   `idl.Method(.{ .label, .effect, .doc, .undo }, Params, Results)` with
-  per-field docs. Field types are integers, bools, enums and `idl.Bytes(n)`;
-  a message is at most five register words each way, checked at compile time.
+  per-field docs. Field types are integers, bools, enums, `idl.Text(n)`
+  (UTF-8; agents see a string) and `idl.Bytes(n)` (binary; agents see hex),
+  up to 504 bytes. A message is up to 64 words each way, checked at compile
+  time: the first five travel in registers, the rest through the IPC buffers
+  (the kernel copies them, §2.6), so a 480-byte chunk is one call.
 - `grain/lib/idl.zig` generates, at `comptime`, typed client calls
   (`idl.call(proto.kv.put, ep, .{ .key = 1, .value = 2 })`), server dispatch
   (`idl.serve(proto.kv, ep, impl)`, which calls `impl.put(params, caller)`
@@ -386,7 +389,7 @@ an unwritten convention.
   protocol and rejects id collisions at compile time, and the manifest check
   rejects a protocol name it doesn't know.
 - The **Registry** domain serves `registry.v1`: `count`, `nth`, `lookup(id)`
-  and `describe(id, offset)`, which returns the descriptor 24 bytes at a
+  and `describe(id, offset)`, which returns the descriptor 480 bytes at a
   time. Any domain can ask what a protocol is and how to call it; Envoy
   fetches descriptors from it rather than carrying its own. This is FIDL's
   idea with Zig as the IDL, and it is what lets an AI operate the system

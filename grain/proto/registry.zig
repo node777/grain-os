@@ -15,7 +15,7 @@ pub const nth = idl.Method(.{ .label = 2, .effect = .pure, .doc = "The id and na
     pub const docs = .{ .index = "0 .. count-1" };
 }, struct {
     id: u64,
-    name: idl.Bytes(24),
+    name: idl.Text(24),
     pub const docs = .{ .id = "Protocol id (hash of its descriptor)", .name = "e.g. console.v1" };
 });
 
@@ -23,17 +23,17 @@ pub const lookup = idl.Method(.{ .label = 3, .effect = .pure, .doc = "The name o
     id: u64,
     pub const docs = .{ .id = "Protocol id" };
 }, struct {
-    name: idl.Bytes(24),
+    name: idl.Text(24),
     found: bool,
     pub const docs = .{ .name = "e.g. console.v1", .found = "Whether the id is known" };
 });
 
-pub const describe = idl.Method(.{ .label = 4, .effect = .pure, .doc = "A piece of the protocol's JSON descriptor: 24 bytes from offset." }, struct {
+pub const describe = idl.Method(.{ .label = 4, .effect = .pure, .doc = "A piece of the protocol's JSON descriptor: up to 480 bytes from offset." }, struct {
     id: u64,
     offset: u64,
     pub const docs = .{ .id = "Protocol id", .offset = "Byte offset into the descriptor" };
 }, struct {
     total: u64,
-    chunk: idl.Bytes(24),
-    pub const docs = .{ .total = "Descriptor length in bytes", .chunk = "Up to 24 bytes starting at offset" };
+    chunk: idl.Text(480),
+    pub const docs = .{ .total = "Descriptor length in bytes", .chunk = "Up to 480 bytes starting at offset" };
 });

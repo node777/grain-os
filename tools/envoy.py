@@ -188,8 +188,12 @@ def json_schema(field_type):
         return {"type": "boolean"}
     if field_type.startswith("enum("):
         return {"type": "string", "enum": field_type[5:-1].split("|")}
+    if field_type.startswith("text("):
+        return {"type": "string", "maxLength": int(field_type[5:-1])}
     if field_type.startswith("bytes("):
-        return {"type": "string", "maxLength": int(field_type[6:-1])}
+        n = int(field_type[6:-1])
+        return {"type": "string", "pattern": "^([0-9a-f]{2})*$", "maxLength": 2 * n,
+                "description": f"up to {n} bytes, as hex"}
     if field_type.startswith("u"):
         bits = int(field_type[1:])
         return {"type": "integer", "minimum": 0, "maximum": 2 ** bits - 1}

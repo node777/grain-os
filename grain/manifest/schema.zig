@@ -70,6 +70,9 @@ pub const Domain = struct {
     period_us: u32 = 10_000,
     /// Memory the domain may allocate from itself (a power of two, 4..65536 KiB).
     memory_kib: u32 = 64,
+    /// Stack size, mapped below `Layout.stack_top`: a multiple of 4 from 4 to
+    /// 512 KiB (which keeps it clear of the IPC buffer).
+    stack_kib: u32 = 32,
     restart: Restart = .never,
     max_restarts: u8 = 3,
     /// A write-only console for `@grain` records (development systems).
@@ -171,6 +174,8 @@ pub fn validate(m: Manifest, buf: []u8) ?[]const u8 {
         if (d.period_us > 10_000_000) return f.msg("domain '{s}': period_us {d} is longer than 10 s", .{ d.name, d.period_us });
         if (d.memory_kib < 4 or d.memory_kib > 65536 or !std.math.isPowerOfTwo(d.memory_kib))
             return f.msg("domain '{s}': memory_kib {d} must be a power of two from 4 to 65536", .{ d.name, d.memory_kib });
+        if (d.stack_kib < 4 or d.stack_kib > 512 or d.stack_kib % 4 != 0)
+            return f.msg("domain '{s}': stack_kib {d} must be a multiple of 4 from 4 to 512", .{ d.name, d.stack_kib });
         if (d.kind == .task) tasks += 1;
 
         if (d.provides.len > max_provides) return f.msg("domain '{s}' provides {d} services; at most {d}", .{ d.name, d.provides.len, max_provides });
@@ -306,6 +311,7 @@ test "each mistake gets its own explanation" {
     try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .priority = 255 }} }, "priority 255 is outside 1..254");
     try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .budget_us = 20, .period_us = 10 }} }, "budget_us (20) is larger than period_us (10)");
     try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .memory_kib = 48 }} }, "memory_kib 48 must be a power of two");
+    try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .stack_kib = 6 }} }, "stack_kib 6 must be a multiple of 4");
     try expectError(.{ .name = "t", .domains = &.{ console, .{ .name = "a", .program = "x", .uses = &.{.{ .name = "out", .from = "console.consol", .protocol = "console.v1" }} } } }, "uses 'console.consol', but no domain provides it");
     try expectError(.{ .name = "t", .domains = &.{ console, .{ .name = "a", .program = "x", .uses = &.{.{ .name = "out", .from = "console.console", .protocol = "console.v2" }} } } }, "expects 'console.console' to speak console.v2, but it speaks console.v1");
     try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .devices = &.{.{ .name = "gpu", .virtio = 16 }} }} }, "virtio id 16");

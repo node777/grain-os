@@ -246,8 +246,8 @@ const Action = struct {
     undo_of: u64,
     /// For undoable calls: the words of the original arguments and results,
     /// so `undo` can fill the undo method's parameters by name.
-    args: [5]usize,
-    results: [5]usize,
+    args: idl.Words,
+    results: idl.Words,
     undoable: bool,
     undone: bool,
 };
@@ -269,7 +269,7 @@ fn fixedStr(s: []const u8) []const u8 {
 
 /// Record an action: its hash covers the previous hash and the entry, so
 /// rewriting history changes every later hash.
-fn audit(verb: []const u8, cap: []const u8, method: []const u8, outcome: []const u8, undoable: bool, args: [5]usize, results: [5]usize, undo_of: u64) *Action {
+fn audit(verb: []const u8, cap: []const u8, method: []const u8, outcome: []const u8, undoable: bool, args: idl.Words, results: idl.Words, undo_of: u64) *Action {
     const slot = &log_entries[log_len % max_log];
     if (log_len < max_log) log_len += 1;
     slot.* = .{ .seq = seq_next, .verb = undefined, .cap = undefined, .method = undefined, .outcome = undefined, .hash = undefined, .undo_of = undo_of, .args = args, .results = results, .undoable = undoable, .undone = false };
@@ -309,8 +309,18 @@ fn parseParams(comptime T: type, args: ?Value) error{InvalidArgs}!T {
         const F = @FieldType(T, f);
         const j = argOf(args, f) orelse return error.InvalidArgs;
         if (@typeInfo(F) == .@"struct" and @hasDecl(F, "idl_bytes")) {
-            if (j != .string or j.string.len > F.idl_bytes) return error.InvalidArgs;
-            @field(v, f) = F.from(j.string);
+            if (j != .string) return error.InvalidArgs;
+            if (F.idl_text) {
+                if (j.string.len > F.idl_bytes) return error.InvalidArgs;
+                @field(v, f) = F.from(j.string);
+            } else {
+                // Binary travels as hex.
+                if (j.string.len % 2 != 0 or j.string.len / 2 > F.idl_bytes) return error.InvalidArgs;
+                var b: F = .{};
+                _ = std.fmt.hexToBytes(b.data[0 .. j.string.len / 2], j.string) catch return error.InvalidArgs;
+                b.len = @intCast(j.string.len / 2);
+                @field(v, f) = b;
+            }
         } else switch (@typeInfo(F)) {
             .int => {
                 if (j != .integer) return error.InvalidArgs;
@@ -330,11 +340,6 @@ fn parseParams(comptime T: type, args: ?Value) error{InvalidArgs}!T {
     return v;
 }
 
-fn printable(s: []const u8) bool {
-    for (s) |c| if (c < 0x20 or c >= 0x7f) return false;
-    return true;
-}
-
 fn writeFields(o: *Out, comptime T: type, v: T) void {
     o.obj();
     inline for (comptime std.meta.fieldNames(T)) |f| {
@@ -342,12 +347,7 @@ fn writeFields(o: *Out, comptime T: type, v: T) void {
         o.field(f);
         const x = @field(v, f);
         if (@typeInfo(F) == .@"struct" and @hasDecl(F, "idl_bytes")) {
-            if (printable(x.slice())) o.str(x.slice()) else {
-                o.obj();
-                o.field("hex");
-                o.hex(x.slice());
-                o.end("}");
-            }
+            if (F.idl_text) o.str(x.slice()) else o.hex(x.slice());
         } else switch (@typeInfo(F)) {
             .int => o.num(x),
             .bool => o.boolean(x),
@@ -364,8 +364,8 @@ const CallOutcome = struct {
     status: abi.Status = .ok,
     /// Service error code if the call reached the service and it failed.
     code: usize = 0,
-    args: [5]usize = @splat(0),
-    results: [5]usize = @splat(0),
+    args: idl.Words = @splat(0),
+    results: idl.Words = @splat(0),
 };
 
 fn outcomeText(c: CallOutcome) []const u8 {
@@ -374,11 +374,11 @@ fn outcomeText(c: CallOutcome) []const u8 {
     return @tagName(@as(idl.ErrorCode, @fromBackingInt(@intCast(c.code))));
 }
 
-fn rawCall(comptime M: type, slot: u32, w: [5]usize) CallOutcome {
-    const r = g.syscall(.call, slot, @bitCast(g.Tag{ .label = M.label, .length = @intCast(idl.words(M.Params)) }), w);
-    if (r.status != .ok) return .{ .ok = false, .status = r.status, .args = w };
-    if (r.tag.label != 0) return .{ .ok = false, .code = r.w[0], .args = w };
-    return .{ .ok = true, .args = w, .results = r.w };
+fn rawCall(comptime M: type, slot: u32, w: idl.Words) CallOutcome {
+    const out = idl.callWords(slot, M.label, &w, idl.words(M.Params));
+    if (out.r.status != .ok) return .{ .ok = false, .status = out.r.status, .args = w };
+    if (out.r.tag.label != 0) return .{ .ok = false, .code = out.w[0], .args = w };
+    return .{ .ok = true, .args = w, .results = out.w };
 }
 
 /// Method metadata without calling, for plan.
@@ -396,7 +396,7 @@ fn infoFor(c: *const Cap, method: []const u8) ?MethodInfo {
     return null;
 }
 
-const ParseOutcome = union(enum) { ok: [5]usize, unknown_method, invalid_args };
+const ParseOutcome = union(enum) { ok: idl.Words, unknown_method, invalid_args };
 
 fn encodeArgs(c: *const Cap, method: []const u8, args: ?Value) ParseOutcome {
     inline for (proto.all) |P| if (idl.id(P) == c.info.protocol_id) {
@@ -410,7 +410,7 @@ fn encodeArgs(c: *const Cap, method: []const u8, args: ?Value) ParseOutcome {
     return .unknown_method;
 }
 
-fn invokeMethod(c: *const Cap, method: []const u8, w: [5]usize) CallOutcome {
+fn invokeMethod(c: *const Cap, method: []const u8, w: idl.Words) CallOutcome {
     inline for (proto.all) |P| if (idl.id(P) == c.info.protocol_id) {
         inline for (comptime idl.methodNames(P)) |n| if (std.mem.eql(u8, n, method)) {
             return rawCall(@field(P, n), c.info.slot, w);
@@ -419,11 +419,11 @@ fn invokeMethod(c: *const Cap, method: []const u8, w: [5]usize) CallOutcome {
     return .{ .ok = false, .code = @backingInt(idl.ErrorCode.unknown_method) };
 }
 
-fn writeResults(o: *Out, c: *const Cap, method: []const u8, w: [5]usize) void {
+fn writeResults(o: *Out, c: *const Cap, method: []const u8, w: idl.Words) void {
     inline for (proto.all) |P| if (idl.id(P) == c.info.protocol_id) {
         inline for (comptime idl.methodNames(P)) |n| if (std.mem.eql(u8, n, method)) {
             const M = @field(P, n);
-            if (idl.decode(M.Results, w)) |res| writeFields(o, M.Results, res) else |_| o.nul();
+            if (idl.decode(M.Results, &w)) |res| writeFields(o, M.Results, res) else |_| o.nul();
             return;
         };
     };
@@ -432,15 +432,15 @@ fn writeResults(o: *Out, c: *const Cap, method: []const u8, w: [5]usize) void {
 
 /// Fill the undo method's parameters by name: from the original results
 /// first, then the original arguments.
-fn undoArgs(c: *const Cap, method: []const u8, undo: []const u8, args: [5]usize, results: [5]usize) ?[5]usize {
+fn undoArgs(c: *const Cap, method: []const u8, undo: []const u8, args: idl.Words, results: idl.Words) ?idl.Words {
     inline for (proto.all) |P| if (idl.id(P) == c.info.protocol_id) {
         inline for (comptime idl.methodNames(P)) |n| if (std.mem.eql(u8, n, method)) {
             const M = @field(P, n);
             if (M.undo) |u_name| {
                 if (!std.mem.eql(u8, u_name, undo)) return null;
                 const U = @field(P, u_name);
-                const a = idl.decode(M.Params, args) catch return null;
-                const r = idl.decode(M.Results, results) catch return null;
+                const a = idl.decode(M.Params, &args) catch return null;
+                const r = idl.decode(M.Results, &results) catch return null;
                 var up: U.Params = undefined;
                 inline for (comptime std.meta.fieldNames(U.Params)) |f| {
                     if (@hasField(M.Results, f)) @field(up, f) = @field(r, f) else @field(up, f) = @field(a, f);
@@ -534,7 +534,7 @@ fn verbDescribe(o: *Out, req: Value) void {
     const name = (req.object.get("cap") orelse return err(o, "invalid_request", "describe needs \"cap\""));
     if (name != .string) return err(o, "invalid_request", "\"cap\" must be a string");
     const c = findCap(name.string) orelse return err(o, "unknown_cap", "the agent holds no capability by that name");
-    // Ask the Registry: the descriptor comes 24 bytes at a time.
+    // Ask the Registry: the descriptor comes 480 bytes at a time.
     var desc: [4096]u8 = undefined;
     var total: usize = 0;
     var off: usize = 0;
@@ -561,7 +561,7 @@ const Step = struct {
     method: []const u8,
     args: ?Value,
     info: MethodInfo,
-    words: [5]usize,
+    words: idl.Words,
 };
 
 const StepProblem = struct { index: usize, code: []const u8, detail: []const u8 };
@@ -602,6 +602,12 @@ fn verbCall(o: *Out, req: Value) void {
 }
 
 const max_steps = 16;
+
+// Plan scratch space. Envoy serves one request at a time, so these live in
+// static memory instead of on the 32 KiB stack (a step is over 512 bytes).
+var plan_steps: [max_steps]Step = undefined;
+var apply_done: [max_steps]*Action = undefined;
+var apply_results: [max_steps]idl.Words = undefined;
 
 fn planSteps(o: *Out, req: Value, steps: *[max_steps]Step, n: *usize) ?bool {
     const list = req.object.get("steps") orelse {
@@ -650,9 +656,9 @@ fn writePlan(o: *Out, steps: []const Step, atomic: bool) void {
 }
 
 fn verbPlan(o: *Out, req: Value) void {
-    var steps: [max_steps]Step = undefined;
+    const steps = &plan_steps;
     var n: usize = 0;
-    const atomic = planSteps(o, req, &steps, &n) orelse return;
+    const atomic = planSteps(o, req, steps, &n) orelse return;
     // Uses needed per capability versus uses left.
     var short = false;
     for (steps[0..n]) |s| {
@@ -686,13 +692,13 @@ fn undoAction(a: *Action) CallOutcome {
 }
 
 fn verbApply(o: *Out, req: Value) void {
-    var steps: [max_steps]Step = undefined;
+    const steps = &plan_steps;
     var n: usize = 0;
-    const atomic = planSteps(o, req, &steps, &n) orelse return;
+    const atomic = planSteps(o, req, steps, &n) orelse return;
     const partial = if (req.object.get("allow_partial")) |v| v == .bool and v.bool else false;
     if (!atomic and !partial) return err(o, "not_atomic", "a step cannot be undone, so the plan cannot be all-or-nothing; pass \"allow_partial\":true to run it anyway");
-    var done: [max_steps]*Action = undefined;
-    var results: [max_steps][5]usize = undefined;
+    const done = &apply_done;
+    const results = &apply_results;
     var failed_at: ?usize = null;
     var failure: []const u8 = "";
     for (steps[0..n], 0..) |s, i| {

@@ -356,7 +356,8 @@ fn build(comptime i: usize) !void {
     var segs = exe.segments();
     while (try segs.next()) |seg| program_pages += (std.mem.alignForward(u64, seg.vaddr + seg.mem_size, 4096) - std.mem.alignBackward(u64, seg.vaddr, 4096)) / 4096;
     const memory_bytes: u64 = @as(u64, md.memory_kib) * 1024;
-    const overhead = (program_pages + D.Layout.stack_pages + 2 + md.devices.len) * 4096 + 128 * 1024;
+    const stack_pages = md.stack_kib / 4;
+    const overhead = (program_pages + stack_pages + 2 + md.devices.len) * 4096 + 128 * 1024;
     const region_bits = log2Ceil(memory_bytes + 2 * overhead);
     if (st.region == 0) {
         st.region = try retypeFrom(pool, .untyped, region_bits);
@@ -397,7 +398,7 @@ fn build(comptime i: usize) !void {
         }
     }
     const rw: abi.Rights = .{ .read = true, .write = true };
-    for (0..D.Layout.stack_pages) |p| {
+    for (0..stack_pages) |p| {
         const f = try R.make(region, &owned, .frame, 12);
         try mapInto(region, vspace, f, D.Layout.stack_top - (p + 1) * 4096, rw, &owned);
     }

@@ -10,7 +10,8 @@
 //! From that, `comptime` makes everything else:
 //!   - `call(Proto.method, ep, args)`: a typed client call;
 //!   - `serve(Proto, ep, impl)`: server dispatch to `impl.<method>(params, caller)`;
-//!   - the wire encoding (message words; at most five each way);
+//!   - the wire encoding: up to 64 message words each way, the first five in
+//!     registers and the rest through the IPC buffer (the kernel copies them);
 //!   - `descriptor(Proto)`: canonical JSON naming every method, parameter,
 //!     result, type, effect and doc, for the Registry and for agents;
 //!   - `id(Proto)`: a 64-bit hash of that descriptor. Steward stamps its low
@@ -39,12 +40,15 @@ pub const MethodSpec = struct {
 };
 
 pub const register_words = 5;
+pub const max_words = 64;
+/// One message's words: 0..4 in registers, 5..63 in the IPC buffer.
+pub const Words = [max_words]usize;
 
 pub fn Method(comptime spec: MethodSpec, comptime P: type, comptime R: type) type {
     comptime {
         if (spec.label == 0) @compileError("method labels start at 1");
-        if (words(P) > register_words) @compileError("parameters need " ++ std.fmt.comptimePrint("{d}", .{words(P)}) ++ " words; at most 5 travel in registers");
-        if (words(R) > register_words) @compileError("results need " ++ std.fmt.comptimePrint("{d}", .{words(R)}) ++ " words; at most 5 travel in registers");
+        if (words(P) > max_words) @compileError("parameters need " ++ std.fmt.comptimePrint("{d}", .{words(P)}) ++ " words; a message holds 64");
+        if (words(R) > max_words) @compileError("results need " ++ std.fmt.comptimePrint("{d}", .{words(R)}) ++ " words; a message holds 64");
     }
     return struct {
         pub const idl_method = true;
@@ -57,12 +61,27 @@ pub fn Method(comptime spec: MethodSpec, comptime P: type, comptime R: type) typ
     };
 }
 
-/// Up to `n` (≤ 32) bytes, carried as a length word plus packed words.
+/// The most bytes a `Bytes`/`Text` field can hold: a message is 64 words,
+/// one of them the length.
+pub const max_bytes = (max_words - 1) * 8;
+
+/// Up to `n` bytes of binary data (agents see hex), carried as a length word
+/// plus packed words.
 pub fn Bytes(comptime n: usize) type {
-    comptime std.debug.assert(n > 0 and n <= 32);
+    return Sized(n, false);
+}
+
+/// Up to `n` bytes of UTF-8 text (agents see a string).
+pub fn Text(comptime n: usize) type {
+    return Sized(n, true);
+}
+
+fn Sized(comptime n: usize, comptime text: bool) type {
+    comptime std.debug.assert(n > 0 and n <= max_bytes);
     return struct {
         pub const idl_bytes = n;
-        len: u8 = 0,
+        pub const idl_text = text;
+        len: u16 = 0,
         data: [n]u8 = @splat(0),
 
         pub fn from(s: []const u8) @This() {
@@ -133,8 +152,8 @@ pub fn words(comptime T: type) usize {
     return n;
 }
 
-pub fn encode(comptime T: type, v: T) [register_words]usize {
-    var out: [register_words]usize = @splat(0);
+pub fn encode(comptime T: type, v: T) Words {
+    var out: Words = @splat(0);
     var i: usize = 0;
     inline for (comptime std.meta.fieldNames(T)) |f| {
         const F = @FieldType(T, f);
@@ -158,7 +177,7 @@ pub fn encode(comptime T: type, v: T) [register_words]usize {
     return out;
 }
 
-pub fn decode(comptime T: type, w: [register_words]usize) error{InvalidArgs}!T {
+pub fn decode(comptime T: type, w: *const Words) error{InvalidArgs}!T {
     var v: T = undefined;
     var i: usize = 0;
     inline for (comptime std.meta.fieldNames(T)) |f| {
@@ -241,7 +260,7 @@ fn jsonString(comptime s: []const u8) []const u8 {
 
 fn typeName(comptime T: type) []const u8 {
     comptime {
-        if (isBytes(T)) return std.fmt.comptimePrint("bytes({d})", .{T.idl_bytes});
+        if (isBytes(T)) return std.fmt.comptimePrint("{s}({d})", .{ if (T.idl_text) "text" else "bytes", T.idl_bytes });
         return switch (@typeInfo(T)) {
             .int => @typeName(T),
             .bool => "bool",
@@ -317,21 +336,48 @@ pub fn check(comptime P: type) void {
 // ---------------------------------------------------------------------------
 // Calls and serving
 
+fn ipcWords() *Words {
+    const ib: *grain.abi.IpcBuffer = @ptrFromInt(grain.ipc_buffer);
+    return &ib.words;
+}
+
+/// Send-side half of a message: words 5.. go to the IPC buffer, 0..4 are
+/// returned for the registers.
+fn scatter(w: *const Words, n: usize) [register_words]usize {
+    if (n > register_words) @memcpy(ipcWords()[register_words..n], w[register_words..n]);
+    return w[0..register_words].*;
+}
+
+/// Receive-side half: a message's words, wherever they arrived.
+fn gather(r: grain.Result) Words {
+    var w: Words = @splat(0);
+    w[0..register_words].* = r.w;
+    const n = @min(r.tag.length, max_words);
+    if (n > register_words) @memcpy(w[register_words..n], ipcWords()[register_words..n]);
+    return w;
+}
+
+/// Call method `M` with already-encoded words; the raw result.
+pub fn callWords(ep: grain.CPtr, label: u32, w: *const Words, n: usize) struct { r: grain.Result, w: Words } {
+    const r = grain.syscall(.call, ep, @bitCast(grain.Tag{ .label = label, .length = @intCast(n) }), scatter(w, n));
+    return .{ .r = r, .w = gather(r) };
+}
+
 /// A typed call: `try idl.call(echo.ping, ep, .{ .value = 41 })`.
 pub fn call(comptime M: type, ep: grain.CPtr, args: M.Params) CallError!M.Results {
     const w = encode(M.Params, args);
-    const r = grain.syscall(.call, ep, @bitCast(grain.Tag{ .label = M.label, .length = @intCast(words(M.Params)) }), w);
-    if (r.status != .ok) return error.Transport;
-    if (r.tag.label != 0) return errorOf(@fromBackingInt(@intCast(r.w[0])));
-    return decode(M.Results, r.w) catch error.Failed;
+    const out = callWords(ep, M.label, &w, words(M.Params));
+    if (out.r.status != .ok) return error.Transport;
+    if (out.r.tag.label != 0) return errorOf(@fromBackingInt(@intCast(out.w[0])));
+    return decode(M.Results, &out.w) catch error.Failed;
 }
 
 /// The raw status of the last failed transport, for callers that need it.
 pub fn callStatus(comptime M: type, ep: grain.CPtr, args: M.Params) struct { status: grain.Status, label: u32, results: ?M.Results, code: usize } {
     const w = encode(M.Params, args);
-    const r = grain.syscall(.call, ep, @bitCast(grain.Tag{ .label = M.label, .length = @intCast(words(M.Params)) }), w);
-    if (r.status != .ok or r.tag.label != 0) return .{ .status = r.status, .label = r.tag.label, .results = null, .code = r.w[0] };
-    return .{ .status = r.status, .label = 0, .results = decode(M.Results, r.w) catch null, .code = 0 };
+    const out = callWords(ep, M.label, &w, words(M.Params));
+    if (out.r.status != .ok or out.r.tag.label != 0) return .{ .status = out.r.status, .label = out.r.tag.label, .results = null, .code = out.w[0] };
+    return .{ .status = out.r.status, .label = 0, .results = decode(M.Results, &out.w) catch null, .code = 0 };
 }
 
 pub const Caller = struct { badge: usize };
@@ -342,14 +388,15 @@ pub fn serve(comptime P: type, ep: grain.CPtr, impl: anytype) noreturn {
     comptime check(P);
     var r = grain.recv(ep);
     while (true) {
+        const req = gather(r);
         var reply_label: u32 = 1;
-        var reply: [register_words]usize = @splat(0);
+        var reply: Words = @splat(0);
         reply[0] = @backingInt(ErrorCode.unknown_method);
         var reply_len: u7 = 1;
         inline for (comptime methodNames(P)) |n| {
             const M = @field(P, n);
             if (r.tag.label == M.label) {
-                if (decode(M.Params, r.w)) |params| {
+                if (decode(M.Params, &req)) |params| {
                     if (@field(@TypeOf(impl.*), n)(impl, params, .{ .badge = r.badge })) |res| {
                         reply_label = 0;
                         reply = encode(M.Results, res);
@@ -362,7 +409,7 @@ pub fn serve(comptime P: type, ep: grain.CPtr, impl: anytype) noreturn {
                 }
             }
         }
-        r = grain.syscall(.reply_recv, ep, @bitCast(grain.Tag{ .label = reply_label, .length = reply_len }), reply);
+        r = grain.syscall(.reply_recv, ep, @bitCast(grain.Tag{ .label = reply_label, .length = reply_len }), scatter(&reply, reply_len));
     }
 }
 
@@ -374,17 +421,24 @@ test "encode and decode round-trip; descriptors and ids are stable" {
         pub const Color = enum { red, green };
         pub const paint = Method(.{ .label = 1, .effect = .mutates, .doc = "Paint.", .undo = "unpaint" }, struct {
             color: Color,
-            label: Bytes(16),
+            label: Text(16),
+            blob: Bytes(300),
             pub const docs = .{ .color = "Which colour" };
         }, struct { previous: Color, count: u32 });
         pub const unpaint = Method(.{ .label = 2, .effect = .mutates, .doc = "Undo a paint." }, struct { previous: Color }, struct {});
     };
     comptime check(P);
-    const v: P.paint.Params = .{ .color = .green, .label = Bytes(16).from("hello") };
-    const back = try decode(P.paint.Params, encode(P.paint.Params, v));
+    var big: [300]u8 = undefined;
+    for (&big, 0..) |*c, i| c.* = @truncate(i *% 7);
+    const v: P.paint.Params = .{ .color = .green, .label = Text(16).from("hello"), .blob = Bytes(300).from(&big) };
+    const w = encode(P.paint.Params, v);
+    const back = try decode(P.paint.Params, &w);
     try std.testing.expectEqual(P.Color.green, back.color);
     try std.testing.expectEqualStrings("hello", back.label.slice());
-    try std.testing.expectError(error.InvalidArgs, decode(P.paint.Params, .{ 7, 0, 0, 0, 0 }));
+    try std.testing.expectEqualSlices(u8, &big, back.blob.slice());
+    var bad: Words = @splat(0);
+    bad[0] = 7;
+    try std.testing.expectError(error.InvalidArgs, decode(P.paint.Params, &bad));
     const d = comptime descriptor(P);
     try std.testing.expect(std.mem.indexOf(u8, d, "\"protocol\":\"demo.v2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, d, "{\"name\":\"color\",\"type\":\"enum(red|green)\",\"doc\":\"Which colour\"}") != null);
@@ -393,5 +447,6 @@ test "encode and decode round-trip; descriptors and ids are stable" {
     defer a.deinit();
     while (try a.next() != .end_of_document) {}
     try std.testing.expect(comptime id(P) != 0);
-    try std.testing.expectEqual(@as(usize, 4), comptime words(P.paint.Params));
+    try std.testing.expectEqual(@as(usize, 4 + 1 + 38), comptime words(P.paint.Params));
+    try std.testing.expect(std.mem.indexOf(u8, d, "\"type\":\"text(16)\"") != null and std.mem.indexOf(u8, d, "\"type\":\"bytes(300)\"") != null);
 }

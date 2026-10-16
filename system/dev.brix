@@ -71,6 +71,7 @@ domain envoy like dev {
     hart = 1
     budget = 2ms
     memory = 128KiB
+    stack = 128KiB
     device port { virtio = 3, instance = 1, optional }
     uses registry { from = registry.registry, protocol = registry.v1 }
 }

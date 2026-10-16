@@ -38,8 +38,8 @@ pub const Layout = struct {
     pub const devices: usize = 0x7000_0000;
     pub const info: usize = 0x7ff0_0000;
     pub const ipc_buffer: usize = 0x7ff1_0000;
+    /// The stack grows down from here; its size is the manifest's `stack_kib`.
     pub const stack_top: usize = 0x7fff_0000;
-    pub const stack_pages = 8;
     /// Domains may map their own memory from here up to `devices`.
     pub const heap: usize = 0x4000_0000;
 };

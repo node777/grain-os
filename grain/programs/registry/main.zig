@@ -31,17 +31,17 @@ const Registry = struct {
     pub fn nth(_: *Registry, p: proto.registry.nth.Params, _: idl.Caller) !proto.registry.nth.Results {
         if (p.index >= entries.len) return error.NotFound;
         const e = entries[@intCast(p.index)];
-        return .{ .id = e.id, .name = idl.Bytes(24).from(e.name) };
+        return .{ .id = e.id, .name = idl.Text(24).from(e.name) };
     }
     pub fn lookup(_: *Registry, p: proto.registry.lookup.Params, _: idl.Caller) !proto.registry.lookup.Results {
         const e = find(p.id) orelse return .{ .name = .{}, .found = false };
-        return .{ .name = idl.Bytes(24).from(e.name), .found = true };
+        return .{ .name = idl.Text(24).from(e.name), .found = true };
     }
     pub fn describe(_: *Registry, p: proto.registry.describe.Params, _: idl.Caller) !proto.registry.describe.Results {
         const e = find(p.id) orelse return error.NotFound;
         const d = e.descriptor;
         const start: usize = @intCast(@min(p.offset, d.len));
-        return .{ .total = d.len, .chunk = idl.Bytes(24).from(d[start..@min(d.len, start + 24)]) };
+        return .{ .total = d.len, .chunk = idl.Text(480).from(d[start..@min(d.len, start + 480)]) };
     }
 };
 
