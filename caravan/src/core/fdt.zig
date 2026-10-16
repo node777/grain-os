@@ -436,3 +436,57 @@ test "memreserve, reserved-memory, multiple memory ranges, disabled harts" {
     try std.testing.expectEqual(@as(usize, 1), p.harts_len);
     try std.testing.expectEqual(@as(u64, 1_000_000), p.timebase_hz);
 }
+
+/// A device node matched by `compatible`: its first register range and
+/// first interrupt.
+pub const DeviceNode = struct { reg: Range, irq: ?u32 };
+
+/// Every enabled node whose `compatible` list contains `compat`, in tree order.
+pub fn findCompatible(fdt: Fdt, compat: []const u8, out: []DeviceNode) Error![]DeviceNode {
+    var n: usize = 0;
+    var stack: [max_depth]NodeInfo = undefined;
+    var depth: usize = 0;
+    var w = fdt.walk();
+    while (try w.next()) |ev| switch (ev) {
+        .begin => |name| {
+            if (depth == max_depth) return error.BadStructure;
+            stack[depth] = .{ .name = name };
+            if (depth > 0) stack[depth].reg_cells = stack[depth - 1].child_cells;
+            depth += 1;
+        },
+        .prop => |prop| {
+            if (depth == 0) return error.BadStructure;
+            const nd = &stack[depth - 1];
+            if (std.mem.eql(u8, prop.name, "#address-cells")) nd.child_cells[0] = prop.u32At(0) orelse 2;
+            if (std.mem.eql(u8, prop.name, "#size-cells")) nd.child_cells[1] = prop.u32At(0) orelse 1;
+            if (std.mem.eql(u8, prop.name, "reg")) nd.reg = prop;
+            if (std.mem.eql(u8, prop.name, "compatible")) nd.compatible = prop;
+            if (std.mem.eql(u8, prop.name, "interrupts")) nd.interrupts = prop.u32At(0);
+            if (std.mem.eql(u8, prop.name, "status")) nd.status_ok = std.mem.eql(u8, prop.str(), "okay") or std.mem.eql(u8, prop.str(), "ok");
+        },
+        .end => {
+            if (depth == 0) return error.BadStructure;
+            depth -= 1;
+            const nd = stack[depth];
+            if (nd.compatible) |c| if (c.hasString(compat) and nd.status_ok and n < out.len) {
+                if (firstReg(nd.reg, nd.reg_cells)) |r| {
+                    out[n] = .{ .reg = r, .irq = nd.interrupts };
+                    n += 1;
+                }
+            };
+        },
+    };
+    return out[0..n];
+}
+
+test "find the virtio-mmio transports" {
+    const fdt = try Fdt.init(virt_dtb);
+    var buf: [16]DeviceNode = undefined;
+    const nodes = try findCompatible(fdt, "virtio,mmio", &buf);
+    try std.testing.expectEqual(@as(usize, 8), nodes.len);
+    for (nodes) |nd| {
+        try std.testing.expect(nd.reg.base >= 0x1000_1000 and nd.reg.base <= 0x1000_8000);
+        try std.testing.expectEqual(@as(u64, 0x1000), nd.reg.size);
+        try std.testing.expect(nd.irq.? >= 1 and nd.irq.? <= 8);
+    }
+}

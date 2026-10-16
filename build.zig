@@ -1,9 +1,11 @@
 //! Grain OS build graph.
 //!
-//!   zig build              build the Caravan kernel image (zig-out/bin/caravan)
-//!   zig build run          boot it in QEMU (riscv64 virt, serial on stdio)
-//!   zig build test         host tests: kernel core, scenarios, simulator
-//!   zig build qemu-test    boot in QEMU deterministically (-icount) and check the self-tests
+//!   zig build              build everything: zig-out/bin/caravan (the system: kernel +
+//!                          Steward + the manifest's programs), caravan-ktest (kernel tests)
+//!   zig build run          boot the system in QEMU and show its output
+//!   zig build test         host tests: kernel core, scenarios, manifest, image, simulator
+//!   zig build qemu-test    boot both images in QEMU deterministically and check them
+//!   zig build check-manifest -Dsystem=path   check a manifest at compile time
 //!   zig build sim          run the deterministic simulator (-Dseed=N -Dsteps=N)
 //!   zig build bench        one-hart run printing benchmark records (use -Doptimize=ReleaseFast)
 //!   zig build debug        boot halted with a GDB stub on :1234 (see docs/TESTING.md)
@@ -39,66 +41,173 @@ pub fn build(b: *std.Build) void {
     const grain_lib = b.createModule(.{ .root_source_file = b.path("grain/lib/grain.zig") });
     grain_lib.addImport("abi", abi_mod);
     grain_lib.addImport("klog", klog_mod);
-    const root_task = b.addExecutable(.{ .name = "root_task", .root_module = b.createModule(.{
-        .root_source_file = b.path("grain/root/main.zig"),
-        .target = user_target,
-        .optimize = optimize,
-        .code_model = .medium,
-        .imports = &.{ .{ .name = "grain", .module = grain_lib }, .{ .name = "abi", .module = abi_mod } },
+    const schema_mod = b.createModule(.{ .root_source_file = b.path("grain/manifest/schema.zig") });
+    const image_mod = b.createModule(.{ .root_source_file = b.path("grain/manifest/image.zig") });
+    // Portable parts of the kernel core that user programs reuse as libraries.
+    const elf_mod = b.createModule(.{ .root_source_file = b.path("caravan/src/core/elf.zig") });
+    const fdt_mod = b.createModule(.{ .root_source_file = b.path("caravan/src/core/fdt.zig") });
+
+    const UserProgram = struct {
+        fn add(bb: *std.Build, name: []const u8, root: []const u8, target: std.Build.ResolvedTarget, opt: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
+            const exe = bb.addExecutable(.{ .name = name, .root_module = bb.createModule(.{
+                .root_source_file = bb.path(root),
+                .target = target,
+                .optimize = opt,
+                .code_model = .medium,
+                .imports = imports,
+            }) });
+            exe.setLinkerScript(bb.path("grain/user.ld"));
+            exe.entry = .{ .symbol_name = "_start" };
+            return exe;
+        }
+    };
+    const user_imports: []const std.Build.Module.Import = &.{ .{ .name = "grain", .module = grain_lib }, .{ .name = "abi", .module = abi_mod } };
+
+    // The system: a manifest (-Dsystem=path, default system/dev.zon) and the
+    // programs it may name. grain-pack refuses an image missing a program.
+    const system_path = b.option([]const u8, "system", "System manifest (default system/dev.zon)") orelse "system/dev.zon";
+    const programs = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker" };
+
+    const pack = b.addExecutable(.{ .name = "grain-pack", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/pack/main.zig"),
+        .target = host,
+        .optimize = .Debug,
+        .imports = &.{ .{ .name = "schema", .module = schema_mod }, .{ .name = "image", .module = image_mod } },
     }) });
-    root_task.setLinkerScript(b.path("grain/user.ld"));
-    root_task.entry = .{ .symbol_name = "_start" };
-    b.installArtifact(root_task);
+    const pack_run = b.addRunArtifact(pack);
+    const system_img = pack_run.addOutputFileArg("system.img");
+    pack_run.addFileArg(b.path(system_path));
+    for (programs) |name| {
+        const exe = UserProgram.add(b, name, b.fmt("grain/programs/{s}/main.zig", .{name}), user_target, optimize, user_imports);
+        b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{ .dest_sub_path = b.fmt("programs/{s}", .{name}) }).step);
+        pack_run.addPrefixedFileArg(b.fmt("{s}=", .{name}), exe.getEmittedBin());
+    }
+    b.getInstallStep().dependOn(&b.addInstallFile(system_img, "system.img").step);
 
-    // ---- Kernel -----------------------------------------------------------
-    const kernel_mod = b.createModule(.{
-        .root_source_file = b.path("caravan/src/main.zig"),
-        .target = kernel_target,
-        .optimize = optimize,
-        .code_model = .medium,
-        .red_zone = false,
-        .strip = false,
-        .imports = &.{
-            .{ .name = "core", .module = core_kernel },
-            .{ .name = "abi", .module = abi_mod },
-            .{ .name = "sv39", .module = sv39_mod },
-        },
+    const steward = UserProgram.add(b, "steward", "grain/steward/main.zig", user_target, optimize, &.{
+        .{ .name = "grain", .module = grain_lib },
+        .{ .name = "abi", .module = abi_mod },
+        .{ .name = "schema", .module = schema_mod },
+        .{ .name = "image", .module = image_mod },
+        .{ .name = "elf", .module = elf_mod },
+        .{ .name = "fdt", .module = fdt_mod },
     });
-    kernel_mod.addAnonymousImport("root_task.elf", .{ .root_source_file = root_task.getEmittedBin() });
+    steward.root_module.addAnonymousImport("system.zon", .{ .root_source_file = b.path(system_path) });
+    steward.root_module.addAnonymousImport("system.img", .{ .root_source_file = system_img });
+    b.installArtifact(steward);
+    b.step("steward", "Build Steward for the system manifest (-Dsystem=...)").dependOn(&b.addInstallArtifact(steward, .{}).step);
 
-    const kernel = b.addExecutable(.{ .name = "caravan", .root_module = kernel_mod });
-    kernel.setLinkerScript(b.path("caravan/src/arch/riscv64/link.ld"));
-    kernel.entry = .{ .symbol_name = "_start" };
-    b.installArtifact(kernel);
+    // `zig build check-manifest -Dsystem=...` compiles the manifest check
+    // alone: a miswired manifest is a compile error.
+    const check = b.addObject(.{ .name = "manifest-check", .root_module = b.createModule(.{
+        .root_source_file = b.path("grain/manifest/check.zig"),
+        .target = host,
+        .optimize = .Debug,
+        .imports = &.{.{ .name = "schema", .module = schema_mod }},
+    }) });
+    check.root_module.addAnonymousImport("system.zon", .{ .root_source_file = b.path(system_path) });
+    b.step("check-manifest", "Check the system manifest at compile time").dependOn(&check.step);
+
+    const ktest_root = UserProgram.add(b, "ktest", "grain/ktest/main.zig", user_target, optimize, user_imports);
+    b.installArtifact(ktest_root);
+
+    // ---- Kernels ----------------------------------------------------------
+    // caravan:       the kernel with Steward as root task (the real system)
+    // caravan-ktest: the kernel with the kernel test suite as root task
+    const Kernel = struct {
+        fn add(bb: *std.Build, name: []const u8, root: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, opt: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
+            const mod = bb.createModule(.{
+                .root_source_file = bb.path("caravan/src/main.zig"),
+                .target = target,
+                .optimize = opt,
+                .code_model = .medium,
+                .red_zone = false,
+                .strip = false,
+                .imports = imports,
+            });
+            mod.addAnonymousImport("root_task.elf", .{ .root_source_file = root.getEmittedBin() });
+            const k = bb.addExecutable(.{ .name = name, .root_module = mod });
+            k.setLinkerScript(bb.path("caravan/src/arch/riscv64/link.ld"));
+            k.entry = .{ .symbol_name = "_start" };
+            bb.installArtifact(k);
+            return k;
+        }
+    };
+    const kernel_imports: []const std.Build.Module.Import = &.{
+        .{ .name = "core", .module = core_kernel },
+        .{ .name = "abi", .module = abi_mod },
+        .{ .name = "sv39", .module = sv39_mod },
+    };
+    const kernel = Kernel.add(b, "caravan", steward, kernel_target, optimize, kernel_imports);
+    const ktest = Kernel.add(b, "caravan-ktest", ktest_root, kernel_target, optimize, kernel_imports);
+
+    // Devices for the system image. virtio-rng reads a fixed pattern file, so
+    // runs stay deterministic; the virtio console writes to a file the
+    // harness checks.
+    const rng_bytes = b.allocator.alloc(u8, 65536) catch @panic("oom");
+    for (rng_bytes, 0..) |*c, i| c.* = @truncate((i *% 2654435761) >> 7);
+    const rng_file = b.addWriteFiles().add("rng.bin", rng_bytes);
 
     const qemu_base = [_][]const u8{
         "qemu-system-riscv64", "-machine", "virt",    "-cpu",       "rv64", "-m", "256M",
         "-nographic",          "-bios",    "default", "-no-reboot",
     };
 
-    const run = b.addSystemCommand(&qemu_base);
-    run.addArgs(&.{ "-smp", smp, "-kernel" });
+    const run = b.addSystemCommand(&.{ "python3", "tools/harness.py", "--raw", "--timeout", qemu_timeout, "--smp", smp, "--virtio-console", "--show-console" });
+    run.addPrefixedFileArg("--virtio-rng=", rng_file);
     run.addArtifactArg(kernel);
     run.stdio = .inherit;
-    b.step("run", "Boot Caravan in QEMU").dependOn(&run.step);
+    run.has_side_effects = true;
+    b.step("run", "Boot the system in QEMU and show its output").dependOn(&run.step);
 
-    // Deterministic boot through tools/harness.py: -icount ties virtual time
+    // Deterministic boots through tools/harness.py: -icount ties virtual time
     // to instructions retired, so the same image gives the same trace on every
     // run. The harness prints the records and fails on a nonzero exit, a
-    // timeout, or a missing summary.
-    const qtest = b.addSystemCommand(&.{ "python3", "tools/harness.py", "--timeout", qemu_timeout, "--smp", smp, "--expect", "summary failed=0" });
-    qtest.addArtifactArg(kernel);
-    qtest.stdio = .inherit;
-    qtest.has_side_effects = true;
-    b.step("qemu-test", "Boot Caravan in QEMU and run the self-tests").dependOn(&qtest.step);
+    // timeout, a missing expected record or missing console text.
+    const qtest_kernel = b.addSystemCommand(&.{ "python3", "tools/harness.py", "--timeout", qemu_timeout, "--smp", smp, "--expect", "summary failed=0" });
+    qtest_kernel.addArtifactArg(ktest);
+    qtest_kernel.stdio = .inherit;
+    qtest_kernel.has_side_effects = true;
+
+    const qtest_system = b.addSystemCommand(&.{
+        "python3",                                    "tools/harness.py",
+        "--timeout",                                  qemu_timeout,
+        "--smp",                                      smp,
+        "--virtio-console",                           "--expect",
+        "steward_start verified=true",                "--expect",
+        "driver_ready domain=console",                "--expect",
+        "driver_ready domain=rng",                    "--expect",
+        "domain_fault domain=flaky",                  "--expect",
+        "domain_start domain=flaky restart=1",        "--expect",
+        "echo_ok domain=checker answer=42",           "--expect",
+        "domain_exit domain=hello code=0",            "--expect",
+        "summary failed=0",                           "--expect-console",
+        "hello from grain! entropy 00f3e6dacdc0b4a7", "--expect-console",
+        "checker: flaky.echo answered 42",
+    });
+    qtest_system.addPrefixedFileArg("--virtio-rng=", rng_file);
+    qtest_system.addArtifactArg(kernel);
+    qtest_system.stdio = .inherit;
+    qtest_system.has_side_effects = true;
+    qtest_system.step.dependOn(&qtest_kernel.step);
+
+    // A miswired manifest must fail to compile, with the explanation.
+    const miswired = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "check-manifest", "-Dsystem=system/tests/miswired.zon" });
+    miswired.expectExitCode(1);
+    miswired.expectStdErrMatch("domain 'hello' uses 'console.consol', but no domain provides it");
+    miswired.has_side_effects = true;
+
+    const qtest = b.step("qemu-test", "Boot the kernel test suite and the system in QEMU");
+    qtest.dependOn(&qtest_system.step);
+    qtest.dependOn(&miswired.step);
 
     // Benchmarks: one hart, so QEMU's global instruction counter (-icount)
     // measures only the code under test. Use -Doptimize=ReleaseFast.
     const bench = b.addSystemCommand(&.{ "python3", "tools/harness.py", "--timeout", qemu_timeout, "--smp", "1", "--expect", "summary failed=0", "--filter", "bench,profile" });
-    bench.addArtifactArg(kernel);
+    bench.addArtifactArg(ktest);
     bench.stdio = .inherit;
     bench.has_side_effects = true;
-    b.step("bench", "Boot on one hart and print benchmark and profile records").dependOn(&bench.step);
+    b.step("bench", "Boot the kernel test suite on one hart and print benchmark and profile records").dependOn(&bench.step);
 
     const dbg = b.addSystemCommand(&qemu_base);
     dbg.addArgs(&.{ "-smp", smp, "-s", "-S", "-kernel" });
@@ -116,6 +225,15 @@ pub fn build(b: *std.Build) void {
 
     const sv39_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("caravan/src/arch/riscv64/sv39.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(sv39_tests).step);
+
+    const schema_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/manifest/schema.zig"), .target = host, .optimize = optimize }) });
+    test_step.dependOn(&b.addRunArtifact(schema_tests).step);
+    const manifest_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/manifest/manifest_test.zig"), .target = host, .optimize = optimize, .imports = &.{.{ .name = "schema", .module = schema_mod }} }) });
+    manifest_tests.root_module.addAnonymousImport("dev.zon", .{ .root_source_file = b.path("system/dev.zon") });
+    manifest_tests.root_module.addAnonymousImport("miswired.zon", .{ .root_source_file = b.path("system/tests/miswired.zon") });
+    test_step.dependOn(&b.addRunArtifact(manifest_tests).step);
+    const image_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/manifest/image.zig"), .target = host, .optimize = optimize }) });
+    test_step.dependOn(&b.addRunArtifact(image_tests).step);
 
     const sim_imports: []const std.Build.Module.Import = &.{
         .{ .name = "core", .module = core_host },

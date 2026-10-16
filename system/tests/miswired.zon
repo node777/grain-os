@@ -1,0 +1,9 @@
+// A deliberately broken manifest: `hello` asks for "console.consol".
+// `zig build qemu-test` checks that this fails to compile, with the reason.
+.{
+    .name = "miswired",
+    .domains = .{
+        .{ .name = "console", .program = "virtio_console", .devices = .{.{ .name = "port", .virtio = 3 }}, .provides = .{.{ .name = "console", .protocol = "console.v1" }} },
+        .{ .name = "hello", .program = "hello", .kind = .task, .uses = .{.{ .name = "console", .from = "console.consol", .protocol = "console.v1" }} },
+    },
+}

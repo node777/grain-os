@@ -41,6 +41,23 @@ pub fn formatPrefixed(comptime source: []const u8, buf: []u8, comptime event: []
     return buf[0..len];
 }
 
+/// Format only the ` k=v` fields of a record (for callers that write the
+/// prefix and event themselves).
+pub fn formatFields(buf: []u8, fields: anytype) Error![]u8 {
+    var len: usize = 0;
+    inline for (comptime std.meta.fieldNames(@TypeOf(fields))) |name| {
+        comptime validateName(name);
+        len += (try std.fmt.bufPrint(buf[len..], " " ++ name ++ "=", .{})).len;
+        len += (try formatValue(buf[len..], @field(fields, name))).len;
+    }
+    return buf[0..len];
+}
+
+/// Format one value as it appears after `=` in a record.
+pub fn formatValuePublic(buf: []u8, value: anytype) Error![]u8 {
+    return formatValue(buf, value);
+}
+
 fn formatValue(buf: []u8, value: anytype) Error![]u8 {
     const T = @TypeOf(value);
     if (comptime isHex(T)) return std.fmt.bufPrint(buf, "0x{x}", .{value.value});

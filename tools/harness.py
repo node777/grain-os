@@ -16,9 +16,11 @@ failure count otherwise, 124 on timeout.
 """
 import argparse
 import json
+import os
 import shlex
 import subprocess
 import sys
+import tempfile
 
 PREFIXES = ("@caravan", "@grain")
 
@@ -72,9 +74,25 @@ def main():
                     help='record that must appear, e.g. "test name=timer_interrupt result=pass"')
     ap.add_argument("--qemu-arg", action="append", default=[], help="extra QEMU argument")
     ap.add_argument("--filter", default="", help="comma-separated events to print (default: all)")
+    ap.add_argument("--virtio-console", action="store_true",
+                    help="attach a virtio console whose output goes to a temporary file")
+    ap.add_argument("--show-console", action="store_true", help="print the virtio console output afterwards")
+    ap.add_argument("--expect-console", action="append", default=[], help="text the virtio console must contain")
+    ap.add_argument("--virtio-rng", default=None, help="attach a virtio entropy device reading this file")
     args = ap.parse_args()
 
-    cmd = QEMU_RISCV64 + ["-smp", args.smp] + args.qemu_arg + ["-kernel", args.kernel]
+    devices = []
+    console_path = None
+    if args.virtio_console or args.virtio_rng:
+        devices += ["-global", "virtio-mmio.force-legacy=false"]
+    if args.virtio_rng:
+        devices += ["-object", f"rng-random,id=rng0,filename={args.virtio_rng}", "-device", "virtio-rng-device,rng=rng0"]
+    if args.virtio_console or args.expect_console:
+        fd, console_path = tempfile.mkstemp(prefix="grain-console-")
+        os.close(fd)
+        devices += ["-device", "virtio-serial-device", "-chardev", f"file,id=con0,path={console_path}",
+                    "-device", "virtconsole,chardev=con0"]
+    cmd = QEMU_RISCV64 + ["-smp", args.smp] + devices + args.qemu_arg + ["-kernel", args.kernel]
     try:
         proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, timeout=args.timeout)
         status = proc.returncode
@@ -95,6 +113,19 @@ def main():
                     print(json.dumps(rec) if args.json else line)
         elif args.raw:
             print(line)
+
+    console = ""
+    if console_path:
+        with open(console_path, "rb") as f:
+            console = f.read().decode("utf-8", "replace")
+        os.unlink(console_path)
+        if args.show_console:
+            for line in console.splitlines():
+                print(f"console| {line}")
+    for text in args.expect_console:
+        if text not in console:
+            print(f"harness: virtio console output lacks: {text!r}", file=sys.stderr)
+            status = status or 1
 
     missing = [e for e in args.expect if not any(matches(r, e) for r in records)]
     for e in missing:

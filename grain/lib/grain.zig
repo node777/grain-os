@@ -3,6 +3,9 @@
 const std = @import("std");
 pub const abi = @import("abi");
 pub const klog = @import("klog");
+pub const domain = @import("domain.zig");
+pub const virtio = @import("virtio.zig");
+pub const proto = @import("protocols.zig");
 
 pub const CPtr = abi.CPtr;
 pub const Status = abi.Status;
@@ -149,4 +152,209 @@ pub fn record(comptime event: []const u8, fields: anytype) void {
 pub fn exit(code: u16) noreturn {
     _ = invoke(console, abi.DebugMethod.exit, .{code});
     while (true) yield();
+}
+
+// ---------------------------------------------------------------------------
+// Domains (programs Steward starts from the manifest)
+
+/// This domain's description, written by Steward.
+pub fn env() *const domain.DomainInfo {
+    return @ptrFromInt(domain.Layout.info);
+}
+
+fn findService(list: []const domain.Service, name: []const u8) ?CPtr {
+    for (list) |*sv| if (std.mem.eql(u8, domain.nameOf(&sv.name), name)) return sv.slot;
+    return null;
+}
+
+/// The endpoint for a service this domain uses, by its manifest name.
+pub fn use(name: []const u8) ?CPtr {
+    const e = env();
+    return findService(e.uses[0..e.use_count], name);
+}
+
+/// The endpoint this domain serves a service on, by its manifest name.
+pub fn provided(name: []const u8) ?CPtr {
+    const e = env();
+    return findService(e.provides[0..e.provide_count], name);
+}
+
+pub fn device(name: []const u8) ?*const domain.Device {
+    const e = env();
+    for (e.devices[0..e.device_count]) |*d| if (std.mem.eql(u8, domain.nameOf(&d.name), name)) return d;
+    return null;
+}
+
+/// Finish this task with an exit code. Steward tears the domain down.
+pub fn exitTask(code: u16) noreturn {
+    _ = syscall(.call, domain.Slot.steward, @bitCast(Tag{ .label = @backingInt(domain.Lifecycle.exit), .length = 1 }), .{ code, 0, 0, 0, 0 });
+    while (true) yield();
+}
+
+/// `@grain <event> domain=<name> k=v ...`
+pub fn log(comptime event: []const u8, fields: anytype) void {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    const ok = blk: {
+        w.writeAll("@grain " ++ event ++ " domain=") catch break :blk false;
+        w.writeAll(domain.nameOf(&env().name)) catch break :blk false;
+        var fbuf: [200]u8 = undefined;
+        const rest = klog.formatFields(&fbuf, fields) catch break :blk false;
+        w.writeAll(rest) catch break :blk false;
+        w.writeAll("\n") catch break :blk false;
+        break :blk true;
+    };
+    if (ok) write(w.buffered()) else write("@grain record_truncated event=" ++ event ++ "\n");
+}
+
+/// The standard entry point for domain programs: `comptime { grain.exportStart(); }`
+/// in a program whose root file has `pub fn main() !u16`. The return value is the
+/// task's exit code; an error is reported and exits with code 1.
+pub fn exportStart() void {
+    @export(&startStub, .{ .name = "_start", .section = ".text._start" });
+    @export(&startMain, .{ .name = "grainStartMain" });
+}
+
+fn startStub() callconv(.naked) noreturn {
+    asm volatile (
+        \\ call grainStartMain
+        \\ unimp
+    );
+}
+
+fn startMain() callconv(.c) noreturn {
+    const root = @import("root");
+    console = domain.Slot.debug_console;
+    const code = root.main() catch |e| {
+        log("error", .{ .err = @errorName(e) });
+        exitTask(1);
+    };
+    exitTask(code);
+}
+
+/// Panic handler for domain programs: report, then fault, so Steward's
+/// restart policy applies. Use as `pub const panic = grain.panic;`.
+pub const panic = std.debug.FullPanic(panicFn);
+
+fn panicFn(msg: []const u8, ret: ?usize) noreturn {
+    @branchHint(.cold);
+    log("panic", .{ .msg = msg, .pc = klog.hex(ret orelse @returnAddress()) });
+    while (true) asm volatile ("unimp");
+}
+
+// ---------------------------------------------------------------------------
+// Servers
+
+pub const Message = struct {
+    label: u32,
+    badge: usize,
+    w: [5]usize,
+    length: u7,
+};
+
+pub const Reply = struct {
+    label: u32 = 0,
+    w: [5]usize = @splat(0),
+    length: u7 = 0,
+};
+
+/// Receive requests on `ep` forever, answering each with `handler`.
+pub fn serve(ep: CPtr, ctx: anytype, comptime handler: fn (@TypeOf(ctx), Message) Reply) noreturn {
+    var r = recv(ep);
+    while (true) {
+        const answer = handler(ctx, .{ .label = r.tag.label, .badge = r.badge, .w = r.w, .length = r.tag.length });
+        r = syscall(.reply_recv, ep, @bitCast(Tag{ .label = answer.label, .length = answer.length }), answer.w);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Memory: make objects from an untyped region and map frames, creating
+// page tables on demand.
+
+pub const Space = struct {
+    untyped: CPtr,
+    vspace: CPtr,
+    next_slot: CPtr,
+    /// Slots below this were handed out; retype goes from here.
+    limit: CPtr = std.math.maxInt(CPtr),
+
+    pub fn slot(s: *Space) !CPtr {
+        if (s.next_slot >= s.limit) return error.OutOfSlots;
+        const n = s.next_slot;
+        s.next_slot += 1;
+        return n;
+    }
+
+    pub fn retype(s: *Space, kind: abi.Kind, bits: usize) !CPtr {
+        const dest = try s.slot();
+        const r = invoke(s.untyped, abi.UntypedMethod.retype, .{ kind, bits, dest });
+        if (!r.ok()) return statusError(r.status);
+        return dest;
+    }
+
+    /// Map `frame` at `va` in `vspace` (default: this space's), creating
+    /// page tables from this space's untyped as needed.
+    pub fn mapIn(s: *Space, vspace: CPtr, frame: CPtr, va: usize, rights: abi.Rights) !void {
+        var tries: usize = 0;
+        while (tries < 3) : (tries += 1) {
+            const r = invoke(vspace, abi.VSpaceMethod.map_frame, .{ frame, va, rights.bits() });
+            switch (r.status) {
+                .ok => return,
+                .no_page_table => {
+                    const l1 = try s.retype(.page_table, 1);
+                    if (!invoke(vspace, abi.VSpaceMethod.map_table, .{ l1, va }).ok()) {
+                        _ = invoke(S.cnode, abi.CNodeMethod.delete, .{l1});
+                        const l0 = try s.retype(.page_table, 0);
+                        const m = invoke(vspace, abi.VSpaceMethod.map_table, .{ l0, va });
+                        if (!m.ok()) return statusError(m.status);
+                    }
+                },
+                else => return statusError(r.status),
+            }
+        }
+        return error.MapFailed;
+    }
+
+    pub fn map(s: *Space, frame: CPtr, va: usize, rights: abi.Rights) !void {
+        return s.mapIn(s.vspace, frame, va, rights);
+    }
+
+    /// Fresh zeroed pages mapped at `va`; returns the first frame's slot.
+    pub fn mapNew(s: *Space, va: usize, pages: usize, rights: abi.Rights) !CPtr {
+        var first: CPtr = 0;
+        for (0..pages) |i| {
+            const f = try s.retype(.frame, 12);
+            if (i == 0) first = f;
+            try s.map(f, va + i * 4096, rights);
+        }
+        return first;
+    }
+};
+
+pub fn statusError(st: Status) anyerror {
+    return switch (st) {
+        .invalid_cap => error.InvalidCap,
+        .wrong_kind => error.WrongKind,
+        .no_rights => error.NoRights,
+        .invalid_argument => error.InvalidArgument,
+        .no_memory => error.NoMemory,
+        .no_objects => error.NoObjects,
+        .slot_occupied => error.SlotOccupied,
+        .already_mapped => error.AlreadyMapped,
+        .no_page_table => error.NoPageTable,
+        .not_mapped => error.NotMapped,
+        .aborted => error.Aborted,
+        else => error.SyscallFailed,
+    };
+}
+
+/// Physical address of a frame (for DMA).
+pub fn physOf(frame: CPtr) !u64 {
+    const r = invoke(frame, abi.FrameMethod.info, .{});
+    if (!r.ok()) return statusError(r.status);
+    return r.w[0];
+}
+
+pub inline fn fence() void {
+    asm volatile ("fence rw, rw" ::: .{ .memory = true });
 }

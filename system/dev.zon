@@ -1,0 +1,65 @@
+// The development system: two virtio drivers, a service that crashes on
+// its first run (to exercise restarts), and two tasks that use them.
+// Steward builds exactly this at boot; `zig build` refuses to build it if
+// the wiring is wrong.
+.{
+    .name = "grain-dev",
+    .halt_when_tasks_finish = true,
+    .domains = .{
+        .{
+            .name = "console",
+            .program = "virtio_console",
+            .priority = 200,
+            .budget_us = 1_000,
+            .period_us = 10_000,
+            .restart = .on_fault,
+            .debug_console = true,
+            .devices = .{.{ .name = "port", .virtio = 3 }},
+            .provides = .{.{ .name = "console", .protocol = "console.v1" }},
+        },
+        .{
+            .name = "rng",
+            .program = "virtio_rng",
+            .priority = 200,
+            .budget_us = 1_000,
+            .period_us = 10_000,
+            .debug_console = true,
+            .devices = .{.{ .name = "source", .virtio = 4 }},
+            .provides = .{.{ .name = "entropy", .protocol = "entropy.v1" }},
+        },
+        .{
+            .name = "flaky",
+            .program = "flaky",
+            .priority = 150,
+            .budget_us = 1_000,
+            .period_us = 10_000,
+            .restart = .on_fault,
+            .debug_console = true,
+            .provides = .{.{ .name = "echo", .protocol = "echo.v1" }},
+        },
+        .{
+            .name = "hello",
+            .program = "hello",
+            .kind = .task,
+            .budget_us = 2_000,
+            .period_us = 10_000,
+            .debug_console = true,
+            .uses = .{
+                .{ .name = "console", .from = "console.console", .protocol = "console.v1" },
+                .{ .name = "entropy", .from = "rng.entropy", .protocol = "entropy.v1" },
+            },
+        },
+        .{
+            .name = "checker",
+            .program = "checker",
+            .kind = .task,
+            .budget_us = 2_000,
+            .period_us = 10_000,
+            .debug_console = true,
+            .uses = .{
+                .{ .name = "echo", .from = "flaky.echo", .protocol = "echo.v1" },
+                .{ .name = "console", .from = "console.console", .protocol = "console.v1" },
+            },
+        },
+    },
+}
