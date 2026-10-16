@@ -15,29 +15,64 @@ terminal, by a human or an AI, with a pass or fail answer in seconds.**
 
 `tools/setup.sh` installs all of these on Debian/Ubuntu.
 
-## The loop today (Phase 0)
+## The loop today (Phase 2)
 
 ```sh
-zig build test        # host unit tests for caravan/src/core (portable code)
-zig build qemu-test   # boot in QEMU, run in-kernel self-tests, check records
+zig build test        # host: unit tests, kernel scenario tests, a short simulator run
+zig build qemu-test   # QEMU riscv64, 2 harts: boot, run the root task's suite, check records
+zig build sim         # the deterministic simulator (16 seeds × 50k steps); -Dseed=N replays one
+zig build bench -Doptimize=ReleaseFast   # one hart: benchmark and kernel-profile records
 zig build run         # boot interactively (Ctrl-A X quits QEMU)
 zig build debug       # boot halted with a GDB stub on :1234
 python3 tools/harness.py --json zig-out/bin/caravan   # records as JSON lines
 ```
 
+The four layers, from fastest to most real:
+
+1. **Unit tests** (`zig test` on the host): the device-tree parser against
+   captured QEMU DTBs, the ELF reader, the record formatter, Sv39 encoding.
+2. **Scenario tests** (`sim/kernel_test.zig`): the real kernel core on a
+   simulated machine. A test *acts as* the current user thread by setting its
+   registers and calling `handle(.syscall)`, then checks the result and the
+   invariants. They cover mint and revoke, passive servers with donation,
+   leases, untyped reset, faults, budgets, round robin, capability transfer,
+   interrupts, and destroying a server with a caller waiting.
+3. **The simulator** (`caravan-sim`): seeded random system calls (valid and
+   garbage), faults, interrupts, IPIs and timer events on 2 harts.
+   `checkInvariants()` runs after every step. When nothing can run any
+   more, the machine reboots within the same seed. Every seed runs twice, and
+   the final kernel memory must hash identically. A failure prints the seed
+   and step; `--seed N --trace` replays it. It has found two real bugs so far
+   (an endpoint left in "sending" mode after its queue was aborted, and
+   stack padding copied into kernel memory).
+4. **QEMU** (`qemu-test`): the root task runs the suite from user mode on 2
+   harts. That covers boot info, capability identity, mint and revoke, thread
+   signalling, a passive server, fault handling with retry, leases, CPU
+   budgets, untyped reset, a UART interrupt, tearing down an address space
+   while it runs on the other hart, and a cross-hart call. Results are
+   `@grain test ...` records, and the exit status comes from the test
+   finisher.
+
 How a QEMU test reports:
 
-1. The kernel writes **structured records** (`@caravan <event> k=v ...`) to the
-   SBI console. Firmware chatter never starts with `@caravan`.
-2. It shuts down through the QEMU virt **test finisher** device, which sets
-   QEMU's exit status: 0 for pass, the failure count otherwise. (SBI reset
-   can't do this: OpenSBI reports every shutdown reason as success.)
-3. `tools/harness.py` runs QEMU with a timeout, prints the records, checks
-   `--expect` patterns, and exits non-zero on failure, timeout or silence.
+1. The kernel writes `@caravan` records and user programs write `@grain`
+   records (`<event> k=v ...`). Firmware chatter never starts with `@`.
+2. The root task powers off through its debug-console capability. On QEMU
+   the kernel uses the virt **test finisher**, which sets QEMU's exit status:
+   0 for pass, the failure count otherwise. (SBI reset can't do this: OpenSBI
+   reports every shutdown reason as success.)
+3. `tools/harness.py` runs QEMU with a timeout, prints the records (filtered
+   with `--filter`, or as JSON with `--json`), checks `--expect` patterns,
+   and exits non-zero on failure, timeout or silence.
 4. `-icount shift=0,sleep=off` makes virtual time follow instruction count,
-   so runs are **deterministic**. Two runs give byte-identical console
-   output. Idle `wfi` skips virtual time forward, so timer tests take
-   milliseconds.
+   so runs are **deterministic**, SMP included. Idle harts skip virtual time
+   forward, so timer tests take milliseconds.
+
+**Benchmarks:** under `-icount`, QEMU's cycle and instret counters count
+the instructions of *all* harts, and a hart waiting for the kernel lock
+spins through its time slices. So benchmarks run on one hart (`zig build
+bench`), and the 2-hart numbers in `qemu-test` are only indicative. With
+`-icount`, cycles = instructions = nanoseconds.
 
 Debugging:
 
@@ -46,17 +81,19 @@ zig build debug &                                   # QEMU waits for GDB
 gdb-multiarch zig-out/bin/caravan -ex 'target remote :1234' -ex 'break kmain' -ex c
 ```
 
-Use `-d int,guest_errors,unimp` (pass it with `--qemu-arg`) to have QEMU log
-every trap. `-d in_asm` gives an instruction trace.
+Use `--qemu-arg -d --qemu-arg int,guest_errors` to have QEMU log every
+trap. Profiling that worked well here: `-d exec,nochain -D log`, then count
+blocks per address and map the hottest to symbols with
+`gdb-multiarch -batch -ex 'info symbol 0x…' zig-out/bin/caravan`. Lines
+start `Trace <cpu>:`, so you can profile one hart at a time.
 
 ## How testing grows with each phase
 
 | Phase | What gets tested | How |
 |---|---|---|
-| 0 Boot | traps, timer, console, exit codes | in-kernel self-tests and the harness ✅ |
-| 1 Core objects | capability tables, untyped retype, generations, page tables | **host unit tests** on `core/`, plus property tests (random operation sequences, invariants checked after each) |
-| 2 IPC and scheduling | call/reply, signals, MCS budgets | **`zig build sim`**: the deterministic simulator runs the real `core.step` on seeded event streams; a failure prints the seed, and `zig build sim -Dseed=N` replays it |
-| 2+ | the same on real (emulated) hardware | QEMU tests with user domains that run scripted IPC workloads and report records; `-smp 4` for multi-hart |
+| 0 Boot | traps, timer, console, exit codes | harness and test finisher ✅ |
+| 1 Core objects | capability tables, untyped retype, generations, page tables | unit and scenario tests on `core/` ✅ |
+| 2 IPC and scheduling | call/reply, signals, MCS budgets, SMP | `caravan-sim` with invariants after every step; the root-task suite on 2 QEMU harts ✅ |
 | 3 Userspace and drivers | virtio-console, blk, net | QEMU with virtio devices; block images built by `zig build`; networking through QEMU user-mode net with port forwards |
 | 4 Envoy | the AI interface end to end | the harness grows into a **driver**: it opens the Envoy virtio-console port as a socket (`-chardev socket`) and speaks the protocol (`discover`, `plan`, `apply`). Tests are scripts of Envoy calls with expected typed results. This is also how I interactively operate the OS while building it. |
 | 5 Storage and identity | Granary, Ledger, generations, Seal | virtio-blk images; power-cut injection (kill QEMU at random instructions, reboot, verify) |

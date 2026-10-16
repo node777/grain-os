@@ -2,37 +2,52 @@
 
 Each phase ends with something that boots and a test that proves it.
 
-## Phase 0: foundations ✅ (this commit)
+## Phase 0: foundations ✅
 - Research ([RESEARCH.md](RESEARCH.md)) and architecture
   ([ARCHITECTURE.md](ARCHITECTURE.md)).
-- Zig 0.17 build: kernel for riscv64, host tests, QEMU run, test and debug
-  steps.
-- Caravan boots on QEMU virt under OpenSBI, installs the trap vector, handles
-  a breakpoint exception and timer interrupts, emits structured records, and
-  exits with a status the harness checks. Output is deterministic.
+- Zig 0.17 build; Caravan boots on QEMU virt under OpenSBI; structured
+  records; pass/fail exit status; deterministic output.
 
-## Phase 1: Caravan core objects
-- Device-tree parsing: memory map, timebase, harts, interrupt controller,
-  test finisher (replacing the constants in `board.zig`).
-- Physical memory → `Untyped` capabilities. Fixed kernel tables sized at boot.
-- Capability format, CNodes, generations, `mint`, `retype`, `revoke`; host
-  property tests.
-- Sv39 kernel mapping (higher half), then user address spaces.
-- First user domain: drop to U-mode, a `debug_put` syscall, return through
-  the trap path (sscratch stack swap).
-- Exit: a user task prints through a capability it was given, and fails
-  cleanly when the capability is revoked.
+## Phase 1: Caravan core objects ✅
+- Device-tree platform discovery (memory, reserved ranges, harts, timebase,
+  PLIC and contexts, UART, test finisher, device MMIO ranges).
+- Object table with generations; 16-byte capabilities; CNodes with mint,
+  delete, move, revoke, identify.
+- Untyped regions with double-ended allocation, object budgets and recursive
+  reset; device untypeds.
+- Higher-half Sv39 kernel with a physmap; user page tables with shadow
+  indices.
+- The root task, loaded from an ELF embedded in the kernel, runs in U-mode
+  with a boot-info page and an initial CSpace.
+- Exit, met: user code prints through its debug-console capability; a
+  revoked capability fails with `invalid_cap`.
 
-## Phase 2: IPC, scheduling, the event door
-- Endpoints (call/reply_recv fastpath), signals, IPC buffers, capability
-  transfer.
-- Factor everything into `core.step(event) -> effects`; `zig build sim`, the
-  seeded deterministic simulator with invariant checks.
-- MCS SchedContexts; timer-driven preemption; per-hart kernels with SMP
-  bring-up through SBI HSM; IPIs.
-- Leases with expiry and use counts.
-- Exit: a ping-pong IPC benchmark across harts; the simulator runs 10⁶
-  random steps clean; cycle counts reported as records.
+## Phase 2: IPC, scheduling, the event door ✅
+- Endpoints (call, send, recv, reply_recv, reply), IPC buffers, capability
+  transfer with `grant`, badges; signals; fault endpoints; IRQs as signals.
+- MCS scheduling contexts, preemption by timer, round robin, throttling,
+  donation to passive servers, maximum controlled priority.
+- Leases with duration and use limits.
+- The core is `handle(hart, now, event)` behind a comptime arch interface;
+  host scenario tests; `caravan-sim`, the seeded deterministic simulator.
+- SMP: secondary harts through SBI HSM; per-hart run queues; a kernel lock;
+  synchronous IPI kicks; root-table retirement across harts; synchronous
+  remote TLB flushes.
+- Exit, met: a cross-hart call benchmark; the simulator ran 10⁶ random steps
+  (20 seeds, 2 harts) with every invariant checked after every step;
+  benchmark and per-entry profile records (`zig build bench`).
+
+### Left over from Phases 1–2 (carried into Phase 3)
+- IPC fastpath (register-only call/reply that skips the general scheduler).
+- Checking protocol ids on endpoints (the capability field exists).
+- Frame aliases, so memory can be shared between address spaces (needed
+  for channels).
+- Multi-level CSpaces.
+- ASIDs, to avoid flushing the TLB on every address-space switch.
+- `fence.i` when executable pages change, for real hardware.
+- Sporadic-server refills (seL4-style) instead of simple periodic refills.
+- Preemptible `Untyped.reset` for very large regions.
+- Ledger mode (event recording for replay and audit).
 
 ## Phase 3: the manifest and Steward
 - The `grain.zon` manifest format; `comptime` validation of the wiring;
@@ -91,7 +106,7 @@ Each phase ends with something that boots and a test that proves it.
   the capability model.
 
 ## Owner decisions
-- **Milestone:** build through Phase 2 before the next review.
+- **Milestone:** build through Phase 2 before the next review (done).
 - **Primary use case:** a personal device.
 - **Social:** every instance has a shareable identity, used to move data,
   host applications and connect with other people's instances (inspired by

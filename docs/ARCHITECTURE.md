@@ -40,136 +40,183 @@ Grain is a capability operating system built around three claims:
 
 Caravan does five things and nothing else: **capabilities, memory,
 execution, IPC, and the event door.** Everything else, drivers included, runs
-in userspace domains.
+in userspace.
+
+> **Status (Phase 2):** everything in this section is implemented and tested
+> unless marked *planned*. Where the build differs from the first draft of this
+> design, the text says so and why. The ABI is `caravan/abi/abi.zig`, and the
+> core is `caravan/src/core/kernel.zig`.
 
 ### 2.1 Kernel objects
 
 | Object | Purpose |
 |---|---|
-| `Untyped` | A range of physical memory that can be retyped into other objects. The only source of kernel memory. |
-| `CNode` | A table of capability slots. A domain's CSpace is a tree of CNodes. |
-| `Domain` | The unit of isolation: a CSpace, an address space and one or more threads. (seL4 keeps these separate; Grain groups them so the manifest stays readable. Threads can still be separate objects.) |
-| `Thread` | Register state plus a binding to a scheduling context. |
-| `AddressSpace` / `PageTable` / `Frame` | Sv39/Sv48 paging. Mapping a frame needs a capability to both the frame and the page table. |
-| `Endpoint` | Synchronous call/reply IPC rendezvous. |
+| `Untyped` | A range of physical memory that can be retyped into other objects. The only source of kernel memory. Device untypeds (MMIO) can only become frames. |
+| `CNode` | A table of 2^n capability slots. A thread's CSpace is one CNode for now (multi-level lookup is *planned*). |
+| `Thread` | Saved registers, a CSpace, an address space, an optional fault endpoint and IPC buffer, a priority and a maximum controlled priority. |
+| `PageTable` | One Sv39 table at a fixed level (given when created). A top-level table *is* an address space: its methods map frames and link tables. |
+| `Frame` | 4 KiB, 2 MiB or 1 GiB of memory (RAM or device). |
+| `Endpoint` | Synchronous IPC rendezvous (call/reply, send/recv). |
 | `Signal` | An asynchronous notification word (seL4 notifications): OR in bits, wait for any. Interrupts arrive as signals. |
-| `Channel` | A shared-memory ring pair (submission and completion, as in io_uring) plus a signal, for bulk and streaming data. The kernel only sets it up and wakes waiters; data never goes through the kernel. |
-| `SchedContext` | A CPU-time budget and period (seL4 MCS). Time is a capability. |
-| `Irq` | The right to receive a specific interrupt line as a signal. |
-| `Lease` | A revocable forwarder to another capability (§2.3). |
+| `SchedContext` | A CPU-time budget and period on one hart (seL4 MCS). Time is a capability. |
+| `Lease` | A revocable, limited forwarder to another capability (§2.3). |
+| `Irq` | The right to receive one interrupt line as a signal. |
+| `IrqControl`, `SchedControl`, `DebugConsole` | Boot singletons: the authority to create Irqs, to give contexts budgets, and (for bring-up) console output and power-off. |
+| `Channel` | *Planned:* shared-memory rings plus a signal, for bulk data. |
+
+*Change from the first draft:* there is no `Domain` object. As in seL4, a
+thread names its CSpace and address space directly, and threads can share
+them. "Domain" stays a manifest-level idea (Phase 3): a group of threads,
+spaces and capabilities that Steward creates together.
 
 ### 2.2 Capabilities
 
-A capability is 16 bytes:
+A capability is 16 bytes, stored only in kernel-owned CNodes:
 
 ```
-object index : u32   which kernel object (index into a typed object table)
-generation   : u32   must equal the object's current generation
-rights       : u16   read / write / grant / call / map / retype / ...
-protocol     : u16   interface-schema id the holder expects (endpoints)
-badge        : u32   holder-chosen identifier delivered with each message
+object index : u32   which entry in the object table
+generation   : u32   must equal the entry's current generation
+rights       : u16   read write execute grant send recv revoke configure retype
+protocol     : u16   interface id (carried, not yet checked — planned with Phase 4)
+badge        : u32   delivered to the receiver with every message or signal
 ```
 
-- **Unforgeable** because capabilities live only in kernel-owned CNodes.
-  Userspace names them by slot index.
-- **Attenuation:** `mint` makes a copy with fewer rights, a badge, or a
-  protocol binding. Rights can only shrink.
-- **Typed endpoints:** an endpoint capability can carry the id of the
-  interface schema it speaks (§3.2). The kernel never parses messages, but
-  it checks that sender and receiver agree on the protocol id, which costs
-  one compare. This catches wiring errors at the boundary, and it lets an
-  agent ask a capability *what it is*.
+- **Unforgeable:** userspace names capabilities by slot index only.
+- **Attenuation:** `CNode.mint` copies a capability with a subset of its
+  rights, and can set a badge once. Rights only shrink.
+- **Introspection:** `CNode.identify` returns the kind, rights, badge, the
+  kind *behind* a lease, and the object id; `CNode.lease_info` returns a
+  lease's remaining uses and expiry. Agents can ask any slot what it is.
+- **The object table** has one 32-byte entry per object, allocated once at
+  boot (about one entry per 4 KiB of RAM, so 0.8% overhead). Generations
+  live in the table, not in the object's memory, so they survive memory reuse.
 
 ### 2.3 Revocation: generations and leases, no derivation tree
 
-seL4 tracks every derived capability in a derivation tree so they can be
-revoked. Caravan does not:
+seL4 tracks every derived capability in a derivation tree. Caravan does not.
 
-- **Destroying an object bumps its generation.** Every capability to it,
-  wherever it is, is now stale and fails on use. Revocation is O(1).
-- **Selective revocation uses leases.** To hand out authority you might want
-  back, mint a `Lease` object that forwards to the capability, and hand out
-  capabilities to the lease. Revoking the lease bumps *its* generation:
-  everyone who got authority through it loses it, and nobody else does. This
-  is the caretaker pattern from KeyKOS and E, built into the kernel.
-- **Leases can carry limits** (an expiry tick and a use count), checked when
-  invoked. This is how an AI agent gets authority for "this task, this hour".
-- Cost: one generation compare per invocation, plus one extra lookup when a
-  lease is used. In exchange, the hardest part of seL4's bookkeeping goes
-  away, and so does unbounded revocation latency.
+- **`CNode.revoke(slot)` bumps the object's generation.** Every other
+  capability to it, anywhere, becomes invalid at once; the revoking slot gets
+  a fresh one. Threads queued on a revoked endpoint or signal are woken with
+  `aborted`; a revoked frame is unmapped. **O(1) apart from that cleanup.**
+- **Selective revocation uses leases.** `Lease.arm(target, rights,
+  duration, uses)` makes a lease forward to a capability. Copies of the lease
+  capability act as the target, with at most the lease's rights, until the
+  duration passes, the uses run out, or the owner revokes the lease. This is
+  the caretaker pattern from KeyKOS and E, in the kernel.
+- **Capabilities the kernel keeps for a thread** (fault endpoint, IRQ
+  signal) are stored unresolved and resolved through leases on every use, so
+  revoking a lease cuts them off too.
+- **Known limit:** a lease controls *invocations*. An effect that outlives an
+  invocation, such as a mapping made through a leased frame capability or a
+  scheduling context bound through one, is not undone when the lease ends.
+  To take that back, revoke the underlying object instead.
+- **Memory is reclaimed by `Untyped.reset`,** which destroys every object
+  made from the region (recursively, iteratively, cost proportional to the
+  number of objects) and undoes each one's relationships: dequeues threads,
+  aborts waiting callers, returns lent contexts, unmaps frames and tables,
+  and stops harts running a destroyed thread or address space.
 
 ### 2.4 Memory
 
-- **No kernel heap.** At boot, Caravan sizes its fixed tables from the boot
-  manifest and turns all remaining RAM into `Untyped` capabilities given to
-  the root domain. After that the kernel never allocates. Creating an object
-  means retyping untyped memory that the caller supplies, so a domain's
-  kernel footprint is charged to that domain.
-- **Kernel mapping:** the kernel maps all of physical memory at a fixed
-  higher-half offset (Sv39 makes this cheap) and has its own address space
-  per hart for per-core data.
-- **Userspace pagers:** page faults are delivered as IPC to the faulting
-  domain's fault endpoint. The kernel itself does no demand paging, swapping
-  or copy-on-write. Those are services.
+- **No kernel heap.** At boot Caravan parses the device tree, places the
+  object table and the root untyped headers in free RAM, turns the rest of
+  RAM into untyped regions, and makes device untypeds from device-tree MMIO
+  ranges (excluding the interrupt controller and timer). After boot, every
+  kernel object lives in memory a caller retyped.
+- **Untyped regions allocate from both ends:** page-aligned payloads (frames,
+  tables, big CNodes, child regions) from the bottom, small bodies (threads,
+  endpoints, signals, contexts, leases) from the top, so alignment wastes
+  nothing. Each region also has an **object budget** (one object per 4 KiB of
+  its size), so nobody can exhaust the global object table with tiny objects.
+- **Page tables carry a shadow array** naming the object mapped or linked at
+  each slot (a table is 8 KiB: 4 KiB of PTEs, then the shadow). Frames and
+  tables record where they are mapped. Destroying either side finds and
+  clears the other. *Limit:* a frame object is mapped in one place; sharing
+  memory between address spaces needs frame aliases (*planned*, with channels).
+- **Kernel mapping:** the kernel is linked at `0xffffffff80200000`, and all
+  physical memory is mapped at `0xffffffc000000000`, both with 1 GiB pages
+  built by the boot code. New root tables copy the kernel half.
+- **Faults go to userspace:** page faults and exceptions become messages on
+  the thread's fault endpoint (kind, address, pc). The handler can map memory
+  and reply to retry, or reply with a new pc. With no handler the thread stops,
+  and the kernel logs a `thread_fault` record.
 
 ### 2.5 Execution and scheduling
 
-- **Per-hart kernels, shared nothing on the fast path** (Barrelfish
-  multikernel). Each hart has its own run queues and kernel stack. Moving a
-  thread between harts, or signalling a remote hart, is an explicit message
-  through an IPI. There is no global kernel lock.
-- **MCS scheduling:** a thread runs only with a `SchedContext` (budget and
-  period). A call to a passive server can lend the caller's SchedContext, so
-  servers run on their clients' time and can't be used for denial of
-  service.
-- **Two scheduling modes, chosen in the manifest:** *priority with budgets*
-  (general purpose), and a *static time-partitioned table* (fully
-  deterministic, for real-time or replay-critical systems).
+- **MCS scheduling contexts:** a thread runs only on a configured context
+  (budget ≤ period, on one hart). The running thread is charged at every
+  kernel entry. Exhausting the budget either round-robins (budget = period)
+  or stalls the thread until its next refill. Refills follow a simple
+  periodic rule; seL4's sporadic-server refills are *planned*.
+- **Donation:** a call to a passive server (one with no context of its own)
+  lends the caller's context. The reply gives it back. Servers run on their
+  clients' time.
+- **Priorities 0–255** with a per-thread *maximum controlled priority*, so a
+  thread can lower itself and later restore itself.
+- **Per-hart run queues** with a priority bitmap. A context's hart decides
+  where its thread runs.
+- **Timer programming is lazy:** the hardware timer only moves earlier. An
+  early timer interrupt is a cheap no-op, and it saves a firmware call on
+  almost every kernel entry.
+- *Change from the first draft:* SMP uses **one kernel lock** (as seL4 does)
+  rather than shared-nothing per-hart kernels. Kernel entries are short and
+  non-preemptible. Other harts are told to reschedule with IPIs ("kicks").
+  The hart holding the lock waits until any kicked hart running user code
+  has trapped, so no hart keeps running a thread the kernel took away.
+  Destroying an address space makes every hart leave that root table before
+  the call returns. A multikernel design stays the long-term direction.
+- *Planned:* a static time-partitioned scheduling mode for fully
+  deterministic systems.
 
 ### 2.6 IPC
 
-- `call(cap, msg)` / `reply_recv(msg)`: synchronous, register-based
-  fastpath. On RISC-V, a0 to a7 carry the capability, a message tag and six
-  words. Longer messages use a per-thread IPC buffer page. Up to four
-  capabilities can be transferred per message (as in Zircon channels).
-- `signal(cap, bits)` / `wait(cap)`: asynchronous.
-- `Channel`: setup and wakeups only. Data stays in shared rings.
-- Target: under 300 cycles for a register-only call/reply round trip on
-  RVA23-class cores.
+- `call`, `send`, `recv`, `reply_recv`, `reply`: a message tag and five
+  words travel in registers. Up to 64 words go through the thread's IPC
+  buffer page. Up to four capabilities move per message if the sender's
+  endpoint capability has the `grant` right.
+- The reply relationship is implicit (one outstanding caller per server). A
+  server that takes a new call without replying aborts the old caller.
+- `signal`, `wait`, `poll` on signals. An `Irq` bound to a signal sets the
+  signal's badge bits, and stays masked until `Irq.ack`.
+- **Measured** (QEMU, one hart, ReleaseFast, instructions retired including
+  user code): null system call 648, minimal object method 685, call/reply
+  round trip to a passive server about 2,000. A register-only fastpath that
+  skips the general scheduler (like seL4's) is *planned*. The target is
+  still a few hundred cycles per round trip on real RVA23 cores.
 
 ### 2.7 The event door (determinism)
 
-Everything nondeterministic is turned into an `Event` by architecture code
-and passed to one portable function:
+Architecture code turns hardware into events and calls one portable entry
+point:
 
 ```
-core.step(state, event) -> effects
-event  = irq(line) | timer(tick) | trap(thread, cause) | syscall(thread, args) | ipi(from, msg)
-effect = switch_to(thread) | program_timer(t) | send_ipi(hart, msg) | ...
+kernel.handle(hart, now, event)        event = syscall | fault | timer | irq(line) | ipi
+kernel.currentThread(hart)             what that hart should run next (or idle)
 ```
 
-- Architecture code (`arch/riscv64`, later `arch/aarch64` and `arch/x86_64`)
-  only translates hardware into events and effects into hardware.
-- `core/` is plain Zig with no hardware access. The build enforces this:
-  it is a separate module that can't import `arch/` (already true in this
-  repository). The exact same core runs:
-  - on hardware,
-  - in **QEMU**,
-  - in a **host simulator** (`zig build sim`) that feeds it seeded random
-    event streams and checks invariants after every step, the way
-    TigerBeetle's VOPR does.
-- **Record and replay:** in *ledger mode* the kernel logs every event with its
-  ordinal. Replaying the log reproduces the kernel state exactly. Together
-  with deterministic userspace scheduling, the whole system can be replayed,
-  which is useful for debugging and for audits ("what exactly did the agent
-  do?").
+- Every effect goes through a small comptime interface (`A` in kernel.zig):
+  set a timer, mask an IRQ, flush the TLB, retire a root table, write the
+  console. Time is an argument, never read by the core. Power-off is a
+  request (`exitRequested`) that arch code carries out.
+- `core/` can't import `arch/`, and the build enforces it. The same core runs:
+  - **on QEMU riscv64** (and, later, hardware);
+  - **in host scenario tests** (`sim/kernel_test.zig`) that act as user
+    threads by setting registers and calling `handle`;
+  - **in `caravan-sim`**, which feeds the core seeded random events and
+    checks `checkInvariants()` (queues, states, reply links, contexts,
+    mappings, untyped watermarks, free list) after every step. Any seed
+    replays bit-for-bit, and each run is executed twice to prove it.
+- QEMU runs use `-icount`, so a whole-system boot, SMP included, gives
+  byte-identical output every time.
+- *Planned:* ledger mode (record every event in order, for replay and audit).
 
-### 2.8 Syscall surface (target)
+### 2.8 System calls
 
-About 12 calls: `call`, `reply_recv`, `send`, `recv`, `signal`, `wait`,
-`yield`, and `invoke(cap, op, args)` for object methods (retype, mint, map,
-revoke, configure). Each object method is described by a schema, so the
-syscall surface is self-describing too.
+Ten calls: `call`, `send`, `recv`, `reply_recv`, `reply`, `signal`,
+`wait`, `poll`, `yield`, and `invoke(cap, method, args)` for object methods.
+Methods, error codes, thread states and fault kinds are named enums in the
+ABI file, so a person or an agent can read the whole contract in one place.
 
 ## 3. Grain, the system above the kernel
 

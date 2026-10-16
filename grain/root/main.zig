@@ -404,6 +404,60 @@ fn testUartInterrupt() !void {
     try expectStatus(.ok, g.invoke(irq, abi.IrqMethod.ack, .{}).status);
 }
 
+var foreign_thread: g.CPtr = 0;
+fn foreignRunning() bool {
+    return threadState(foreign_thread) == .running;
+}
+
+fn retypeFrom(region: g.CPtr, kind: Kind, bits: usize) !g.CPtr {
+    const s = slot();
+    try expectStatus(.ok, g.invoke(region, abi.UntypedMethod.retype, .{ kind, bits, s }).status);
+    return s;
+}
+
+/// Destroy a running thread and its whole address space while it executes
+/// on another hart: the kernel must stop that hart from running it and
+/// from translating through the dead page tables before memory is reused.
+fn testForeignTeardown() !void {
+    if (boot_info.hart_count < 2) return error.Skip;
+    const region = try retype(.untyped, 20); // 1 MiB
+    const vs = try retypeFrom(region, .page_table, 2);
+    const l1 = try retypeFrom(region, .page_table, 1);
+    const l0 = try retypeFrom(region, .page_table, 0);
+    const code_va: usize = 0x10000;
+    try expectStatus(.ok, g.invoke(vs, abi.VSpaceMethod.map_table, .{ l1, code_va }).status);
+    try expectStatus(.ok, g.invoke(vs, abi.VSpaceMethod.map_table, .{ l0, code_va }).status);
+    // The program is one instruction, `j .`, written through a temporary
+    // mapping in our own address space.
+    const code = try retypeFrom(region, .frame, 12);
+    const tmp_va: usize = 0x6200_0000;
+    try mapPage(code, tmp_va, rw);
+    @as(*volatile u32, @ptrFromInt(tmp_va)).* = 0x0000006f;
+    try expectStatus(.ok, g.invoke(S.vspace, abi.VSpaceMethod.unmap, .{tmp_va}).status);
+    const rx: abi.Rights = .{ .read = true, .execute = true };
+    try expectStatus(.ok, g.invoke(vs, abi.VSpaceMethod.map_frame, .{ code, code_va, rx.bits() }).status);
+
+    const t = try retypeFrom(region, .thread, 0);
+    const sc = try retypeFrom(region, .sched_context, 0);
+    try expectStatus(.ok, g.invoke(t, abi.ThreadMethod.configure, .{ S.cnode, vs, 0 }).status);
+    try expectStatus(.ok, g.invoke(t, abi.ThreadMethod.write_registers, .{ code_va, 0, 0, 0 }).status);
+    try expectStatus(.ok, g.invoke(S.sched_control, abi.SchedControlMethod.configure, .{ sc, ticks(1_000), ticks(1_000), 1 }).status);
+    try expectStatus(.ok, g.invoke(t, abi.ThreadMethod.bind_sched, .{sc}).status);
+    try expectStatus(.ok, g.invoke(t, abi.ThreadMethod.resume_thread, .{}).status);
+    foreign_thread = t;
+    var tries: usize = 0;
+    while (!foreignRunning() and tries < 100_000) : (tries += 1) g.yield();
+    try check(foreignRunning());
+    try check(threadHart(t) == 1);
+
+    try expectStatus(.ok, g.invoke(region, abi.UntypedMethod.reset, .{}).status);
+    try expectStatus(.invalid_cap, g.invoke(S.cnode, abi.CNodeMethod.identify, .{t}).status);
+    try expectStatus(.invalid_cap, g.invoke(S.cnode, abi.CNodeMethod.identify, .{vs}).status);
+    // The region is whole again.
+    const r = g.invoke(region, abi.UntypedMethod.info, .{});
+    try check(r.w[2] == r.w[1]);
+}
+
 fn testCrossHartCall() !void {
     if (boot_info.hart_count < 2) return error.Skip;
     const ep = try retype(.endpoint, 0);
@@ -461,6 +515,7 @@ export fn rootMain(bi: *const abi.BootInfo) callconv(.c) noreturn {
     run("budgets_share_cpu", testBudgets);
     run("untyped_reset", testUntypedReset);
     run("uart_interrupt", testUartInterrupt);
+    run("foreign_teardown_on_other_hart", testForeignTeardown);
     run("cross_hart_call", testCrossHartCall);
 
     g.record("summary", .{ .tests = ran, .failed = failed });

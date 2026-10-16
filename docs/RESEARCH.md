@@ -152,7 +152,8 @@ why. These are the inputs to [ARCHITECTURE.md](ARCHITECTURE.md).
   suits per-core kernels. PLIC stays as the fallback.
 - The **RISC-V IOMMU** spec is ratified (QEMU has supported a model since
   9.2), which lets userspace drivers be DMA-isolated.
-- The **H extension** (hypervisor) supports Linux guest domains.
+- The **H extension** (hypervisor). Grain won't run guests (no compatibility
+  layer), but it could still isolate drivers.
 - **PMP** and **Smepmp** support a verified-boot story and M-mode lock-down.
 - Boards worth considering for later real-hardware bring-up: StarFive
   VisionFive 2, Milk-V Jupiter/Megrez, SiFive HiFive Premier, and RVA23
