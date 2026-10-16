@@ -127,11 +127,18 @@ fn enterNext(h: *arch.HartLocal) noreturn {
         unlock();
         trap.caravanResume(&t.ctx);
     }
+    if (kernel.stuck() and !stuck_reported) {
+        stuck_reported = true;
+        log("stuck", .{ .reason = "no_runnable_threads_and_no_timer" });
+        kernel.logThreads();
+    }
     // Idle on the kernel's own table, so no user root stays live here.
     if (h.active_root.raw != arch.bootRootPhys()) arch.switchRoot(h, arch.bootRootPhys());
     unlock();
     idle(h);
 }
+
+var stuck_reported = false;
 
 fn idle(h: *arch.HartLocal) noreturn {
     _ = h;
@@ -189,15 +196,22 @@ fn eventFor(h: *arch.HartLocal, cause: trap.Cause, claimed: *?u32) core.kernel.E
 
 export fn caravanUserTrap(ctx: *trap.Context) callconv(.c) noreturn {
     const h = arch.self();
+    // The entry code has saved every register into ctx; from here another
+    // hart may tear the thread down, so ctx is only touched under the lock
+    // and only if the thread is still ours.
     _ = h.epoch.fetchAdd(1, .acq_rel);
     h.in_user.store(false, .release);
     arch.serviceRequests(h);
-    const cause = trap.decode(csr.read("scause"), csr.read("stval"), ctx.pc);
-    if (cause == .syscall) ctx.pc += 4;
+    const scause = csr.read("scause");
+    const stval = csr.read("stval");
     var claimed: ?u32 = null;
-    const ev = eventFor(h, cause, &claimed);
     lock(h);
-    handleProfiled(h, ev, ctx);
+    const ours = if (kernel.currentThread(h.index)) |t| &t.ctx == ctx else false;
+    var cause = trap.decode(scause, stval, if (ours) ctx.pc else 0);
+    if (!ours and cause != .interrupt) cause = .{ .interrupt = .software }; // stale: just reschedule
+    if (cause == .syscall) ctx.pc += 4;
+    const ev = eventFor(h, cause, &claimed);
+    handleProfiled(h, ev, if (ours) ctx else null);
     if (claimed) |line| plic.complete(h.plic_context.?, line);
     enterNext(h);
 }

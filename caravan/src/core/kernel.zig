@@ -290,6 +290,9 @@ pub fn Kernel(comptime A: type) type {
             bitmap: [4]u64 = @splat(0),
             release_head: ObjId = 0,
             timer_deadline: u64 = std.math.maxInt(u64),
+            /// The running thread used up a full-bandwidth budget: it goes
+            /// to the back of its queue at the next reschedule.
+            rotate: bool = false,
         };
 
         pub const Stats = struct {
@@ -1185,6 +1188,18 @@ pub fn Kernel(comptime A: type) type {
                     const sc = k.body(SchedContext, t.sc);
                     const used = k.now -| h.started_at;
                     sc.remaining -|= used;
+                    // Deal with exhaustion now, whatever the thread does in
+                    // this entry: it may block or lend the context away, and
+                    // then nobody would notice the budget ran out.
+                    if (sc.remaining == 0 and !sc.throttled) {
+                        if (sc.budget >= sc.period) {
+                            k.refill(sc);
+                            h.rotate = true;
+                        } else {
+                            sc.throttled = true;
+                            k.insertRelease(t.sc);
+                        }
+                    }
                 }
             }
             h.started_at = k.now;
@@ -1209,22 +1224,6 @@ pub fn Kernel(comptime A: type) type {
             if (sc.refill_at <= k.now) sc.refill_at = k.now +| sc.period;
         }
 
-        /// The running thread has used its budget: round-robin if its context
-        /// refills immediately (full bandwidth), else stall until refill.
-        fn budgetExpired(k: *Self, hi: u32, t: *Thread) void {
-            const id = t.sc;
-            const sc = k.body(SchedContext, id);
-            k.harts[hi].current = 0;
-            if (sc.budget >= sc.period) {
-                k.refill(sc);
-                k.enqueue(t, false);
-            } else {
-                sc.throttled = true;
-                k.insertRelease(id);
-                t.state = .stalled;
-            }
-        }
-
         fn reschedule(k: *Self, hi: u32) void {
             const h = &k.harts[hi];
             if (h.current != 0) {
@@ -1240,10 +1239,12 @@ pub fn Kernel(comptime A: type) type {
                     h.current = 0;
                     k.enqueue(cur, true);
                 } else if (!k.canRun(cur)) {
-                    if (k.alive(cur.sc, .sched_context)) k.budgetExpired(hi, cur) else {
-                        h.current = 0;
-                        cur.state = .stalled;
-                    }
+                    // Out of budget (already on the release list) or no context.
+                    h.current = 0;
+                    cur.state = .stalled;
+                } else if (h.rotate) {
+                    h.current = 0;
+                    k.enqueue(cur, false);
                 } else if (highestReady(h)) |p| {
                     if (p > cur.prio) {
                         h.current = 0;
@@ -1251,6 +1252,7 @@ pub fn Kernel(comptime A: type) type {
                     }
                 }
             }
+            h.rotate = false;
             while (h.current == 0) {
                 const p = highestReady(h) orelse break;
                 const t = k.thread(h.run_head[p]);
@@ -2079,6 +2081,39 @@ pub fn Kernel(comptime A: type) type {
             }
         }
 
+        /// True when no hart has anything to run and no timer is armed: the
+        /// system can only move again if an interrupt arrives.
+        pub fn stuck(k: *Self) bool {
+            for (k.harts[0..k.hart_count]) |h| {
+                if (h.online and (h.current != 0 or h.timer_deadline != std.math.maxInt(u64))) return false;
+            }
+            return true;
+        }
+
+        /// One record per live thread, for diagnosing a stuck system.
+        pub fn logThreads(k: *Self) void {
+            for (k.table, 0..) |e, i| {
+                if (e.kind != .thread) continue;
+                const t = k.thread(@intCast(i));
+                k.log("thread", .{
+                    .id = t.id,
+                    .state = @tagName(t.state),
+                    .prio = t.prio,
+                    .hart = t.hart,
+                    .sc = t.sc,
+                    .home_sc = t.home_sc,
+                    .queue = t.queue,
+                    .reply_to = t.reply_to,
+                    .reply_from = t.reply_from,
+                    .pc = klog.hex(t.ctx.get(.pc)),
+                });
+                if (k.alive(t.sc, .sched_context)) {
+                    const sc = k.body(SchedContext, t.sc);
+                    k.log("sched_context", .{ .id = t.sc, .remaining = sc.remaining, .budget = sc.budget, .throttled = sc.throttled, .holder = sc.holder, .refill_at = sc.refill_at, .now = k.now });
+                }
+            }
+        }
+
         // -------------------------------------------------------------------
         // Invariants (checked by the simulator after every step, and by
         // debug builds on demand). Returns a description of the first
@@ -2129,6 +2164,9 @@ pub fn Kernel(comptime A: type) type {
                     .sched_context => {
                         const sc = k.body(SchedContext, id);
                         if (sc.remaining > sc.budget) return "budget overrun";
+                        // An exhausted context must be waiting for a refill.
+                        if (sc.configured and sc.remaining == 0 and !sc.throttled) return "exhausted context not throttled";
+                        if (sc.throttled and !k.onReleaseList(id)) return "throttled context not on its release list";
                     },
                     .untyped => {
                         const u = k.body(Untyped, id);
@@ -2168,6 +2206,18 @@ pub fn Kernel(comptime A: type) type {
                 }
             }
             return null;
+        }
+
+        fn onReleaseList(k: *Self, id: ObjId) bool {
+            const sc = k.body(SchedContext, id);
+            var n = k.harts[sc.hart].release_head;
+            var count: usize = 0;
+            while (n != 0) : (n = k.body(SchedContext, n).next_release) {
+                if (n == id) return true;
+                count += 1;
+                if (count > k.table.len) return false;
+            }
+            return false;
         }
 
         fn inRunQueue(k: *Self, t: *Thread) bool {

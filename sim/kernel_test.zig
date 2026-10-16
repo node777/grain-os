@@ -389,3 +389,22 @@ test "huge sizes and periods are refused, not overflowed" {
     try expectEqual(abi.Status.invalid_argument, (try m.invoke(0, S.sched_control, abi.SchedControlMethod.configure, &.{ 101, big, big, 0 })).status);
     try expectEqual(abi.Status.ok, (try m.invoke(0, S.sched_control, abi.SchedControlMethod.configure, &.{ 101, 1 << 48, 1 << 48, 0 })).status);
 }
+
+test "a budget that runs out during a call is still refilled (no lost wakeup)" {
+    var m = try bootMachine();
+    defer m.deinit();
+    try retype(&m, .endpoint, 0, 100);
+    const server = try spawn(&m, 110, 111, 200, 50_000, 50_000);
+    _ = try m.invoke(0, 110, abi.ThreadMethod.resume_thread, &.{});
+    _ = try m.invoke(0, S.thread, abi.ThreadMethod.set_priority, &.{100});
+    _ = try m.sys(0, .recv, 100, 0, &.{}); // as the server
+    _ = try m.invoke(0, 110, abi.ThreadMethod.bind_sched, &.{0});
+    try std.testing.expect(m.current(0) == m.root);
+    // The root's whole 100_000-tick budget passes without a timer interrupt
+    // (it is charged at its next kernel entry), and that entry is a call.
+    m.now += 100_000;
+    _ = try m.sys(0, .call, 100, 0, &.{});
+    // The server must run on the (refilled) lent context, not stall forever.
+    try std.testing.expect(m.current(0) == server);
+    try std.testing.expect(!m.k.stuck());
+}

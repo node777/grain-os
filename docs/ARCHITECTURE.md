@@ -146,8 +146,10 @@ seL4 tracks every derived capability in a derivation tree. Caravan does not.
 
 - **MCS scheduling contexts:** a thread runs only on a configured context
   (budget ≤ period, on one hart). The running thread is charged at every
-  kernel entry. Exhausting the budget either round-robins (budget = period)
-  or stalls the thread until its next refill. Refills follow a simple
+  kernel entry, and exhaustion is handled right there, whatever the thread
+  goes on to do in that entry. A full-bandwidth context (budget = period)
+  refills and its thread goes to the back of its queue; any other context is
+  throttled and placed on its hart's release list until the next refill. Refills follow a simple
   periodic rule; seL4's sporadic-server refills are *planned*.
 - **Donation:** a call to a passive server (one with no context of its own)
   lends the caller's context. The reply gives it back. Servers run on their
@@ -180,8 +182,8 @@ seL4 tracks every derived capability in a derivation tree. Caravan does not.
 - `signal`, `wait`, `poll` on signals. An `Irq` bound to a signal sets the
   signal's badge bits, and stays masked until `Irq.ack`.
 - **Measured** (QEMU, one hart, ReleaseFast, instructions retired including
-  user code): null system call 648, minimal object method 685, call/reply
-  round trip to a passive server about 2,000. A register-only fastpath that
+  user code): null system call about 690, minimal object method about 740,
+  call/reply round trip to a passive server about 2,100. A register-only fastpath that
   skips the general scheduler (like seL4's) is *planned*. The target is
   still a few hundred cycles per round trip on real RVA23 cores.
 

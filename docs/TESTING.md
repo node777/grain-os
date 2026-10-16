@@ -42,9 +42,7 @@ The four layers, from fastest to most real:
    `checkInvariants()` runs after every step. When nothing can run any
    more, the machine reboots within the same seed. Every seed runs twice, and
    the final kernel memory must hash identically. A failure prints the seed
-   and step; `--seed N --trace` replays it. It has found two real bugs so far
-   (an endpoint left in "sending" mode after its queue was aborted, and
-   stack padding copied into kernel memory).
+   and step; `--seed N --trace` replays it.
 4. **QEMU** (`qemu-test`): the root task runs the suite from user mode on 2
    harts. That covers boot info, capability identity, mint and revoke, thread
    signalling, a passive server, fault handling with retry, leases, CPU
@@ -67,6 +65,25 @@ How a QEMU test reports:
 4. `-icount shift=0,sleep=off` makes virtual time follow instruction count,
    so runs are **deterministic**, SMP included. Idle harts skip virtual time
    forward, so timer tests take milliseconds.
+
+**When the system hangs:** if every hart is idle with no timer armed, the
+kernel prints `@caravan stuck`, then one `thread` record (state, priority,
+contexts, reply links, pc) and one `sched_context` record per thread. That
+is usually enough to see the lost wakeup at once.
+
+**Bugs these layers found while Phases 1–2 were built** (each now has a
+regression test):
+- simulator: an endpoint left in "sending" mode after its queue was aborted;
+- simulator: struct padding from the stack copied into kernel memory, which
+  broke bit-for-bit replay;
+- review plus scenario tests: lent scheduling contexts not taken back on
+  suspend or unbind; u32 overflow in a child untyped's budget; time
+  overflow with huge periods;
+- QEMU plus the stuck diagnostic: a budget that ran out in the same kernel
+  entry as a call to a passive server was never refilled, so the whole
+  system deadlocked;
+- review: the trap path touched a thread's saved context before taking the
+  kernel lock, racing with another hart destroying that thread.
 
 **Benchmarks:** under `-icount`, QEMU's cycle and instret counters count
 the instructions of *all* harts, and a hart waiting for the kernel lock
