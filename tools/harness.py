@@ -27,7 +27,7 @@ import tempfile
 import threading
 import time
 
-PREFIXES = ("@caravan", "@grain")
+PREFIXES = ("@aurora", "@caravan", "@grain")
 
 QEMU_RISCV64 = [
     "qemu-system-riscv64", "-machine", "virt", "-cpu", "rv64",
@@ -134,8 +134,11 @@ def main():
     ap.add_argument("--virtio-rng", default=None, help="attach a virtio entropy device reading this file")
     ap.add_argument("--envoy-socket", action="store_true",
                     help="attach a second virtio console for Envoy, as a Unix socket")
-    ap.add_argument("--agent", default=None,
-                    help="Python file with run(session, check): an agent session to run against Envoy")
+    ap.add_argument("--agent", action="append", default=[],
+                    help="Python file with run(session, check): an agent session to run against Envoy "
+                         "('N:file' for boot N only)")
+    ap.add_argument("--agent-env", action="append", default=[],
+                    help="K=V to set in the environment of agent scripts")
     ap.add_argument("--realtime", action="store_true",
                     help="run QEMU free (no -icount): guest time is real time, for lease durations "
                          "and interactive use; not deterministic")
@@ -148,6 +151,8 @@ def main():
                     help="attach this raw disk image (virtio-blk); a fresh copy unless --disk-inplace")
     ap.add_argument("--disk-inplace", action="store_true",
                     help="use the --disk image itself, so a later run sees what this one wrote")
+    ap.add_argument("--disk-seed", default=None,
+                    help="with --disk-inplace: if the --disk image does not exist yet, start it as a copy of this one")
     ap.add_argument("--boots", type=int, default=1,
                     help="boot this many times in a row on the same disk; prefix --expect, "
                          "--expect-console, --console-input and --kill-on with 'N:' for one boot")
@@ -155,10 +160,16 @@ def main():
                     help="'N:record': cut the power (kill QEMU) the moment boot N prints this record")
     args = ap.parse_args()
 
+    for kv in args.agent_env:
+        k, _, v = kv.partition("=")
+        os.environ[k] = v
     tmpdir = tempfile.mkdtemp(prefix="grain-")
     disk = None
     if args.disk:
         disk = args.disk
+        if args.disk_inplace and args.disk_seed and not os.path.exists(disk):
+            shutil.copyfile(args.disk_seed, disk)
+            print(f"harness: new disk {disk}", flush=True)
         if not args.disk_inplace:
             disk = os.path.join(tmpdir, "disk.img")
             shutil.copyfile(args.disk, disk)
@@ -192,9 +203,10 @@ def run_boot(args, boot, tmpdir, disk):
     devices = []
     console_path = None
     envoy_path = os.path.join(tmpdir, f"envoy{boot}.sock")
-    if args.agent or args.interactive:
-        args.envoy_socket = True
-    if args.virtio_console or args.virtio_rng or args.envoy_socket or disk:
+    # Envoy is a task that waits for its agent: give it a port only on boots
+    # that have one (elsewhere it is skipped, its port being optional).
+    envoy_socket = args.envoy_socket or args.interactive or bool(for_boot(args.agent, boot))
+    if args.virtio_console or args.virtio_rng or envoy_socket or disk:
         devices += ["-global", "virtio-mmio.force-legacy=false"]
     if args.virtio_rng:
         devices += ["-object", f"rng-random,id=rng0,filename={args.virtio_rng}", "-device", "virtio-rng-device,rng=rng0"]
@@ -205,6 +217,7 @@ def run_boot(args, boot, tmpdir, disk):
     expect_console = for_boot(args.expect_console, boot)
     console_input = for_boot(args.console_input, boot)
     kill_on = for_boot(args.kill_on, boot)
+    agents = for_boot(args.agent, boot)
     pump = None
     if args.virtio_console or expect_console or console_input or args.interactive:
         fd, console_path = tempfile.mkstemp(prefix="grain-console-")
@@ -214,7 +227,7 @@ def run_boot(args, boot, tmpdir, disk):
                     "-chardev", f"socket,id=con0,path={console_sock},server=on,wait=on",
                     "-device", "virtconsole,chardev=con0,bus=vser0.0"]
         pump = ConsolePump(console_sock, console_path, echo=args.interactive)
-    if args.envoy_socket:
+    if envoy_socket:
         # Created after the first console, so it is the second virtio console
         # in device-tree order (manifest: instance = 1).
         devices += ["-device", "virtio-serial-device,id=vser1", "-chardev", f"socket,id=envoy0,path={envoy_path},server=on,wait=off",
@@ -227,7 +240,7 @@ def run_boot(args, boot, tmpdir, disk):
         i = qemu.index("-icount")
         del qemu[i:i + 2]
     cmd = qemu + ["-smp", args.smp] + devices + args.qemu_arg + ["-kernel", args.kernel]
-    if args.interactive and not args.agent:
+    if args.interactive and not agents:
         # A person drives this run: stream the output, wait for the guest to
         # halt (the agent's `bye` ends Envoy) or for ^C.
         print(f"harness: Envoy socket: {envoy_path}", flush=True)
@@ -271,10 +284,10 @@ def run_boot(args, boot, tmpdir, disk):
             pump.send(line + "\n")
 
     agent_failures = []
-    if args.agent:
+    for agent in agents:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import envoy
-        spec = importlib.util.spec_from_file_location("agent_script", args.agent)
+        spec = importlib.util.spec_from_file_location("agent_script", agent)
         script = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(script)
 

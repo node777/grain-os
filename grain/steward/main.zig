@@ -28,6 +28,9 @@ const fdt = @import("fdt");
 const proto = @import("proto");
 
 const manifest: schema.Manifest = @import("system.zon");
+/// A label the build gives this Steward (two builds of one system differ
+/// only by it; the generation tests upgrade from one to the other).
+const build_tag: []const u8 = @import("build_tag").tag;
 comptime {
     schema.check(manifest, "system manifest");
     checkProtocols(manifest, "system manifest");
@@ -669,6 +672,7 @@ export fn stewardMain(bi: *const abi.BootInfo) callconv(.c) noreturn {
         .harts = bi.hart_count,
         .closure = @as([]const u8, &image.hexHash(img.header.closure)),
         .verified = true,
+        .tag = build_tag,
     });
 
     lifecycle = retypeFrom(pool, .endpoint, 0) catch @panic("no lifecycle endpoint");

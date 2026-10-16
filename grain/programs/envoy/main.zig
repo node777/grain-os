@@ -510,7 +510,7 @@ fn verbHello(o: *Out) void {
     if (identityName()) |n| o.str(n) else o.nul();
     o.field("verbs");
     o.arr();
-    for ([_][]const u8{ "hello", "discover", "describe", "call", "plan", "apply", "undo", "ask", "observe", "bye" }) |v| o.str(v);
+    for ([_][]const u8{ "hello", "discover", "describe", "call", "plan", "apply", "undo", "ask", "observe", "upload", "bye" }) |v| o.str(v);
     o.end("]");
     o.end("}");
 }
@@ -808,6 +808,55 @@ fn verbAsk(o: *Out, req: Value) void {
     o.end("}");
 }
 
+/// upload: bulk bytes into a content store the agent holds, without an
+/// audited call per 480 bytes. {"cap", "offset", "data": base64} stages
+/// bytes; {"cap", "done": true, "len"} stores the first `len` staged bytes
+/// as a public object and is one audited action. Returns the hash.
+fn verbUpload(o: *Out, req: Value) void {
+    const name = req.object.get("cap") orelse return err(o, "invalid_request", "upload needs \"cap\"");
+    if (name != .string) return err(o, "invalid_request", "\"cap\" must be a string");
+    const c = findCap(name.string) orelse return err(o, "unknown_cap", "the agent holds no capability by that name");
+    if (!c.granted()) return err(o, "not_granted", "this capability must be asked for first");
+    if (c.info.protocol_id != idl.id(proto.tablecloth)) return err(o, "wrong_protocol", "upload goes to a tablecloth.v1 capability");
+    const TC = proto.tablecloth;
+    if (req.object.get("data")) |d| {
+        if (d != .string) return err(o, "invalid_request", "\"data\" is base64");
+        const off_v = req.object.get("offset") orelse return err(o, "invalid_request", "upload needs \"offset\"");
+        if (off_v != .integer or off_v.integer < 0) return err(o, "invalid_request", "\"offset\" is a number");
+        var bytes: [3072]u8 = undefined;
+        const n = std.base64.standard.Decoder.calcSizeForSlice(d.string) catch return err(o, "invalid_request", "\"data\" is not base64");
+        if (n > bytes.len) return err(o, "too_large", "at most 3072 bytes per upload line");
+        std.base64.standard.Decoder.decode(bytes[0..n], d.string) catch return err(o, "invalid_request", "\"data\" is not base64");
+        var at: usize = 0;
+        while (at < n) {
+            const k = @min(n - at, TC.chunk);
+            _ = idl.call(TC.write, c.info.slot, .{ .offset = @intCast(@as(usize, @intCast(off_v.integer)) + at), .data = idl.Bytes(TC.chunk).from(bytes[at..][0..k]) }) catch
+                return err(o, "upload_failed", "the store refused the bytes (see lease in discover)");
+            at += k;
+        }
+        okResult(o);
+        o.obj();
+        o.field("staged");
+        o.num(n);
+        o.end("}");
+        return;
+    }
+    const len_v = req.object.get("len") orelse return err(o, "invalid_request", "upload needs \"data\" or \"done\" with \"len\"");
+    if (len_v != .integer or len_v.integer < 0) return err(o, "invalid_request", "\"len\" is a number");
+    const zero: idl.Words = @splat(0);
+    if (idl.call(TC.store, c.info.slot, .{ .len = @intCast(len_v.integer), .sealed = false })) |r| {
+        _ = audit("upload", c.name(), "store", "ok", false, zero, zero, 0);
+        okResult(o);
+        o.obj();
+        o.field("hash");
+        o.hex(r.hash.slice());
+        o.end("}");
+    } else |e| {
+        _ = audit("upload", c.name(), "store", @errorName(e), false, zero, zero, 0);
+        err(o, "upload_failed", "the store refused the object");
+    }
+}
+
 fn verbObserve(o: *Out, req: Value) void {
     const since: u64 = if (req.object.get("since")) |v| (if (v == .integer) @intCast(@max(v.integer, 0)) else 0) else 0;
     okResult(o);
@@ -932,6 +981,7 @@ pub fn main() !u16 {
             else if (std.mem.eql(u8, verb, "undo")) verbUndo(&response, r) //
             else if (std.mem.eql(u8, verb, "ask")) verbAsk(&response, r) //
             else if (std.mem.eql(u8, verb, "observe")) verbObserve(&response, r) //
+            else if (std.mem.eql(u8, verb, "upload")) verbUpload(&response, r) //
             else if (std.mem.eql(u8, verb, "bye")) {
                 okResult(&response);
                 response.obj();

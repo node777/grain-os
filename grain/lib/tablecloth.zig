@@ -74,6 +74,8 @@ pub const Ref = extern struct {
 pub const Boot = extern struct {
     current: Hash = zero,
     pending: Hash = zero,
+    /// What was current before the last confirmed switch: rollback's target.
+    previous: Hash = zero,
     tries: u32 = 0,
     max_tries: u32 = 3,
 };
@@ -628,11 +630,21 @@ pub fn Store(comptime Dev: type, comptime cap: Capacity) type {
         pub fn confirm(s: *Self) Error!bool {
             const b = &s.sup.boot;
             if (std.mem.eql(u8, &b.pending, &zero) or b.tries == 0) return false;
+            if (!std.mem.eql(u8, &b.current, &b.pending)) b.previous = b.current;
             b.current = b.pending;
             b.pending = zero;
             b.tries = 0;
             try s.commit();
             return true;
+        }
+
+        /// Go back to the generation that was current before the last
+        /// switch, through the same trial as any switch. Commits.
+        pub fn rollback(s: *Self) Error!Hash {
+            const prev = s.sup.boot.previous;
+            if (std.mem.eql(u8, &prev, &zero)) return error.NotFound;
+            try s.stage(prev);
+            return prev;
         }
 
         /// The first generation of a fresh disk, current without a trial.
@@ -792,6 +804,7 @@ test "generations: stage, trial boots, confirm, give up" {
     try testing.expectEqualSlices(u8, &g2, &(try s.chooseBoot()).?);
     try testing.expect(try s.confirm());
     try testing.expectEqualSlices(u8, &g2, &s.sup.boot.current);
+    try testing.expectEqualSlices(u8, &g1, &s.sup.boot.previous);
 
     // A generation that never comes up is tried max_tries times, then dropped.
     try s.stage(g1);

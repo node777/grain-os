@@ -26,6 +26,11 @@
   Domain-facing contracts live in `grain/lib/domain.zig` and `protocols.zig`.
 - Manifest checks live in `schema.validate`; each new rule needs a test with
   its message in `schema.zig`.
+- Storage tests boot several times on one disk (`--boots`, `N:` prefixes,
+  `--kill-on` for power cuts); the passphrase is typed with `--console-input`.
+  Tablecloth's on-disk format changes need the crash simulator
+  (`grain/lib/tablecloth.zig` tests) to keep passing; every commit must stay
+  a single superblock write after a flush.
 - Manifests are Brix (`system/*.brix`, docs/BRIX.md). A new schema field
   needs no Brix change; check it with `zig-out/bin/brix --print`.
 - Design changes go into `docs/ARCHITECTURE.md` in the same commit as the code.

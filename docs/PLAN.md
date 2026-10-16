@@ -119,15 +119,51 @@ Built:
 - Code renames to the owner's proposed names (GLOSSARY.md), now that
   Phase 4 is done: this needs the owner's go-ahead on the mapping.
 
-## Phase 5: storage, Ledger, generations, identity
-- virtio-blk driver; Granary (content-addressed, encrypted); Ledger
-  (hash-chained).
-- Generations and rollback: build a new generation, switch, roll back, all
-  through Envoy.
-- Seal: first-boot identity creation, device keys, pronounceable names,
-  petnames.
-- Exit: upgrade and rollback survive a forced power-off at every step (in the
-  simulator and in QEMU); the identity persists across reboots and rollbacks.
+## Phase 5: storage, Ledger, generations, identity ✅
+Owner decisions (2026-10-16): the disk is unlocked by the owner's
+passphrase; new components take the owner's names in code (Tablecloth,
+Mantra, Kumara, Aurora); an identity's name is three words from a bank of
+four-letter words (more formats may come); new generations are pushed
+through Envoy.
+
+Built:
+- Messages of up to 64 words (the IPC buffer), `idl.Text`/`idl.Bytes` up to
+  504 bytes; per-domain stacks (`stack_kib`).
+- **Tablecloth**, the content store: two superblock slots and an
+  append-only log (a commit is one superblock write), public and sealed
+  objects (XChaCha20-Poly1305, owner-bound keyed names, Argon2id-wrapped
+  master key), Mantra names and tips, generation state. A crash simulator
+  cuts the power at every device operation of an upgrade-and-rollback
+  scenario. virtio-blk driver; the `tablecloth` domain, unlocked on the
+  console; `grain-disk`.
+- **Kumara**: an Ed25519 identity made on a disk's first boot and sealed in
+  the store, named by three words from a 1024-word bank; signatures bind
+  who asked.
+- **Ledger**: a signed, sealed, append-only chain; every agent action goes
+  there.
+- **Aurora** and generations: content-chunked system images, trial boots
+  with automatic fallback, `switch_to`/`rollback`, Envoy `upload` with
+  deduplication.
+- Supporting changes: `DomainInfo.clients`, lifecycle `ready` (Steward
+  never blocks on a domain), `await_ready`, optional devices skip their
+  domain's clients cleanly, compact images (31 MB to 8 MB), console input,
+  an idle heartbeat for QEMU `-icount`.
+- Exit, met: upgrade and rollback survive a power cut at every device
+  operation in the simulator, and at a trial boot and mid-confirm in QEMU;
+  a generation that never comes up is given up; the identity persists
+  across reboots, the upgrade and the rollback.
+
+### Left over from Phase 5
+- Reclaiming space (the log only grows; unnamed generations stay).
+- Changing the passphrase; a hardware-held key; measured boot.
+- Kumara device keys signed by an owner root key; petnames.
+- The Ledger for grants, revocations and generation switches made by
+  Steward itself (agent actions and the agent's switches are recorded).
+- Console input as its own service (any domain wired to the console can
+  read input today; the agent cannot).
+- `zig build run` boots the kernel directly with a persistent disk;
+  booting it through Aurora, with each build staged as a generation, is the
+  natural next step.
 
 ## Phase 6: the personal desktop
 - virtio-gpu and virtio-input drivers, a compositor domain, a minimal

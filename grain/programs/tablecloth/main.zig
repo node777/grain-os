@@ -83,6 +83,7 @@ const Server = struct {
             .locked = cloth.locked(),
             .current = P.Hash.from(&b.current),
             .pending = P.Hash.from(&b.pending),
+            .previous = P.Hash.from(&b.previous),
             .tries = b.tries,
         };
     }
@@ -159,11 +160,37 @@ const Server = struct {
         const owner = try ownerOf(c);
         if (!std.mem.eql(u8, owner, "steward") and !std.mem.eql(u8, owner, "agent")) return error.Unavailable;
         const h = try hashOf(p.generation);
+        nameGeneration(h) catch |e| return storeError(e);
         cloth.stage(h) catch |e| return storeError(e);
         g.log("generation_staged", .{ .generation = g.klog.hex(std.mem.readInt(u64, h[0..8], .big)), .by = owner });
         return .{};
     }
+
+    pub fn rollback(_: *Server, _: P.rollback.Params, c: idl.Caller) !P.rollback.Results {
+        const owner = try ownerOf(c);
+        if (!std.mem.eql(u8, owner, "steward") and !std.mem.eql(u8, owner, "agent")) return error.Unavailable;
+        const h = cloth.rollback() catch |e| return storeError(e);
+        g.log("generation_staged", .{ .generation = g.klog.hex(std.mem.readInt(u64, h[0..8], .big)), .by = owner, .rollback = true });
+        return .{ .generation = P.Hash.from(&h) };
+    }
 };
+
+/// A generation gets a Mantra name the first time it is staged: `system@N`,
+/// numbered in the order generations arrive. Only a valid descriptor whose
+/// every chunk is stored can be staged (Aurora must be able to load it).
+fn nameGeneration(h: tc.Hash) !void {
+    const d = try cloth.get(h, "", &obj_buf);
+    cached = .{};
+    const v = g.generation.View.parse(d) catch return error.BadName;
+    for (v.hashes) |c| if (!cloth.has(c)) return error.NotFound;
+    var n: usize = 1;
+    for (cloth.publicNames()) |*nm| {
+        if (std.mem.eql(u8, &nm.hash, &h)) return;
+        if (std.mem.startsWith(u8, nm.text(), "system@")) n += 1;
+    }
+    var buf: [24]u8 = undefined;
+    try cloth.bind(std.fmt.bufPrint(&buf, "system@{d}", .{n}) catch unreachable, h, false, false);
+}
 
 // ---------------------------------------------------------------------------
 // Unlocking: the passphrase comes from the owner, on the console.

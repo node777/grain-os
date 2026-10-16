@@ -13,6 +13,7 @@ Everything the agent can do comes from what Envoy reports (discover and
 describe); nothing about Grain's services is hard-coded here.
 """
 import argparse
+import base64
 import json
 import os
 import shlex
@@ -171,8 +172,37 @@ class Session:
     def observe(self, since=0):
         return self.ok("observe", since=since)
 
+    def upload(self, cap, data, piece=2048):
+        """Store bytes (up to 64 KiB) as a public object in a content store the
+        agent holds; returns the hex hash. One audited action."""
+        for off in range(0, len(data), piece):
+            self.ok("upload", cap=cap, offset=off, data=base64.b64encode(data[off:off + piece]).decode())
+        return self.ok("upload", cap=cap, done=True, len=len(data))["hash"]
+
     def bye(self):
         return self.ok("bye")
+
+
+def upload_generation(s, cap, pack_dir):
+    """Upload a generation `grain-disk pack` wrote, sending only the chunks the
+    store lacks; returns (generation hash, chunks sent, chunks in all)."""
+    chunks = os.path.join(pack_dir, "chunks")
+    names = sorted(os.listdir(chunks))
+    sent = 0
+    for name in names:
+        if s.call(cap, "has", hash=name)["found"]:
+            continue
+        with open(os.path.join(chunks, name), "rb") as f:
+            got = s.upload(cap, f.read())
+        if got != name:
+            raise EnvoyError({"error": "hash_mismatch", "detail": f"{name} stored as {got}"})
+        sent += 1
+    with open(os.path.join(pack_dir, "descriptor"), "rb") as f:
+        gen = s.upload(cap, f.read())
+    with open(os.path.join(pack_dir, "generation")) as f:
+        if gen != f.read().strip():
+            raise EnvoyError({"error": "hash_mismatch", "detail": "descriptor"})
+    return gen, sent, len(names)
 
 
 # ---------------------------------------------------------------------------

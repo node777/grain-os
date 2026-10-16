@@ -15,17 +15,21 @@ terminal, by a human or an AI, with a pass or fail answer in seconds.**
 
 `tools/setup.sh` installs all of these on Debian/Ubuntu.
 
-## The loop today (Phase 4)
+## The loop today (Phase 5)
 
 ```sh
-zig build test        # host: unit tests, kernel scenarios, manifest, image and IDL tests, short simulator run
-zig build qemu-test   # QEMU riscv64, 2 harts: kernel suite, the dev system, the dev system with an
-                      # agent driving Envoy, the faults system, and a miswired manifest that must fail
+zig build test        # host: unit tests, kernel scenarios, manifest, image, IDL, Brix, Kumara,
+                      # generation format, and Tablecloth with its crash simulator; a short simulator run
+zig build qemu-test   # QEMU riscv64, 2 harts: kernel suite; the dev system; the dev system on a disk,
+                      # booted twice; an agent driving Envoy; the faults system; generations through
+                      # Aurora with power cuts; a broken generation given up; a miswired manifest
 zig build check-manifest -Dsystem=system/my.brix  # check a manifest (Brix or ZON)
 zig-out/bin/brix --print system/my.brix           # what a .brix evaluates to
 zig build sim         # the deterministic simulator (16 seeds × 50k steps); -Dseed=N replays one
 zig build bench -Doptimize=ReleaseFast   # one hart: benchmark and kernel-profile records
-zig build run         # boot in real time with an Envoy socket; connect grainsh or an MCP client
+zig build run         # boot in real time with an Envoy socket and a disk that persists between runs
+                      # (zig-out/run-disk.img); type the disk's passphrase in the terminal
+zig-out/bin/grain-disk show zig-out/run-disk.img   # what a disk holds: commits, generations, names
 python3 tools/envoy.py shell --socket PATH    # grainsh, the structured shell
 python3 tools/envoy.py mcp --socket PATH      # MCP server (stdio) for any MCP-capable agent
 zig build debug       # boot halted with a GDB stub on :1234
@@ -81,13 +85,39 @@ The four layers, from fastest to most real:
    host. Then `bye`, Envoy exits 0, and the summary must be clean. This run
    uses real time (`--realtime`), so leases expire by the clock; it is the
    one QEMU run that is not deterministic.
-7. **Manifest compile failure:** `zig build check-manifest
+7. **QEMU, storage and identity:** the dev system on a fresh disk, booted
+   twice (`--boots 2`). Boot 1 finds a blank store, takes a new passphrase
+   (typed on the console by the harness) and makes the identity; boot 2
+   refuses a wrong passphrase, unlocks with the right one, and the identity
+   comes back by the same name.
+8. **QEMU, generations through Aurora** (six boots on one disk): an agent
+   uploads and switches to the next generation; the power is cut right
+   after Aurora records the trial boot; the trial comes up and is confirmed;
+   the agent rolls back; the power is cut mid-confirm; the rollback
+   completes. The identity is the same in every boot that runs. A second run
+   stages a generation that can never come up and checks Aurora gives it up
+   after three tries and boots the last good one.
+9. **Manifest compile failure:** `zig build check-manifest
    -Dsystem=system/tests/miswired.brix` must fail, and its stderr must name
    the missing service (brix reports it with the line of the block).
 
 Devices in QEMU (added by the harness): `--virtio-console` attaches a
-virtio console whose output goes to a temporary file (`--show-console`
-prints it, `--expect-console TEXT` checks it). `--virtio-rng=FILE` attaches
+virtio console as a Unix socket the harness serves (QEMU waits for it, so no
+output is lost): its output goes to a temporary file (`--show-console`
+prints it, `--expect-console TEXT` checks it) and `--console-input LINE`
+types a line (the disk passphrase). `--disk IMG` attaches a virtio-blk disk,
+a fresh copy unless `--disk-inplace`.
+
+**Several boots, and power cuts.** `--boots N` boots N times on the same
+disk. `--expect`, `--expect-console`, `--console-input`, `--agent` and
+`--kill-on` take an `N:` prefix to apply to one boot only. `--kill-on
+"N:record"` kills QEMU the moment boot N prints that record: a power cut at
+an exact point, after which the next boot must recover. `--agent-env K=V`
+passes settings (such as the generation to upload) to agent scripts.
+
+**Disks** (`zig-out/bin/grain-disk`): `format` (with `--kdf-kib/--kdf-t`
+for a cheap test disk, and `--install`/`--stage` to add generations),
+`add`, `pack` (a generation as files for an agent to upload) and `show`. `--virtio-rng=FILE` attaches
 a virtio entropy device reading FILE. `--envoy-socket` (implied by
 `--agent` and `--interactive`) adds a second virtio console, on its own
 virtio-serial bus, backed by a Unix socket; it comes second in device-tree
@@ -142,6 +172,23 @@ regression test):
   system deadlocked;
 - review: the trap path touched a thread's saved context before taking the
   kernel lock, racing with another hart destroying that thread.
+
+**Found while Phase 5 was built:**
+- the two-boot disk test: under QEMU `-icount`, a machine with every hart
+  idle and no timer never receives the host's I/O completion, so a disk
+  flush waited forever; the kernel now keeps a 10 ms heartbeat when fully
+  idle (ARCHITECTURE §2.5);
+- the same test: Steward called the store to confirm the boot and would
+  have deadlocked had the store faulted; Steward now never calls a domain
+  (the store asks it, `ready`);
+- the system run without a disk: clients of a skipped provider were minted
+  live capabilities to an endpoint nobody serves, and blocked forever;
+- the crash simulator first flagged a test scenario step that made two
+  commits; then, mutated to drop the flush before the superblock write, it
+  failed at once with a superblock pointing at a lost table;
+- Envoy and Tablecloth overflowed their stacks (512-byte messages, a 250 KB
+  store built on the stack): stacks are per-domain now (`stack_kib`), and
+  the store mounts in place.
 
 **Found while Phase 4 was built:**
 - QEMU plus gdb (a hardware breakpoint on Steward's system-call stub, with

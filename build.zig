@@ -93,11 +93,12 @@ pub fn build(b: *std.Build) void {
     // grain-disk: Tablecloth disks on the host. Tests boot from a fresh copy
     // of a cheap one (Argon2id at 1 MiB, one pass: test-only).
     const tablecloth_mod = b.createModule(.{ .root_source_file = b.path("grain/lib/tablecloth.zig") });
+    const generation_mod = b.createModule(.{ .root_source_file = b.path("grain/lib/generation.zig") });
     const disk_exe = b.addExecutable(.{ .name = "grain-disk", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/disk/main.zig"),
         .target = host,
         .optimize = .Debug,
-        .imports = &.{.{ .name = "tablecloth", .module = tablecloth_mod }},
+        .imports = &.{ .{ .name = "tablecloth", .module = tablecloth_mod }, .{ .name = "generation", .module = generation_mod } },
     }) });
     b.installArtifact(disk_exe);
     const test_disk_run = b.addRunArtifact(disk_exe);
@@ -130,20 +131,25 @@ pub fn build(b: *std.Build) void {
         .{ .name = "proto", .module = proto_mod },
     };
     const System = struct {
-        fn steward(bb: *std.Build, label: []const u8, manifest: std.Build.LazyPath, packer: *std.Build.Step.Compile, progs: []const *std.Build.Step.Compile, names: []const []const u8, target: std.Build.ResolvedTarget, opt: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
+        fn steward(bb: *std.Build, label: []const u8, tag: []const u8, manifest: std.Build.LazyPath, packer: *std.Build.Step.Compile, progs: []const *std.Build.Step.Compile, names: []const []const u8, target: std.Build.ResolvedTarget, opt: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
             const pack_run = bb.addRunArtifact(packer);
             const img = pack_run.addOutputFileArg("system.img");
             pack_run.addFileArg(manifest);
+            // grain-pack keeps only what Steward loads of each program (the
+            // installed zig-out/bin/programs/* keep their symbols for gdb).
             for (progs, names) |p, name| pack_run.addPrefixedFileArg(bb.fmt("{s}=", .{name}), p.getEmittedBin());
             const s = UserProgram.add(bb, bb.fmt("steward-{s}", .{label}), "grain/steward/main.zig", target, opt, imports);
             s.root_module.addAnonymousImport("system.zon", .{ .root_source_file = manifest });
             s.root_module.addAnonymousImport("system.img", .{ .root_source_file = img });
+            const opts = bb.addOptions();
+            opts.addOption([]const u8, "tag", tag);
+            s.root_module.addOptions("build_tag", opts);
             bb.getInstallStep().dependOn(&bb.addInstallFile(img, bb.fmt("{s}.img", .{label})).step);
             return s;
         }
     };
-    const steward = System.steward(b, "system", system_zon, pack, &programs, &program_names, user_target, optimize, steward_imports);
-    const steward_faults = System.steward(b, "faults", Manifest.zon(b, brix_exe, "system/tests/faults.brix"), pack, &programs, &program_names, user_target, optimize, steward_imports);
+    const steward = System.steward(b, "system", "main", system_zon, pack, &programs, &program_names, user_target, optimize, steward_imports);
+    const steward_faults = System.steward(b, "faults", "main", Manifest.zon(b, brix_exe, "system/tests/faults.brix"), pack, &programs, &program_names, user_target, optimize, steward_imports);
     b.installArtifact(steward);
     b.step("steward", "Build Steward for the system manifest (-Dsystem=...)").dependOn(&b.addInstallArtifact(steward, .{}).step);
 
@@ -165,7 +171,7 @@ pub fn build(b: *std.Build) void {
     // caravan:       the kernel with Steward as root task (the real system)
     // caravan-ktest: the kernel with the kernel test suite as root task
     const Kernel = struct {
-        fn add(bb: *std.Build, name: []const u8, root: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, opt: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
+        fn add(bb: *std.Build, name: []const u8, root: *std.Build.Step.Compile, packer: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, opt: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
             const mod = bb.createModule(.{
                 .root_source_file = bb.path("caravan/src/main.zig"),
                 .target = target,
@@ -175,7 +181,12 @@ pub fn build(b: *std.Build) void {
                 .strip = false,
                 .imports = imports,
             });
-            mod.addAnonymousImport("root_task.elf", .{ .root_source_file = root.getEmittedBin() });
+            // The root task goes in compacted (loadable bytes only); gdb
+            // uses the installed copy.
+            const compact = bb.addRunArtifact(packer);
+            compact.addArg("compact");
+            compact.addFileArg(root.getEmittedBin());
+            mod.addAnonymousImport("root_task.elf", .{ .root_source_file = compact.addOutputFileArg("root_task.elf") });
             const k = bb.addExecutable(.{ .name = name, .root_module = mod });
             k.setLinkerScript(bb.path("caravan/src/arch/riscv64/link.ld"));
             k.entry = .{ .symbol_name = "_start" };
@@ -188,9 +199,29 @@ pub fn build(b: *std.Build) void {
         .{ .name = "abi", .module = abi_mod },
         .{ .name = "sv39", .module = sv39_mod },
     };
-    const kernel = Kernel.add(b, "caravan", steward, kernel_target, optimize, kernel_imports);
-    const ktest = Kernel.add(b, "caravan-ktest", ktest_root, kernel_target, optimize, kernel_imports);
-    const kernel_faults = Kernel.add(b, "caravan-faults", steward_faults, kernel_target, optimize, kernel_imports);
+    const kernel = Kernel.add(b, "caravan", steward, pack, kernel_target, optimize, kernel_imports);
+    // Aurora: the boot stage that picks a generation from the disk and loads
+    // it. Boot it as QEMU's -kernel, with a disk that holds generations.
+    const aurora = b.addExecutable(.{ .name = "aurora", .root_module = b.createModule(.{
+        .root_source_file = b.path("aurora/main.zig"),
+        .target = kernel_target,
+        .optimize = .ReleaseSafe,
+        .code_model = .medium,
+        .imports = &.{
+            .{ .name = "grain", .module = grain_lib },
+            .{ .name = "klog", .module = klog_mod },
+            .{ .name = "fdt", .module = b.createModule(.{ .root_source_file = b.path("caravan/src/core/fdt.zig") }) },
+            .{ .name = "sbi", .module = b.createModule(.{ .root_source_file = b.path("caravan/src/arch/riscv64/sbi.zig") }) },
+        },
+    }) });
+    aurora.setLinkerScript(b.path("aurora/link.ld"));
+    aurora.entry = .{ .symbol_name = "_start" };
+    b.installArtifact(aurora);
+    const ktest = Kernel.add(b, "caravan-ktest", ktest_root, pack, kernel_target, optimize, kernel_imports);
+    // The same system, tagged "next": the generation tests upgrade to it.
+    const steward_next = System.steward(b, "next", "next", system_zon, pack, &programs, &program_names, user_target, optimize, steward_imports);
+    const kernel_next = Kernel.add(b, "caravan-next", steward_next, pack, kernel_target, optimize, kernel_imports);
+    const kernel_faults = Kernel.add(b, "caravan-faults", steward_faults, pack, kernel_target, optimize, kernel_imports);
 
     // Devices for the system image. virtio-rng reads a fixed pattern file, so
     // runs stay deterministic; the virtio console writes to a file the
@@ -206,8 +237,15 @@ pub fn build(b: *std.Build) void {
 
     // Interactive: real time, and an Envoy socket to connect an agent or
     // grainsh to (the harness prints the command). `bye` ends the run.
-    const run = b.addSystemCommand(&.{ "python3", "tools/harness.py", "--interactive", "--smp", smp, "--virtio-console" });
-    run.addPrefixedFileArg("--virtio-rng=", rng_file);
+    const run = b.addSystemCommand(&.{ "python3", "tools/harness.py", "--interactive", "--smp", smp, "--virtio-console", "--disk-inplace" });
+    // A disk that persists between runs (the passphrase, identity and Ledger
+    // live there): zig-out/run-disk.img, made on the first run. Delete it
+    // to start over.
+    run.addArg("--disk=zig-out/run-disk.img");
+    run.addPrefixedFileArg("--disk-seed=", test_disk);
+    // Real entropy: a new disk gets its own master key and identity (tests
+    // use a fixed pattern so their names are known).
+    run.addArg("--virtio-rng=/dev/urandom");
     run.addArtifactArg(kernel);
     run.stdio = .inherit;
     run.has_side_effects = true;
@@ -291,7 +329,7 @@ pub fn build(b: *std.Build) void {
         "--console-input",  "open sesame",
         "--expect",         "kumara_ready domain=kumara created=true",
         "--expect",         "ledger_ready domain=ledger entries=0",
-        "--expect",         "envoy_ready domain=envoy capabilities=4",
+        "--expect",         "envoy_ready domain=envoy capabilities=5",
         "--expect",         "envoy_bye domain=envoy",
         "--expect",         "domain_exit domain=envoy code=0",
         "--expect",         "summary failed=0",
@@ -327,8 +365,95 @@ pub fn build(b: *std.Build) void {
     miswired.expectStdErrMatch("domain 'hello' uses 'console.consol', but no domain provides it");
     miswired.has_side_effects = true;
 
+    // Generations, booted through Aurora. Upgrade: an agent uploads the
+    // "next" build (only the chunks the disk lacks) and switches; the power
+    // is cut right after Aurora records the trial boot, which then succeeds
+    // and is confirmed; the agent rolls back; the power is cut mid-confirm;
+    // the rollback completes. The identity is the same throughout.
+    const gen_disk_run = b.addRunArtifact(disk_exe);
+    gen_disk_run.addArg("format");
+    const gen_disk = gen_disk_run.addOutputFileArg("gen-disk.img");
+    gen_disk_run.addArgs(&.{ "64", "--kdf-kib", "1024", "--kdf-t", "1", "--install" });
+    gen_disk_run.addArtifactArg(kernel);
+    gen_disk_run.addArg("grain-dev");
+    const next_pack_run = b.addRunArtifact(disk_exe);
+    next_pack_run.addArg("pack");
+    next_pack_run.addArtifactArg(kernel_next);
+    next_pack_run.addArg("grain-dev");
+    const next_pack = next_pack_run.addOutputDirectoryArg("next");
+    const qtest_gen = b.addSystemCommand(&.{
+        "python3",                                          "tools/harness.py",
+        "--timeout",                                        "240",
+        "--smp",                                            smp,
+        "--virtio-console",                                 "--boots",
+        "6",                                                "--console-input",
+        "open sesame",                                      "--console-input",
+        "open sesame",                                      "--agent",
+        "1:tools/gen_upgrade.py",                           "--agent",
+        "4:tools/gen_rollback.py",                          "--kill-on",
+        "2:boot trial=true tries=1",                        "--kill-on",
+        "5:domain_ready domain=tablecloth",                 "--expect",
+        "1:boot trial=false",                               "--expect",
+        "1:steward_start tag=main",                         "--expect",
+        "1:generation_staged by=agent",                     "--expect",
+        "1:kumara_ready name=sift-noon-city created=true",  "--expect",
+        "2:boot trial=true tries=1",                        "--expect",
+        "3:boot trial=true tries=2",                        "--expect",
+        "3:steward_start tag=next",                         "--expect",
+        "3:generation_confirmed promoted=true",             "--expect",
+        "3:kumara_ready name=sift-noon-city created=false", "--expect",
+        "4:steward_start tag=next",                         "--expect",
+        "4:generation_staged by=agent rollback=true",       "--expect",
+        "5:boot trial=true tries=1",                        "--expect",
+        "6:boot trial=true tries=2",                        "--expect",
+        "6:steward_start tag=main",                         "--expect",
+        "6:generation_confirmed promoted=true",             "--expect",
+        "6:kumara_ready name=sift-noon-city created=false",
+    });
+    qtest_gen.addPrefixedFileArg("--virtio-rng=", rng_file);
+    qtest_gen.addPrefixedFileArg("--disk=", gen_disk);
+    qtest_gen.addPrefixedDirectoryArg("--agent-env=GRAIN_NEXT=", next_pack);
+    qtest_gen.addArtifactArg(aurora);
+    qtest_gen.stdio = .inherit;
+    qtest_gen.has_side_effects = true;
+    qtest_gen.step.dependOn(&qtest_faults.step);
+
+    // A generation that never comes up (the faults system has no store, so it
+    // never confirms) is tried three times; then Aurora boots the last good one.
+    const broken_disk_run = b.addRunArtifact(disk_exe);
+    broken_disk_run.addArg("format");
+    const broken_disk = broken_disk_run.addOutputFileArg("broken-disk.img");
+    broken_disk_run.addArgs(&.{ "64", "--kdf-kib", "1024", "--kdf-t", "1", "--install" });
+    broken_disk_run.addArtifactArg(kernel);
+    broken_disk_run.addArgs(&.{ "grain-dev", "--stage" });
+    broken_disk_run.addArtifactArg(kernel_faults);
+    broken_disk_run.addArg("grain-faults");
+    const qtest_giveup = b.addSystemCommand(&.{
+        "python3",                                      "tools/harness.py",
+        "--timeout",                                    "240",
+        "--smp",                                        smp,
+        "--virtio-console",                             "--boots",
+        "4",                                            "--console-input",
+        "4:open sesame",                                "--console-input",
+        "4:open sesame",                                "--expect",
+        "1:boot trial=true tries=1 label=grain-faults", "--expect",
+        "2:boot trial=true tries=2 label=grain-faults", "--expect",
+        "3:boot trial=true tries=3 label=grain-faults", "--expect",
+        "3:steward_start system=grain-faults",          "--expect",
+        "4:gave_up",                                    "--expect",
+        "4:boot trial=false label=grain-dev",           "--expect",
+        "4:steward_start system=grain-dev",             "--expect",
+        "4:summary failed=0",
+    });
+    qtest_giveup.addPrefixedFileArg("--virtio-rng=", rng_file);
+    qtest_giveup.addPrefixedFileArg("--disk=", broken_disk);
+    qtest_giveup.addArtifactArg(aurora);
+    qtest_giveup.stdio = .inherit;
+    qtest_giveup.has_side_effects = true;
+    qtest_giveup.step.dependOn(&qtest_gen.step);
+
     const qtest = b.step("qemu-test", "Boot the kernel test suite and the system in QEMU");
-    qtest.dependOn(&qtest_faults.step);
+    qtest.dependOn(&qtest_giveup.step);
     qtest.dependOn(&miswired.step);
 
     // Benchmarks: one hart, so QEMU's global instruction counter (-icount)
@@ -365,6 +490,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(manifest_tests).step);
     // Tablecloth, including the crash simulator (a power cut at every device
     // operation of a generation upgrade and rollback).
+    const generation_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/generation.zig"), .target = host, .optimize = optimize }) });
+    test_step.dependOn(&b.addRunArtifact(generation_tests).step);
     const kumara_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/kumara.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(kumara_tests).step);
     const tablecloth_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/tablecloth.zig"), .target = host, .optimize = optimize }) });

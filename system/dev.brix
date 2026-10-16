@@ -133,4 +133,6 @@ agent {
     grant store { from = store.kv, protocol = kv.v1 }
     grant console { from = console.console, protocol = console.v1, uses = 20 }
     askable entropy { from = rng.entropy, protocol = entropy.v1, uses = 2 }
+    # Upgrading or rolling back the system is the owner's call to grant.
+    askable tablecloth { from = tablecloth.tablecloth, protocol = tablecloth.v1 }
 }

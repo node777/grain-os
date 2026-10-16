@@ -270,8 +270,8 @@ line is a lost record.
 
 ### 3.1 Manifest, image, Steward (from NixOS, Hubris and Microkit)
 
-> **Status (Phase 3):** implemented and tested, except generations and the
-> spawner, which are marked *planned*.
+> **Status (Phase 3, extended in 5):** implemented and tested, except the
+> spawner, which is *planned*. Generations are §3.8.
 
 **The manifest** is written in **Brix** (`system/*.brix`, see
 [BRIX.md](BRIX.md)) and evaluates to plain data typed by
@@ -355,12 +355,26 @@ addresses (program at 0x10000, devices at 0x7000_0000, `DomainInfo` at
 0x7ff0_0000, the manifest's `stack_kib` of stack below 0x7fff_0000), and the `DomainInfo` page, which
 names everything the domain was given: its uses and provides with
 protocols and slots, its devices with MMIO address, IRQ line and slots,
-its program hash and the system's closure hash. Programs look things up by
+its program hash and the system's closure hash, and (for a server) its
+clients: the name behind each badge it will see. Programs look things up by
 name (`grain.use("console")`, `grain.device("port")`). Nothing is wired by
 an unwritten convention.
 
-- *Planned (Phase 5):* **generations.** Keep built closures in the Granary,
-  switch between them atomically, and roll back to the last known-good one.
+**Steward never blocks on a domain.** Domains tell it things on the
+lifecycle endpoint (exit, an agent's `ask`, `ready`) and it answers at once.
+`ready` is how a domain asks whether the whole boot came up (the store
+confirms a generation on trial only if it did) and then reports itself
+settled; with `halt_when_tasks_finish`, Steward does not power off before
+every domain marked `await_ready` has. A use of a provider that was already
+skipped or failed gets no capability at all, so a call fails at once
+(`invalid_cap`) instead of waiting on an endpoint nobody serves.
+
+**Images carry loadable bytes only.** grain-pack keeps each program's ELF
+header, program headers and segment bytes (no sections, symbols or debug
+information), and the kernel embeds its root task the same way; the full
+binaries stay in `zig-out` for gdb. The dev system's kernel image went from
+31 MB to 8 MB.
+
 - *Planned:* a **spawner** service with an explicit untyped budget, so
   dynamic programs (apps, agents) are a capability the manifest grants
   rather than an exception to it.
@@ -625,6 +639,68 @@ Each Grain instance is a personal server as well as a personal computer.
   only missing blocks are sent.
 - **Loyalty across the network.** Every remote grant and use goes into the
   Ledger. Owners can see who holds what, and revoke it.
+
+### 3.8 Aurora and generations
+
+> **Status (Phase 5):** built: `aurora/` (the boot stage), `grain/lib/generation.zig`
+> (the format), generation state in Tablecloth, `grain-disk add | pack`, the
+> agent's upgrade and rollback through Envoy, and the QEMU tests below.
+
+A **generation** is a whole bootable system, kernel included: the kernel
+image's loadable segments, with Steward, every program and the manifest
+inside. It is stored in Tablecloth as public objects: the segments are cut
+into chunks of 8 to 64 KiB by content (a gear rolling hash picks the cut
+points, so an edit moves only nearby cuts), and a *descriptor* lists each
+segment's physical address and sizes and its chunks' hashes. The
+descriptor's hash names the whole system (a Merkle tree), and a generation
+gets a Mantra name, `system@N`, the first time it is staged. Two builds of
+the dev system share 193 of their 211 distinct chunks, so an upgrade sends
+about half a megabyte.
+
+**Aurora** (the owner's name: the dawn) is what the firmware starts. On the
+boot hart, with paging off, it finds the virtio disk in the device tree,
+mounts the store's public side (no passphrase is needed to boot), asks the
+store which generation to boot, recording the attempt, loads that
+generation's segments, checking every chunk against the descriptor and
+refusing any segment that would overwrite Aurora or the device tree, and
+jumps to the kernel as firmware would (a0 = hart id, a1 = device tree).
+
+**Switching is a trial, A/B style.** The superblock holds `current`,
+`pending`, `previous` and `tries`. `switch_to(g)` (or `rollback`, which
+stages `previous`) sets `pending`. Aurora boots `pending` while
+`tries < 3`, incrementing `tries` first; once that boot comes up whole
+(Steward answers the store's `ready` with "every domain is up"), the store
+promotes it to `current` and the old one becomes `previous`. If it never
+comes up, Aurora gives up after the third try and boots `current` again. A
+switch, a boot attempt and a confirmation are each one superblock commit, so
+a power cut at any instant leaves a system that boots: the old generation or
+the new one.
+
+**Proved:**
+- in the simulator, a power cut at every device operation of: first
+  generation, second generation with a sealed secret, stage, boot attempt,
+  confirm, rollback, boot attempt, confirm (§3.4);
+- in QEMU (`zig build qemu-test`), six boots on one disk: an agent asks for
+  the store, uploads the next generation (18 of 211 chunks; the rest are
+  there) and switches; the power is cut right after Aurora records the trial
+  boot; the next boot retries, comes up as the new generation and is
+  confirmed; the agent rolls back; the power is cut while the store is
+  confirming; the next boot completes the rollback. The identity is the same
+  in every boot;
+- in QEMU, a generation that never comes up (the faults system has no store,
+  so it can never confirm) is tried three times, then Aurora boots the last
+  good one.
+
+**The agent's part.** The store is `askable` in the dev manifest: the agent
+must ask before it can upgrade or roll back, and the owner's policy decides.
+Envoy's `upload` verb moves bulk bytes into a store the agent holds (base64,
+2 KiB per line, one audited action per object), and `tools/envoy.py`'s
+`upload_generation` sends only the chunks the store lacks.
+
+- *Planned:* reclaiming the space of generations no longer named; a
+  generation list and rollback in grainsh; Aurora on real boards (it needs
+  only SBI, a device tree and a virtio or NVMe disk driver); measured boot
+  (Aurora reports what it loaded, so remote parties can check it).
 
 ## 4. Where Grain departs from its inspirations
 

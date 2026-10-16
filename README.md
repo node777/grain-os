@@ -11,7 +11,14 @@ an audit ledger), and **loyal** (it answers to its owner only).
 
 RISC-V is the primary target; aarch64 and x86_64 follow.
 
-> Status: **Phase 4: an AI agent operates Grain.** Caravan is a working
+> Status: **Phase 5: Grain keeps things.** A content store (Tablecloth)
+> survives a power cut at any instant and seals private data under the
+> owner's passphrase; each instance has an identity (Kumara) with a
+> three-word name; a signed Ledger records what the agent does; and whole
+> systems are generations that Aurora boots on trial, upgraded and rolled
+> back by an agent, with automatic fallback.
+>
+> Phase 4: an AI agent operates Grain. Caravan is a working
 > capability microkernel on QEMU `virt` (riscv64, SMP). On top of it,
 > **Steward** builds a whole system from a declarative manifest, checked at
 > compile time and packed into a BLAKE3-hashed boot image. Interfaces are
@@ -28,7 +35,8 @@ RISC-V is the primary target; aarch64 and x86_64 follow.
 tools/setup.sh        # Zig 0.17.0, QEMU, OpenSBI, gdb-multiarch (Debian/Ubuntu)
 zig build test        # host: unit tests, kernel scenario tests, short simulator run
 zig build qemu-test   # QEMU, 2 harts: kernel suite, the dev system, an agent session, faults, a miswired manifest
-zig build run         # boot the dev system in real time; it prints an Envoy socket to connect to
+zig build run         # boot the dev system in real time on a disk that persists (type its passphrase);
+                      # it prints an Envoy socket to connect to
 python3 tools/envoy.py shell --socket PATH   # grainsh: operate the running system
 python3 tools/envoy.py mcp --socket PATH     # the same, as MCP tools for an agent
 zig build sim         # deterministic simulator: random events, invariants every step
@@ -95,9 +103,15 @@ grain/lib/                   libgrain: system calls, domain environment, virtio,
 grain/proto/                 protocols as Zig declarations: console, entropy, echo, kv, registry
 grain/manifest/              manifest schema + validator, boot-image format
 grain/steward/main.zig       Steward: builds and supervises the system from the manifest
-grain/programs/              drivers (virtio_console, virtio_rng), registry, kv, envoy, test programs
+grain/programs/              drivers (virtio_console, virtio_rng), registry, kv, envoy, tablecloth,
+                             kumara, ledger, test programs
 grain/ktest/main.zig         the kernel test suite (root task of caravan-ktest)
 system/                      manifests in Brix: dev.brix, tests/faults.brix, tests/miswired.brix
+aurora/                      Aurora: the boot stage that loads a generation from the disk
+grain/lib/tablecloth.zig     Tablecloth, the content store (and its crash simulator)
+grain/lib/kumara.zig         identity names (the word bank) and signing
+grain/lib/generation.zig     generations: content-chunked system images
+tools/disk/                  grain-disk: format, show, add and pack generations
 grain/brix/                  Brix, the manifest language (tools/brix: check, print, write ZON)
 tools/pack/                  grain-pack: manifest + programs -> hashed boot image
 sim/                         simulated machine, scenario tests, caravan-sim

@@ -22,6 +22,7 @@ pub const info = idl.Method(.{ .label = 1, .effect = .pure, .doc = "The store's 
     locked: bool,
     current: Hash,
     pending: Hash,
+    previous: Hash,
     tries: u32,
     pub const docs = .{
         .blocks = "Disk size in 4 KiB blocks",
@@ -31,6 +32,7 @@ pub const info = idl.Method(.{ .label = 1, .effect = .pure, .doc = "The store's 
         .locked = "Whether sealed objects are unavailable (no passphrase given yet)",
         .current = "The generation that last booted and was confirmed",
         .pending = "A generation on trial (zero if none)",
+        .previous = "What was current before the last switch (rollback goes there)",
         .tries = "Boots of the pending generation so far",
     };
 });
@@ -81,6 +83,10 @@ pub const commit = idl.Method(.{ .label = 9, .effect = .external, .doc = "Make e
 pub const switch_to = idl.Method(.{ .label = 10, .effect = .external, .doc = "Boot this stored generation next, on trial: it becomes current once a boot of it comes up whole; if none does in a few tries, Aurora goes back. Commits." }, struct {
     generation: Hash,
 }, struct {});
+
+pub const rollback = idl.Method(.{ .label = 11, .effect = .external, .doc = "Go back to the previous generation, on trial like any switch. Commits; returns which one." }, struct {}, struct {
+    generation: Hash,
+});
 
 // ---------------------------------------------------------------------------
 // Client helpers
