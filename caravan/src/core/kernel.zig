@@ -209,6 +209,9 @@ pub fn Kernel(comptime A: type) type {
             send_badge: u32,
             send_grant: bool,
             send_call: bool,
+            /// Protocol ids of the capability used to send, or to receive.
+            send_protocol: u16,
+            recv_protocol: u16,
             /// A caller waiting for this thread's reply.
             reply_to: ObjId,
             /// The thread this one waits on for a reply.
@@ -1504,9 +1507,19 @@ pub fn Kernel(comptime A: type) type {
             k.deliverSend(t, c, is_call);
         }
 
+        fn protocolsDiffer(a: u16, b: u16) bool {
+            return a != 0 and b != 0 and a != b;
+        }
+
         fn deliverSend(k: *Self, t: *Thread, c: Cap, is_call: bool) void {
             const ep = k.body(Endpoint, c.object);
             const grant = c.r().grant;
+            if (ep.mode == .receiving and protocolsDiffer(c.protocol, k.thread(ep.head).recv_protocol)) {
+                // The receiver speaks another protocol: refuse the sender.
+                t.clearFault();
+                setResult(t, .protocol_mismatch, &.{});
+                return;
+            }
             if (ep.mode == .receiving) {
                 const recv = k.popFront(&ep.head, &ep.tail).?;
                 if (ep.head == 0) ep.mode = .idle;
@@ -1523,6 +1536,7 @@ pub fn Kernel(comptime A: type) type {
             t.send_badge = c.badge;
             t.send_grant = grant;
             t.send_call = is_call;
+            t.send_protocol = c.protocol;
             k.block(t, .blocked_send);
             t.queue = c.object;
             ep.mode = .sending;
@@ -1570,6 +1584,13 @@ pub fn Kernel(comptime A: type) type {
 
         fn deliverRecv(k: *Self, t: *Thread, c: Cap) void {
             const ep = k.body(Endpoint, c.object);
+            // Queued senders speaking another protocol are refused.
+            while (ep.mode == .sending and protocolsDiffer(k.thread(ep.head).send_protocol, c.protocol)) {
+                const wrong = k.popFront(&ep.head, &ep.tail).?;
+                if (ep.head == 0) ep.mode = .idle;
+                wrong.clearFault();
+                k.wake(wrong, .protocol_mismatch);
+            }
             if (ep.mode == .sending) {
                 const sender = k.popFront(&ep.head, &ep.tail).?;
                 if (ep.head == 0) ep.mode = .idle;
@@ -1585,6 +1606,7 @@ pub fn Kernel(comptime A: type) type {
             }
             k.block(t, .blocked_recv);
             t.queue = c.object;
+            t.recv_protocol = c.protocol;
             ep.mode = .receiving;
             k.link(&ep.head, &ep.tail, t);
         }
@@ -1759,6 +1781,11 @@ pub fn Kernel(comptime A: type) type {
                     if (badge != 0) {
                         if (src.badge != 0) return error.InvalidArgument;
                         n.badge = badge;
+                    }
+                    const protocol: u16 = @truncate(arg(t, .a6));
+                    if (protocol != 0) {
+                        if (src.protocol != 0 and src.protocol != protocol) return error.InvalidArgument;
+                        n.protocol = protocol;
                     }
                     dest.* = n;
                     setResult(t, .ok, &.{});

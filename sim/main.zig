@@ -161,7 +161,7 @@ fn randomSyscall(m: *Machine, g: Gen, hart: u32) !abi.Status {
                     // CNode operations only on the scratch slots 100..159.
                     const a = 100 + g.rng.uintLessThan(u64, 60);
                     const b = if (g.chance(70)) 100 + g.rng.uintLessThan(u64, 60) else g.slot();
-                    break :blk try m.sys(hart, .invoke, target, @backingInt(mm), &.{ a, b, g.rights(), if (g.chance(30)) g.rng.uintLessThan(u64, 16) else 0, 0 });
+                    break :blk try m.sys(hart, .invoke, target, @backingInt(mm), &.{ a, b, g.rights(), if (g.chance(30)) g.rng.uintLessThan(u64, 16) else 0, if (g.chance(30)) 1 + g.rng.uintLessThan(u64, 3) else 0 });
                 }
             }
             if (target == abi.RootSlot.debug_console) break :blk try m.sys(hart, .yield, 0, 0, &.{});

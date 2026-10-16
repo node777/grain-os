@@ -114,7 +114,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("grain/manifest/check.zig"),
         .target = host,
         .optimize = .Debug,
-        .imports = &.{.{ .name = "schema", .module = schema_mod }},
+        .imports = &.{ .{ .name = "schema", .module = schema_mod }, .{ .name = "proto", .module = proto_mod } },
     }) });
     check.root_module.addAnonymousImport("system.zon", .{ .root_source_file = b.path(system_path) });
     b.step("check-manifest", "Check the system manifest at compile time").dependOn(&check.step);

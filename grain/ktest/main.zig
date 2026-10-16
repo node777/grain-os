@@ -250,6 +250,25 @@ fn testSyscallCost() !void {
     g.record("bench", .{ .name = "invoke_identify", .ops = n, .instret_per_op = (g.instret() - c0) / n });
 }
 
+fn testProtocolCheck() !void {
+    const ep = try retype(.endpoint, 0);
+    const all = abi.Rights.all.bits();
+    const server_cap = slot();
+    const good = slot();
+    const bad = slot();
+    try expectStatus(.ok, g.invoke(S.cnode, abi.CNodeMethod.mint, .{ server_cap, ep, all, 0, 0x1111 }).status);
+    try expectStatus(.ok, g.invoke(S.cnode, abi.CNodeMethod.mint, .{ good, ep, all, 3, 0x1111 }).status);
+    try expectStatus(.ok, g.invoke(S.cnode, abi.CNodeMethod.mint, .{ bad, ep, all, 4, 0x2222 }).status);
+    const w = try spawn(echoServer, server_cap, .{ .prio = 250 });
+    server_thread = w.thread;
+    try check(runOthersUntil(serverWaiting, 100_000));
+    try expectStatus(.protocol_mismatch, g.call(bad, .{ .length = 1 }, .{1}).status);
+    const r = g.call(good, .{ .length = 1 }, .{1});
+    try expectStatus(.ok, r.status);
+    try check(r.w[0] == 2 and r.w[1] == 3);
+    _ = g.invoke(w.thread, abi.ThreadMethod.suspend_thread, .{});
+}
+
 fn testPassiveServerCall() !void {
     const ep = try retype(.endpoint, 0);
     const badged = slot();
@@ -517,6 +536,7 @@ export fn rootMain(bi: *const abi.BootInfo) callconv(.c) noreturn {
     run("mint_and_revoke", testMintRevoke);
     run("thread_signal", testThreadSignal);
     run("syscall_cost", testSyscallCost);
+    run("protocol_check", testProtocolCheck);
     run("call_passive_server", testPassiveServerCall);
     run("fault_handler", testFaultHandling);
     run("leases", testLeases);

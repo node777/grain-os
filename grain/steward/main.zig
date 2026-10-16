@@ -25,10 +25,27 @@ const schema = @import("schema");
 const image = @import("image");
 const elf = @import("elf");
 const fdt = @import("fdt");
+const proto = @import("proto");
 
 const manifest: schema.Manifest = @import("system.zon");
 comptime {
     schema.check(manifest, "system manifest");
+    checkProtocols(manifest, "system manifest");
+}
+
+/// Every protocol a manifest names must be defined in grain/proto.
+pub fn checkProtocols(comptime m: schema.Manifest, comptime file: []const u8) void {
+    comptime {
+        @setEvalBranchQuota(100_000);
+        var known: []const u8 = "";
+        for (proto.names(), 0..) |n, i| known = known ++ (if (i > 0) ", " else "") ++ n;
+        for (m.domains) |d| {
+            for (d.provides) |p| if (!proto.known(p.protocol))
+                @compileError(file ++ ": domain '" ++ d.name ++ "' provides '" ++ p.name ++ "' as " ++ p.protocol ++ ", which is not defined in grain/proto (known: " ++ known ++ ")");
+            for (d.uses) |u| if (!proto.known(u.protocol))
+                @compileError(file ++ ": domain '" ++ d.name ++ "' uses " ++ u.protocol ++ ", which is not defined in grain/proto (known: " ++ known ++ ")");
+        }
+    }
 }
 const image_bytes = @embedFile("system.img");
 
@@ -224,7 +241,12 @@ fn fillCopy(page: *[4096]u8, ctx: CopyFill) void {
 }
 
 fn mint(cnode: g.CPtr, index: u32, src: g.CPtr, rights: abi.Rights, badge: usize) !void {
-    try ok(g.invoke(cnode, abi.CNodeMethod.mint, .{ index, src, rights.bits(), badge }));
+    try mintProtocol(cnode, index, src, rights, badge, 0);
+}
+
+/// Mint with the protocol id the kernel checks on endpoints.
+fn mintProtocol(cnode: g.CPtr, index: u32, src: g.CPtr, rights: abi.Rights, badge: usize, protocol: u16) !void {
+    try ok(g.invoke(cnode, abi.CNodeMethod.mint, .{ index, src, rights.bits(), badge, protocol }));
 }
 
 /// Build (or rebuild) domain `i` in its region and start it.
@@ -313,14 +335,14 @@ fn build(comptime i: usize) !void {
     inline for (md.uses, 0..) |u, ui| {
         const t = comptime schema.resolveUse(manifest, u.from).?;
         const ep = domains[t.domain].endpoints[t.service];
-        try mint(cnode, D.Slot.first_use + ui, ep, .{ .send = true, .grant = true }, i + 1);
+        try mintProtocol(cnode, D.Slot.first_use + ui, ep, .{ .send = true, .grant = true }, i + 1, comptime proto.kernelIdOf(u.protocol));
         info.uses[ui] = .{ .name = undefined, .protocol = undefined, .slot = D.Slot.first_use + ui };
         D.setName(&info.uses[ui].name, u.name);
         D.setName(&info.uses[ui].protocol, u.protocol);
     }
     info.use_count = md.uses.len;
     inline for (md.provides, 0..) |p, pi| {
-        try mint(cnode, D.Slot.first_provide + pi, st.endpoints[pi], .{ .send = true, .recv = true, .grant = true }, 0);
+        try mintProtocol(cnode, D.Slot.first_provide + pi, st.endpoints[pi], .{ .send = true, .recv = true, .grant = true }, 0, comptime proto.kernelIdOf(p.protocol));
         info.provides[pi] = .{ .name = undefined, .protocol = undefined, .slot = D.Slot.first_provide + pi };
         D.setName(&info.provides[pi].name, p.name);
         D.setName(&info.provides[pi].protocol, p.protocol);

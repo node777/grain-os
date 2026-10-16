@@ -205,9 +205,12 @@ pub const UntypedMethod = enum(u32) {
 };
 
 pub const CNodeMethod = enum(u32) {
-    /// (dest_index, src_cptr, rights_mask, badge) -> copies the capability in
-    /// the caller's src_cptr into slot dest_index of this CNode, keeping
-    /// only rights_mask. A badge may be set only once (when the source has none).
+    /// (dest_index, src_cptr, rights_mask, badge, protocol) -> copies the
+    /// capability in the caller's src_cptr into slot dest_index of this CNode,
+    /// keeping only rights_mask. A badge and a protocol id may each be set
+    /// only once (when the source has none); 0 leaves them as they are.
+    /// Endpoints refuse a message whose sender's and receiver's protocol ids
+    /// are both set and differ (protocol_mismatch, to the sender).
     mint = 1,
     /// (index) -> empties the slot.
     delete = 2,

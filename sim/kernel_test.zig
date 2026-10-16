@@ -423,3 +423,48 @@ test "frame info reports physical address; exit needs configure" {
     try expectEqual(abi.Status.no_rights, (try m.invoke(0, 101, abi.DebugMethod.exit, &.{0})).status);
     try std.testing.expect(m.k.exitRequested() == null);
 }
+
+test "endpoints refuse a sender whose protocol differs from the receiver's" {
+    var m = try bootMachine();
+    defer m.deinit();
+    try retype(&m, .endpoint, 0, 100);
+    const all = abi.Rights.all.bits();
+    // Server side stamped 0x1234, a right client and a wrong one.
+    try expectEqual(abi.Status.ok, (try m.invoke(0, S.cnode, abi.CNodeMethod.mint, &.{ 101, 100, all, 0, 0x1234 })).status);
+    try expectEqual(abi.Status.ok, (try m.invoke(0, S.cnode, abi.CNodeMethod.mint, &.{ 102, 100, all, 7, 0x1234 })).status);
+    try expectEqual(abi.Status.ok, (try m.invoke(0, S.cnode, abi.CNodeMethod.mint, &.{ 103, 100, all, 8, 0x9999 })).status);
+    // A stamped protocol cannot be changed.
+    try expectEqual(abi.Status.invalid_argument, (try m.invoke(0, S.cnode, abi.CNodeMethod.mint, &.{ 104, 101, all, 0, 0x4321 })).status);
+
+    const server = try spawn(&m, 110, 111, 200, 50_000, 50_000);
+    _ = try m.invoke(0, 110, abi.ThreadMethod.resume_thread, &.{});
+    _ = try m.invoke(0, S.thread, abi.ThreadMethod.set_priority, &.{100});
+    try std.testing.expect(m.current(0) == server);
+    _ = try m.sys(0, .recv, 101, 0, &.{});
+    try std.testing.expect(m.current(0) == m.root);
+    // Wrong protocol: refused at once, the server keeps waiting.
+    try expectEqual(abi.Status.protocol_mismatch, Machine.result(try m.sys(0, .send, 103, 0, &.{})).status);
+    try expectEqual(abi.ThreadState.blocked_recv, server.state);
+    // Unstamped capabilities are not checked; the right protocol goes through.
+    _ = try m.sys(0, .send, 102, 0, &.{});
+    try expectEqual(@as(u64, 7), Machine.result(server).badge);
+}
+
+test "a queued sender with the wrong protocol is refused when the receiver arrives" {
+    var m = try bootMachine();
+    defer m.deinit();
+    try retype(&m, .endpoint, 0, 100);
+    const all = abi.Rights.all.bits();
+    _ = try m.invoke(0, S.cnode, abi.CNodeMethod.mint, &.{ 101, 100, all, 0, 0x1234 });
+    _ = try m.invoke(0, S.cnode, abi.CNodeMethod.mint, &.{ 103, 100, all, 8, 0x9999 });
+    const server = try spawn(&m, 110, 111, 100, 50_000, 50_000);
+    _ = try m.invoke(0, 110, abi.ThreadMethod.resume_thread, &.{});
+    // Root queues a send with the wrong protocol, then the server receives.
+    _ = try m.sys(0, .send, 103, 0, &.{});
+    try expectEqual(abi.ThreadState.blocked_send, m.root.state);
+    try std.testing.expect(m.current(0) == server);
+    _ = try m.sys(0, .recv, 101, 0, &.{});
+    try expectEqual(abi.Status.protocol_mismatch, Machine.result(m.root).status);
+    try expectEqual(abi.ThreadState.blocked_recv, server.state);
+    try std.testing.expect(m.current(0) == m.root);
+}
