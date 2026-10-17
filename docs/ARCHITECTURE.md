@@ -32,7 +32,7 @@ Grain is a capability operating system built around three claims:
 | Quality | What it means in the design |
 |---|---|
 | **Intimate** | Local-first. The owner's data lives on the owner's device, encrypted with keys the owner holds. The OS keeps a rich, private context about its owner (files, history, preferences) and shares none of it without a capability grant. |
-| **Social** | Every Grain instance has its own cryptographic identity (a *Seal*) that its owner can share. Instances address each other by identity, not by IP. Sharing is handing someone a capability, not editing ACLs. Capabilities cross instances as signed *sturdy references* with local *petnames*. Apps are hosted on the owner's own instance, and friends reach them there. |
+| **Social** | Every Grain instance has its own cryptographic identity (*Kumara*) that its owner can share. Instances address each other by identity, not by IP. Sharing is handing someone a capability, not editing ACLs. Capabilities cross instances as signed *sturdy references* with local *petnames*. Apps are hosted on the owner's own instance, and friends reach them there. |
 | **Secure** | No ambient authority. A minimal kernel (target under 10k lines of Zig). Drivers and services are unprivileged and isolated by the MMU and, later, the IOMMU. Measured boot of a content-addressed image. Static allocation in the kernel. |
 | **Clear** | Every interface is typed and self-describing. Every authority-changing event goes into an append-only, hash-chained *Ledger*. Every change has a plan you can preview, then an apply, then an undo. The kernel's own output is structured records. |
 | **Loyal** | The OS serves its owner only. No hidden authority for vendors. Updates are content-addressed and applied only with the owner's approval. Agents act only through leases the owner granted, and the owner can see everything they did. |
@@ -228,7 +228,7 @@ seL4 tracks every derived capability in a derivation tree. Caravan does not.
   programs its timer for whichever comes first; time reaches the kernel only
   through the event door, so alarms are as deterministic as everything else.
   With a bound signal, a server's receive ends on a message, an interrupt or
-  a timeout (Courier's retransmits, §3.7). The invariants check that every
+  a timeout (Comlink's retransmits, §3.7). The invariants check that every
   armed alarm is on its hart's list, in order.
 - **Measured** (QEMU, one hart, ReleaseFast, instructions retired including
   user code): null system call about 690, minimal object method about 740,
@@ -281,7 +281,7 @@ line is a lost record.
 ┌──────────────────────────────────────────────────────────────────┐
 │ apps · agents (via Envoy) · structured shell · desktop           │
 ├──────────────────────────────────────────────────────────────────┤
-│ Seal (identity) · Courier (identity-addressed network)           │
+│ Kumara (identity) · Comlink (sessions) · Mycelium (network)      │
 ├──────────────────────────────────────────────────────────────────┤
 │ Envoy (agent interface) · Registry (schemas) · Ledger (audit)    │
 │ Tablecloth (content store) · Steward (manifest, lifecycle)       │
@@ -638,9 +638,10 @@ enforces the limits, and an exhausted or expired lease fails with
   virtio-mmio transport and split virtqueues in `grain/lib/virtio.zig`;
   `virtio_console` (one port, with per-client line buffering so concurrent
   writers never tear each other's lines), `virtio_rng`, and libraries for
-  block (`virtio_blk.zig`), two-dimensional GPU (`virtio_gpu.zig`) and input
-  (`virtio_input.zig`), which the domains that own those devices drive
-  themselves (Tablecloth its disk, Surf the screen, keyboard and tablet). Drivers program
+  block (`virtio_blk.zig`), two-dimensional GPU (`virtio_gpu.zig`), input
+  (`virtio_input.zig`) and network (`virtio_net.zig`), which the domains
+  that own those devices drive themselves (Tablecloth its disk, Surf the
+  screen, keyboard and tablet, Mycelium the network device). Drivers program
   DMA with physical addresses from `Frame.info`. Until the IOMMU is in use,
   a driver with a DMA-capable device is trusted with memory; that is the
   main reason drivers are separate domains with their own regions.
@@ -659,13 +660,18 @@ enforces the limits, and an exhausted or expired lease fails with
   vector state handled lazily); aarch64 and x86_64 follow the same
   interface.
 
-### 3.7 Kumara and Courier: identity and the social layer
+### 3.7 Kumara, Mycelium and Comlink: identity and the social layer
 
 Each Grain instance is a personal server as well as a personal computer.
 
-> **Status (Phase 5):** Kumara's identity key and names are built
-> (`grain/lib/kumara.zig`, `grain/programs/kumara`, `kumara.v1`). Device keys,
-> petnames, introductions, recovery and Courier are *planned*.
+> **Status (Phase 7):** built: Kumara (identity, Phase 5); **Mycelium**
+> (`grain/programs/mycelium`, `mycelium.v1`), the network below; **Comlink**
+> (`grain/programs/comlink`, `comlink.v1`), sessions between identities and
+> capabilities across instances; Noise XX (`grain/lib/noise.zig`); the
+> guestbook, the first hosted application; and the two-instance test.
+> Device keys, petnames, introductions as signed vouches, recovery, friend
+> relays and persistent shares are *planned*. Comlink, Mycelium and Amphora
+> are the owner's names (GLOSSARY.md); the plan called Comlink *Courier*.
 
 - **Kumara (identity; the plan called it Seal).** On the first boot of a
   disk, Kumara draws a 32-byte seed from the entropy service and seals it in
@@ -690,22 +696,74 @@ Each Grain instance is a personal server as well as a personal computer.
   introductions (a web of trust, not an authority). Optional *social
   recovery*: the root key can be split into threshold shares held by trusted
   friends' instances.
-- **Courier (network).** Messages go *to identities*. Courier keeps the map
-  from identity to current network routes (direct, LAN discovery, or relays
-  run by friends) and opens end-to-end encrypted sessions (a Noise IK
-  handshake over UDP). Changing networks never changes who you are.
-- **Capabilities across instances.** A local capability can be exported as a
-  *sturdy reference*: signed by the issuing Seal, naming the recipient's
-  identity, and backed by a local `Lease`. So remote access can be revoked,
-  and has an expiry and use count, exactly like local access. Courier turns
-  calls on a sturdy reference into IPC on the issuing instance.
-- **Hosted apps.** An app runs on its owner's instance and is shared by
-  handing friends a capability to its interface. Their Envoy and shell reach
-  it through Courier with the same typed descriptors as local services. Data
-  transfer is a Tablecloth object exchange: hashes are verified on arrival, and
-  only missing blocks are sent.
-- **Loyalty across the network.** Every remote grant and use goes into the
-  Ledger. Owners can see who holds what, and revoke it.
+- **Mycelium (the network below).** A domain that drives the virtio-net
+  device itself and speaks just enough IPv4 to carry datagrams on one link:
+  a link-local address taken from the device's MAC (169.254.x.y), ARP (and
+  learning every neighbour's MAC from the frames it sends), and UDP, one
+  port per client with a queue each. Frames are built and read by
+  `grain/lib/net.zig`, pure code the host tests (checksums included). Like
+  Surf, one thread serves clients and the device's interrupt (§2.6).
+- **Comlink (sessions between identities).** Comlink says hello on the link
+  (its identity key, in the clear). When two instances have heard each
+  other, the one with the lower key opens a **Noise XX** handshake
+  (25519, ChaChaPoly, BLAKE2s), whose static key on each side is the
+  instance's identity: the Ed25519 key in its X25519 form. Kumara does the
+  Diffie-Hellman with it (`kumara.agree`, answered for Comlink alone), so
+  the key never leaves Kumara; each side also names its identity in its
+  handshake payload, and the name must match the key it proved. XX rather
+  than the planned IK: on a first meeting neither side knows the other's
+  key. Lost handshake messages are sent again on a timer (a signal alarm,
+  §2.6), and a peer that speaks of a session we do not have is told to
+  start over. The implementation matches an independent one byte for byte
+  (`tools/noise_ref.py`).
+- **Amphorae.** After the handshake every message is an *amphora*: sealed in
+  the session, opened only by the identity it was sealed for. Each carries
+  its counter, and a receiver takes each counter once and only going
+  forward (datagrams may be lost or reordered; a replay is refused).
+  Requests are sent again until answered, and the host keeps its last
+  answer to each peer, so a retried request is answered again, never run
+  twice.
+- **Capabilities across instances.** Sharing makes a *sturdy reference*: a
+  random token sent to one identity alone, and behind it a kernel **Lease**
+  on Comlink's own capability (to a hosted service, or to the store for an
+  object), with the use count and duration the owner chose. A request is
+  honoured only from that identity, with that token, through that lease.
+  When the lease runs out the kernel refuses the call, and Comlink ends the
+  share; revoking it ends the lease (revoked, and Comlink's only capability
+  to it deleted) and tells the holder. Every share and revocation goes into
+  the Ledger. Shares live in memory: a reboot ends them (*planned*: kept in
+  Tablecloth).
+- **Hosted apps.** A service Comlink uses (other than its own
+  infrastructure) is one the owner may share; in the dev system, the
+  guestbook. On the other instance it is an *import*, and **Envoy shows it
+  to an agent as an ordinary typed capability**, `guestbook@sift-noon-city`,
+  described by the same descriptor as a local one: Envoy encodes the call,
+  Comlink carries the words in an amphora, and the host's Comlink makes the
+  call through the lease.
+- **Moving things.** An object is shared by its hash; the other side fetches
+  it (in 400-byte pieces), checks the whole against the hash it was offered
+  under, and stores it in its own Tablecloth. Content addressing makes the
+  transfer self-verifying. *Planned:* sending only the chunks the other side
+  lacks, as generations already do.
+- **Tested** (`zig build qemu-test`): `tools/pair.py` boots two instances,
+  each with its own disk, entropy and identity, their network devices joined
+  by a pair of Unix datagram sockets. `tools/comlink_session.py`: they
+  introduce themselves (each proves its identity; the session hashes
+  match); each owner's agent asks for Comlink; A lends B its guestbook on a
+  three-use lease; B's agent finds `guestbook@sift-noon-city` among its
+  capabilities, reads its descriptor and signs it; the fourth call is
+  refused by the kernel; a file moves from A to B by hash; a second share
+  is revoked, B is told, and B's next call is refused. The run is real time:
+  under `-icount`, an idle instance's virtual clock leaps ahead, and two
+  clocks would not agree on a timeout.
+- **Introductions and recovery** (*planned*). People vouch for each other by
+  signing introductions (a web of trust, not an authority). Optional
+  *social recovery*: the root key can be split into threshold shares held
+  by trusted friends' instances. Friend relays carry amphorae for instances
+  that cannot reach each other directly.
+- **Loyalty across the network.** Every remote grant and revocation is in
+  the Ledger, and the owner sees what was shared, with whom, and whether it
+  still stands (`comlink.shared`).
 
 ### 3.8 Aurora and generations
 

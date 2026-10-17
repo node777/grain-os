@@ -182,12 +182,21 @@ Built:
   clicks a button, and checks every visible element the agent reads through
   Envoy against screenshots.
 
-## Phase 7: the social layer
+## Phase 7: the social layer (done)
 - virtio-net, a userspace UDP/IP stack, Courier (identity-addressed,
   Noise-encrypted sessions, LAN discovery, friend relays).
 - Sturdy references backed by Leases; hosted apps; Granary exchange.
 - Exit: two QEMU Grain instances introduce themselves, one hosts an app
   that the other uses, files move between them, then access is revoked.
+- Built: signal alarms in the kernel; Mycelium (virtio-net, link-local
+  IPv4, ARP, UDP); Noise XX keyed by the identities (Kumara does the
+  Diffie-Hellman); Comlink (the owner's name for Courier): LAN discovery,
+  sessions, sturdy references backed by kernel leases, remote calls that
+  Envoy shows agents as typed capabilities, object transfer by hash, Ledger
+  entries; the guestbook; `tools/pair.py`.
+- Exit, met: `tools/comlink_session.py`, two instances on one link.
+- Left for later: friend relays, persistent shares, petnames and signed
+  introductions, sending only missing chunks.
 
 ## Phase 8: reach
 - Native drivers for personal hardware: NVMe, xHCI with USB HID and storage,

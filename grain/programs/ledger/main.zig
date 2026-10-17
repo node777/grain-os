@@ -70,6 +70,7 @@ const Server = struct {
         _ = try idl.call(TC.commit, store, .{});
         head_hash = h;
         head_seq = e.seq;
+        g.log("ledger_appended", .{ .seq = e.seq, .by = by, .kind = p.kind.slice() });
         return .{ .seq = e.seq, .hash = idl.Bytes(32).from(&h) };
     }
 

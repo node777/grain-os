@@ -11,7 +11,14 @@ an audit ledger), and **loyal** (it answers to its owner only).
 
 RISC-V is the primary target; aarch64 and x86_64 follow.
 
-> Status: **Phase 6: a personal desktop.** Grain boots to a desktop that
+> Status: **Phase 7: the social layer.** Grain instances find each other on
+> the network and open sessions keyed by their identities (Noise XX; the
+> identity key never leaves Kumara). An owner lends another person a hosted
+> application or a file: a sturdy reference backed by a kernel lease, used
+> from the other side as an ordinary typed capability, recorded in the
+> Ledger, and revocable.
+>
+> Phase 6: a personal desktop. Grain boots to a desktop that
 > Surf, its compositor, paints from typed brushstrokes: applications
 > describe their windows as fills, panels and lines of text with roles, so
 > the whole screen reads back as data, and an agent sees what the owner sees
@@ -43,7 +50,8 @@ RISC-V is the primary target; aarch64 and x86_64 follow.
 ```sh
 tools/setup.sh        # Zig 0.17.0, QEMU, OpenSBI, gdb-multiarch (Debian/Ubuntu)
 zig build test        # host: unit tests, kernel scenario tests, short simulator run
-zig build qemu-test   # QEMU, 2 harts: kernel suite, the dev system, an agent session, the desktop, storage,
+zig build qemu-test   # QEMU, 2 harts: kernel suite, the dev system, an agent session, the desktop, two
+                      # instances sharing over the network, storage,
                       # generations through Aurora, faults, a miswired manifest
 zig build run         # boot the dev system through Aurora, in real time, on a disk that persists
                       # (type its passphrase); it prints an Envoy socket to connect to

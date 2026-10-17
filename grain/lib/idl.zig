@@ -255,7 +255,7 @@ pub fn fullName(comptime P: type) []const u8 {
 
 pub fn id(comptime P: type) u64 {
     const h = comptime blk: {
-        @setEvalBranchQuota(1_000_000);
+        @setEvalBranchQuota(10_000_000);
         break :blk std.hash.Fnv1a_64.hash(descriptor(P));
     };
     return h;
@@ -316,7 +316,7 @@ pub fn descriptor(comptime P: type) []const u8 {
 
 fn descriptorText(comptime P: type) []const u8 {
     comptime {
-        @setEvalBranchQuota(1_000_000);
+        @setEvalBranchQuota(10_000_000);
         var s: []const u8 = "{\"protocol\":" ++ jsonString(fullName(P)) ++ ",\"doc\":" ++ jsonString(P.doc) ++ ",\"methods\":[";
         for (methodNames(P), 0..) |n, i| {
             const M = @field(P, n);

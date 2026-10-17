@@ -70,7 +70,7 @@ pub fn build(b: *std.Build) void {
     // boot image and embedded in its own Steward. grain-pack refuses an image
     // missing a program, and Steward refuses a miswired manifest at compile time.
     const system_path = b.option([]const u8, "system", "System manifest for run/steward/check-manifest: .brix or .zon (default system/dev.brix)") orelse "system/dev.brix";
-    const program_names = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker", "crasher", "waiter", "registry", "kv", "envoy", "tablecloth", "kumara", "ledger", "surf", "shell" };
+    const program_names = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker", "crasher", "waiter", "registry", "kv", "envoy", "tablecloth", "kumara", "ledger", "surf", "shell", "mycelium", "comlink", "guestbook" };
 
     const pack = b.addExecutable(.{ .name = "grain-pack", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/pack/main.zig"),
@@ -228,6 +228,10 @@ pub fn build(b: *std.Build) void {
     const rng_bytes = b.allocator.alloc(u8, 65536) catch @panic("oom");
     for (rng_bytes, 0..) |*c, i| c.* = @truncate((i *% 2654435761) >> 7);
     const rng_file = b.addWriteFiles().add("rng.bin", rng_bytes);
+    // A second pattern, for a second instance with another identity.
+    const rng_b_bytes = b.allocator.alloc(u8, 65536) catch @panic("oom");
+    for (rng_b_bytes, 0..) |*c, i| c.* = @truncate((i *% 2246822519 +% 12345) >> 9);
+    const rng_file_b = b.addWriteFiles().add("rng-b.bin", rng_b_bytes);
 
     const qemu_base = [_][]const u8{
         "qemu-system-riscv64", "-machine", "virt",    "-cpu",       "rv64", "-m", "256M",
@@ -336,7 +340,7 @@ pub fn build(b: *std.Build) void {
         "--console-input",  "open sesame",
         "--expect",         "kumara_ready domain=kumara created=true",
         "--expect",         "ledger_ready domain=ledger entries=0",
-        "--expect",         "envoy_ready domain=envoy capabilities=6",
+        "--expect",         "envoy_ready domain=envoy capabilities=7",
         "--expect",         "envoy_bye domain=envoy",
         "--expect",         "domain_exit domain=envoy code=0",
         "--expect",         "summary failed=0",
@@ -374,6 +378,20 @@ pub fn build(b: *std.Build) void {
     qtest_desktop.has_side_effects = true;
     qtest_desktop.step.dependOn(&qtest_agent.step);
 
+    // Two instances on one link (tools/pair.py): they introduce themselves,
+    // one lends the other its guestbook on a lease, a file moves by its
+    // hash, and access is revoked (tools/comlink_session.py). Real time:
+    // two virtual clocks under -icount would not agree on a timeout.
+    const qtest_pair = b.addSystemCommand(&.{ "python3", "tools/pair.py", "--realtime", "--timeout", "240", "--smp", smp, "--scenario", "tools/comlink_session.py" });
+    qtest_pair.addPrefixedFileArg("--rng-a=", rng_file);
+    qtest_pair.addPrefixedFileArg("--rng-b=", rng_file_b);
+    qtest_pair.addPrefixedFileArg("--disk-a=", test_disk);
+    qtest_pair.addPrefixedFileArg("--disk-b=", test_disk);
+    qtest_pair.addArtifactArg(kernel);
+    qtest_pair.stdio = .inherit;
+    qtest_pair.has_side_effects = true;
+    qtest_pair.step.dependOn(&qtest_desktop.step);
+
     // The failure path: restart limit, service revocation, no hung client.
     const qtest_faults = b.addSystemCommand(&.{
         "python3",   "tools/harness.py",
@@ -389,7 +407,7 @@ pub fn build(b: *std.Build) void {
     qtest_faults.addArtifactArg(kernel_faults);
     qtest_faults.stdio = .inherit;
     qtest_faults.has_side_effects = true;
-    qtest_faults.step.dependOn(&qtest_desktop.step);
+    qtest_faults.step.dependOn(&qtest_pair.step);
 
     // A miswired manifest must fail to compile, with the explanation.
     const miswired = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "check-manifest", "-Dsystem=system/tests/miswired.brix" });
@@ -540,6 +558,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(paint_tests).step);
     const input_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/virtio_input.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(input_tests).step);
+    for ([_][]const u8{ "grain/lib/net.zig", "grain/lib/noise.zig" }) |path| {
+        const t = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = host, .optimize = optimize }) });
+        test_step.dependOn(&b.addRunArtifact(t).step);
+    }
     const brix_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/brix/brix.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(brix_tests).step);
     const idl_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/idl.zig"), .target = host, .optimize = optimize, .imports = &.{ .{ .name = "abi", .module = abi_mod }, .{ .name = "klog", .module = klog_mod } } }) });

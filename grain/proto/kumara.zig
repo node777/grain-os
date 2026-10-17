@@ -18,3 +18,9 @@ pub const sign = idl.Method(.{ .label = 2, .effect = .external, .doc = "Sign a m
     context: idl.Text(23),
     pub const docs = .{ .context = "The context that was bound: the caller's name" };
 });
+
+pub const agree = idl.Method(.{ .label = 3, .effect = .pure, .doc = "For Comlink alone: X25519 between this identity's key (in its X25519 form) and a peer's public key, for the handshake that proves the identity on the network. The key itself never leaves Kumara." }, struct {
+    peer: idl.Bytes(32),
+}, struct {
+    shared: idl.Bytes(32),
+});

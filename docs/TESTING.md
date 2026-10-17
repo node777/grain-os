@@ -21,7 +21,8 @@ terminal, by a human or an AI, with a pass or fail answer in seconds.**
 zig build test        # host: unit tests, kernel scenarios, manifest, image, IDL, Brix, Kumara,
                       # generation format, and Tablecloth with its crash simulator; a short simulator run
 zig build qemu-test   # QEMU riscv64, 2 harts: kernel suite; the dev system; the dev system on a disk,
-                      # booted twice; an agent driving Envoy; the desktop through QMP; the faults system;
+                      # booted twice; an agent driving Envoy; the desktop through QMP; two instances
+                      # meeting and sharing (tools/pair.py); the faults system;
                       # generations through Aurora with power cuts; a broken generation given up;
                       # a miswired manifest
 zig build check-manifest -Dsystem=system/my.brix  # check a manifest (Brix or ZON)
@@ -110,7 +111,14 @@ The four layers, from fastest to most real:
    step it holds the scene against a screenshot (every filled element shows
    its colour where the scene says it is topmost; every line of text has
    ink).
-10. **Manifest compile failure:** `zig build check-manifest
+10. **QEMU, two instances** (`tools/pair.py`, real time): two systems with
+    their own disks, entropy and identities, their network devices joined
+    by a pair of Unix datagram sockets. `tools/comlink_session.py`: they
+    introduce themselves; A lends B its guestbook on a three-use lease; B's
+    agent calls it as `guestbook@<A>`; the fourth call is refused by the
+    kernel; a file moves by its hash; a second share is revoked and B's next
+    call is refused.
+11. **Manifest compile failure:** `zig build check-manifest
    -Dsystem=system/tests/miswired.brix` must fail, and its stderr must name
    the missing service (brix reports it with the line of the block).
 

@@ -122,6 +122,7 @@ pub const max_agent_caps = 16;
 pub const max_hart_load_ppm = 900_000;
 
 pub const known_virtio = [_]struct { id: u32, what: []const u8 }{
+    .{ .id = 1, .what = "network device" },
     .{ .id = 2, .what = "block device" },
     .{ .id = 3, .what = "console" },
     .{ .id = 4, .what = "entropy source" },
@@ -332,7 +333,7 @@ test "each mistake gets its own explanation" {
     try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .provides = &.{ .{ .name = "one", .protocol = "echo.v1" }, .{ .name = "two", .protocol = "echo.v1" } } }} }, "must speak different protocols");
     try expectError(.{ .name = "t", .domains = &.{ console, .{ .name = "a", .program = "x", .uses = &.{.{ .name = "out", .from = "console.consol", .protocol = "console.v1" }} } } }, "uses 'console.consol', but no domain provides it");
     try expectError(.{ .name = "t", .domains = &.{ console, .{ .name = "a", .program = "x", .uses = &.{.{ .name = "out", .from = "console.console", .protocol = "console.v2" }} } } }, "expects 'console.console' to speak console.v2, but it speaks console.v1");
-    try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .devices = &.{.{ .name = "net", .virtio = 1 }} }} }, "virtio id 1, which no driver here supports (known: 2 block device, 3 console, 4 entropy source, 16 screen, 18 keyboard or pointer)");
+    try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .devices = &.{.{ .name = "sound", .virtio = 25 }} }} }, "virtio id 25, which no driver here supports (known: 1 network device, 2 block device, 3 console, 4 entropy source, 16 screen, 18 keyboard or pointer)");
     try expectError(.{ .name = "t", .domains = &.{
         .{ .name = "a", .program = "x", .budget_us = 6_000, .period_us = 10_000 },
         .{ .name = "b", .program = "x", .budget_us = 4_000, .period_us = 10_000 },

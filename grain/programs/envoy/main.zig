@@ -204,7 +204,14 @@ const Out = struct {
 
 const Cap = struct {
     info: D.AgentCap,
+    /// A service another instance shared with this one: Comlink's import
+    /// index, and its name, `<service>@<peer>`.
+    remote: ?u16 = null,
+    remote_name: [40]u8 = undefined,
+    remote_len: u8 = 0,
+
     fn name(c: *const Cap) []const u8 {
+        if (c.remote != null) return c.remote_name[0..c.remote_len];
         return D.nameOf(&c.info.name);
     }
     fn granted(c: *const Cap) bool {
@@ -212,8 +219,39 @@ const Cap = struct {
     }
 };
 
-var caps: [D.max_agent_caps]Cap = undefined;
+/// The manifest's capabilities, then what other instances shared with this
+/// one (refreshed at each discover).
+var caps: [D.max_agent_caps + 16]Cap = undefined;
 var cap_count: usize = 0;
+var local_count: usize = 0;
+
+/// Imported services become capabilities the agent calls like local ones:
+/// Envoy encodes with the remote protocol's descriptor and Comlink carries
+/// the words to the other instance.
+fn refreshRemote() void {
+    cap_count = local_count;
+    const comlink = findCap("comlink") orelse return;
+    if (!comlink.granted()) return;
+    const who = idl.call(proto.comlink.whoami, comlink.info.slot, .{}) catch return;
+    var i: u16 = 0;
+    while (i < who.imports and cap_count < caps.len) : (i += 1) {
+        const im = idl.call(proto.comlink.imported, comlink.info.slot, .{ .index = i }) catch continue;
+        if (im.kind != .service or !im.active) continue;
+        var c: Cap = .{ .info = std.mem.zeroes(D.AgentCap), .remote = i };
+        const n = std.fmt.bufPrint(&c.remote_name, "{s}@{s}", .{ im.service.slice(), im.from.slice() }) catch continue;
+        c.remote_len = @intCast(n.len);
+        c.info.protocol_id = im.protocol_id;
+        c.info.flags = D.AgentCap.granted;
+        inline for (proto.all) |P| if (idl.id(P) == im.protocol_id) setFixed(&c.info.protocol, idl.fullName(P));
+        // A newer import of the same service from the same peer takes over.
+        if (findCap(c.name())) |old| if (old.remote != null) {
+            old.* = c;
+            continue;
+        };
+        caps[cap_count] = c;
+        cap_count += 1;
+    }
+}
 var ticks_per_ms: u64 = 10_000;
 
 fn findCap(name: []const u8) ?*Cap {
@@ -397,8 +435,25 @@ fn outcomeText(c: CallOutcome) []const u8 {
     return @tagName(@as(idl.ErrorCode, @fromBackingInt(@intCast(c.code))));
 }
 
-fn rawCall(comptime M: type, slot: u32, w: idl.Words) CallOutcome {
-    const out = idl.callWords(slot, M.label, &w, idl.words(M.Params));
+/// A call on an imported service, through Comlink. (Not generic: one
+/// frame, however many protocols call it.)
+fn remoteCall(label: u32, n: usize, import: u16, w: idl.Words) CallOutcome {
+    const C = proto.comlink;
+    const comlink = findCap("comlink") orelse return .{ .ok = false, .code = @backingInt(idl.ErrorCode.unavailable), .args = w };
+    if (n > C.max_words) return .{ .ok = false, .code = @backingInt(idl.ErrorCode.invalid_args), .args = w };
+    var bytes: [C.max_words * 8]u8 = undefined;
+    for (w[0..n], 0..) |x, i| std.mem.writeInt(u64, bytes[i * 8 ..][0..8], x, .little);
+    const r = idl.call(C.call, comlink.info.slot, .{ .import = import, .label = label, .words = C.Words.from(bytes[0 .. n * 8]) }) catch |e|
+        return .{ .ok = false, .code = @backingInt(idl.codeOf(e)), .args = w };
+    var res: idl.Words = @splat(0);
+    const got = r.words.slice();
+    for (0..got.len / 8) |i| res[i] = std.mem.readInt(u64, got[i * 8 ..][0..8], .little);
+    if (r.label != 0) return .{ .ok = false, .code = res[0], .args = w };
+    return .{ .ok = true, .args = w, .results = res };
+}
+
+fn rawCall(label: u32, n: usize, slot: u32, w: idl.Words) CallOutcome {
+    const out = idl.callWords(slot, label, &w, n);
     if (out.r.status != .ok) return .{ .ok = false, .status = out.r.status, .args = w };
     if (out.r.tag.label != 0) return .{ .ok = false, .code = out.w[0], .args = w };
     return .{ .ok = true, .args = w, .results = out.w };
@@ -434,12 +489,19 @@ fn encodeArgs(c: *const Cap, method: []const u8, args: ?Value) ParseOutcome {
 }
 
 fn invokeMethod(c: *const Cap, method: []const u8, w: idl.Words) CallOutcome {
-    inline for (proto.all) |P| if (idl.id(P) == c.info.protocol_id) {
-        inline for (comptime idl.methodNames(P)) |n| if (std.mem.eql(u8, n, method)) {
-            return rawCall(@field(P, n), c.info.slot, w);
+    // Find the method's label and size here; call outside the inline loops,
+    // so their frames do not multiply.
+    const found: ?struct { label: u32, n: usize } = blk: {
+        inline for (proto.all) |P| if (idl.id(P) == c.info.protocol_id) {
+            inline for (comptime idl.methodNames(P)) |n| if (std.mem.eql(u8, n, method)) {
+                break :blk .{ .label = @field(P, n).label, .n = idl.words(@field(P, n).Params) };
+            };
         };
+        break :blk null;
     };
-    return .{ .ok = false, .code = @backingInt(idl.ErrorCode.unknown_method) };
+    const m = found orelse return .{ .ok = false, .code = @backingInt(idl.ErrorCode.unknown_method) };
+    if (c.remote) |i| return remoteCall(m.label, m.n, i, w);
+    return rawCall(m.label, m.n, c.info.slot, w);
 }
 
 fn writeResults(o: *Out, c: *const Cap, method: []const u8, w: idl.Words) void {
@@ -530,6 +592,7 @@ fn writeLease(o: *Out, c: *const Cap) void {
 }
 
 fn verbDiscover(o: *Out) void {
+    refreshRemote();
     okResult(o);
     o.obj();
     o.field("capabilities");
@@ -548,7 +611,9 @@ fn verbDiscover(o: *Out) void {
         o.field("askable");
         o.boolean(c.info.flags & D.AgentCap.askable != 0);
         o.field("lease");
-        if (c.granted()) writeLease(o, c) else o.nul();
+        if (c.granted() and c.remote == null) writeLease(o, c) else o.nul();
+        o.field("remote");
+        o.boolean(c.remote != null);
         o.end("}");
     }
     o.end("]");
@@ -950,6 +1015,7 @@ pub fn main() !u16 {
     registry = g.use("registry") orelse return error.NoRegistry;
     ledger = g.use("ledger");
     cap_count = e.agent_count;
+    local_count = cap_count;
     for (e.agent[0..cap_count], 0..) |c, i| caps[i] = .{ .info = c };
     g.log("envoy_ready", .{ .device = "virtio_console", .mmio = g.klog.hex(info.phys), .capabilities = cap_count });
 

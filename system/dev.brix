@@ -1,7 +1,8 @@
-# The development system: two virtio drivers, a service that crashes on its
+# The development system: virtio drivers, a service that crashes on its
 # first run (to exercise restarts), two tasks that use them, a registry of
-# protocol descriptors, a key-value store, and Envoy, through which an AI
-# agent operates the system with leased, limited authority.
+# protocol descriptors, a key-value store, Envoy (through which an AI agent
+# operates the system with leased, limited authority), the content store,
+# identity and Ledger, the desktop, and the network.
 #
 # Steward builds exactly this at boot; the build refuses it if the wiring is
 # wrong. See docs/BRIX.md for the language.
@@ -12,6 +13,12 @@ halt_when_tasks_finish
 # Every domain here may write `@grain` records.
 template dev {
     debug_console
+}
+
+# Small services: they answer quickly and rarely.
+template light like dev {
+    hart = 1
+    budget = 500us
 }
 
 template driver like dev {
@@ -50,17 +57,15 @@ domain hello like dev {
     uses entropy { from = rng.entropy, protocol = entropy.v1 }
 }
 
-domain registry like dev {
+domain registry like light {
     program = registry
     priority = 180
-    hart = 1
     provides registry { protocol = registry.v1 }
 }
 
-domain store like dev {
+domain store like light {
     program = kv
     priority = 160
-    hart = 1
     provides kv { protocol = kv.v1 }
 }
 
@@ -98,10 +103,9 @@ domain tablecloth like dev {
 }
 
 # This instance's identity; it keeps its seed sealed in the store.
-domain kumara like dev {
+domain kumara like light {
     program = kumara
     priority = 140
-    hart = 1
     stack = 64KiB
     await_ready
     uses tablecloth { from = tablecloth.tablecloth, protocol = tablecloth.v1 }
@@ -110,10 +114,9 @@ domain kumara like dev {
 }
 
 # The signed, append-only record of authority events.
-domain ledger like dev {
+domain ledger like light {
     program = ledger
     priority = 130
-    hart = 1
     stack = 64KiB
     await_ready
     uses tablecloth { from = tablecloth.tablecloth, protocol = tablecloth.v1 }
@@ -139,16 +142,52 @@ domain surf like dev {
 }
 
 # The first application: a shell the owner opens from the dock.
-domain shell like dev {
+domain shell like light {
     program = shell
     priority = 100
-    hart = 1
     stack = 32KiB
     uses surf { from = surf.surf, protocol = surf.v1 }
     uses kumara { from = kumara.kumara, protocol = kumara.v1 }
     uses tablecloth { from = tablecloth.tablecloth, protocol = tablecloth.v1 }
     uses ledger { from = ledger.ledger, protocol = ledger.v1 }
     uses kv { from = store.kv, protocol = kv.v1 }
+}
+
+# The network below Comlink: the network device, and datagrams between
+# instances on the link. Without a network device it is skipped.
+domain mycelium like driver {
+    program = mycelium
+    hart = 1
+    memory = 512KiB
+    stack = 32KiB
+    device nic { virtio = 1, optional }
+    provides mycelium { protocol = mycelium.v1 }
+}
+
+# Other instances, by identity: sessions with them over Mycelium, and
+# capabilities shared both ways. It may share the services it uses (here,
+# the guestbook) and the store's public objects; each share is a lease.
+domain comlink like dev {
+    program = comlink
+    priority = 125
+    hart = 1
+    memory = 512KiB
+    stack = 64KiB
+    uses mycelium { from = mycelium.mycelium, protocol = mycelium.v1 }
+    uses kumara { from = kumara.kumara, protocol = kumara.v1 }
+    uses entropy { from = rng.entropy, protocol = entropy.v1 }
+    uses ledger { from = ledger.ledger, protocol = ledger.v1 }
+    uses tablecloth { from = tablecloth.tablecloth, protocol = tablecloth.v1 }
+    uses guestbook { from = guestbook.guestbook, protocol = guestbook.v1 }
+    provides comlink { protocol = comlink.v1 }
+}
+
+# The first hosted application: whoever the owner shares it with can sign.
+domain guestbook like light {
+    program = guestbook
+    priority = 120
+    memory = 64KiB
+    provides guestbook { protocol = guestbook.v1 }
 }
 
 domain checker like dev {
@@ -170,4 +209,6 @@ agent {
     askable tablecloth { from = tablecloth.tablecloth, protocol = tablecloth.v1 }
     # The agent sees the screen as the owner does, as data.
     grant scene { from = surf.scene, protocol = scene.v1 }
+    # Meeting other instances and lending them things is the owner's call.
+    askable comlink { from = comlink.comlink, protocol = comlink.v1 }
 }

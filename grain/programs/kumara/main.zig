@@ -4,7 +4,9 @@
 //! service, seals it in the store (sealed objects open only for the domain
 //! that stored them) and binds it as its secret name `seed`; on every later
 //! boot it reads the seed back. The key never leaves this domain: others
-//! ask it to sign, and the signature binds who asked.
+//! ask it to sign, and the signature binds who asked. Comlink, and only
+//! Comlink, may ask for a Diffie-Hellman with the key's X25519 form: that is
+//! how a network session proves this identity (Noise XX, lib/noise.zig).
 const std = @import("std");
 const g = @import("grain");
 const proto = @import("proto");
@@ -20,6 +22,7 @@ comptime {
 }
 
 var key: ?K.Ed25519.KeyPair = null;
+var dh_key: std.crypto.dh.X25519.KeyPair = undefined;
 var name: K.Name = undefined;
 
 const Server = struct {
@@ -33,6 +36,18 @@ const Server = struct {
         const context = if (c.badge == 0) "steward" else g.env().clientName(c.badge) orelse return error.Unavailable;
         const sig = K.sign(kp, context, p.message.slice()) catch return error.Failed;
         return .{ .signature = idl.Bytes(64).from(&sig), .context = idl.Text(23).from(context) };
+    }
+
+    pub fn agree(_: *Server, p: P.agree.Params, c: idl.Caller) !P.agree.Results {
+        if (key == null) return error.Unavailable;
+        // A Diffie-Hellman with the identity key is the power to speak as
+        // this instance on the network: Comlink's alone.
+        const who = g.env().clientName(c.badge) orelse return error.Unavailable;
+        if (!std.mem.eql(u8, who, "comlink")) return error.Unavailable;
+        if (p.peer.len != 32) return error.InvalidArgs;
+        var shared = std.crypto.dh.X25519.scalarmult(dh_key.secret_key, p.peer.data[0..32].*) catch return error.InvalidArgs;
+        defer std.crypto.secureZero(u8, &shared);
+        return .{ .shared = idl.Bytes(32).from(&shared) };
     }
 };
 
@@ -64,6 +79,7 @@ pub fn main() !u16 {
     if (load(store, entropy)) |created| {
         const pk = key.?.public_key.toBytes();
         name = K.nameOf(pk);
+        dh_key = try std.crypto.dh.X25519.KeyPair.fromEd25519(key.?);
         g.log("kumara_ready", .{ .name = @as([]const u8, &name), .key = g.klog.hex(std.mem.readInt(u64, pk[0..8], .big)), .created = created });
     } else |e| g.log("kumara_unavailable", .{ .err = @errorName(e) });
     _ = g.call(g.domain.Slot.steward, .{ .label = @backingInt(g.domain.Lifecycle.ready), .length = 1 }, .{1});
