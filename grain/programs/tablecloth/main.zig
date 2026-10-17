@@ -329,6 +329,7 @@ pub fn main() !u16 {
         .pci => .{ .nvme = try g.nvme.Nvme.init(dev.mmio, .{
             .{ .va = q.va, .pa = q.pa }, .{ .va = req.va, .pa = req.pa }, .{ .va = q2.va, .pa = q2.pa }, .{ .va = q3.va, .pa = q3.pa }, .{ .va = data.va, .pa = data.pa },
         }, signal, dev.irq_slot) },
+        .absent => unreachable, // g.device() returns only present devices
     };
     g.log("disk_ready", .{ .bus = @tagName(dev.bus), .blocks = disk.blocks() });
 

@@ -256,6 +256,7 @@ pub fn main() !u16 {
             const rings = try page(base);
             break :blk .{ .e1000 = try g.e1000.E1000.init(dev.mmio, .{ .va = rings.va, .pa = rings.pa }, rx_bufs, tx_bufs) };
         },
+        .absent => unreachable, // g.device() returns only present devices
     };
     mac = nic.hwAddress();
     address = net.linkLocal(mac);

@@ -389,7 +389,7 @@ pub fn build(b: *std.Build) void {
         "--agent",          "tools/desktop_session.py",
         "--console-input",  "open sesame",
         "--console-input",  "open sesame",
-        "--expect",         "surf_ready domain=surf width=1024 height=768 keyboard=true pointer=true",
+        "--expect",         "surf_ready domain=surf width=1024 height=768 screen=virtio keyboard=true pointer=true",
         "--expect",         "surf_window_shown domain=surf owner=shell",
         "--expect",         "shell_ran domain=shell command=whoami ok=true",
         "--expect",         "surf_window_hidden domain=surf owner=shell",
@@ -401,6 +401,30 @@ pub fn build(b: *std.Build) void {
     qtest_desktop.stdio = .inherit;
     qtest_desktop.has_side_effects = true;
     qtest_desktop.step.dependOn(&qtest_agent.step);
+
+    // The same session on the hardware a PC has: a plain linear framebuffer
+    // (bochs-display, PCI) and a USB keyboard and tablet behind an xHCI
+    // controller. Same scene, same checks; only the drivers differ.
+    const qtest_native = b.addSystemCommand(&.{
+        "python3",          "tools/harness.py",
+        "--timeout",        qemu_timeout,
+        "--smp",            smp,
+        "--virtio-console", "--display=native",
+        "--agent",          "tools/desktop_session.py",
+        "--console-input",  "open sesame",
+        "--console-input",  "open sesame",
+        "--expect",         "surf_usb domain=surf devices=2",
+        "--expect",         "surf_ready domain=surf width=1024 height=768 screen=bochs usb=true",
+        "--expect",         "shell_ran domain=shell command=whoami ok=true",
+        "--expect",         "surf_window_hidden domain=surf owner=shell",
+        "--expect",         "envoy_bye domain=envoy",
+    });
+    qtest_native.addPrefixedFileArg("--virtio-rng=", rng_file);
+    qtest_native.addPrefixedFileArg("--disk=", test_disk);
+    qtest_native.addArtifactArg(kernel);
+    qtest_native.stdio = .inherit;
+    qtest_native.has_side_effects = true;
+    qtest_native.step.dependOn(&qtest_desktop.step);
 
     // Two instances on one link (tools/pair.py): they introduce themselves,
     // one lends the other its guestbook on a lease, a file moves by its
@@ -415,7 +439,7 @@ pub fn build(b: *std.Build) void {
     qtest_pair.addArtifactArg(kernel);
     qtest_pair.stdio = .inherit;
     qtest_pair.has_side_effects = true;
-    qtest_pair.step.dependOn(&qtest_desktop.step);
+    qtest_pair.step.dependOn(&qtest_native.step);
 
     // The failure path: restart limit, service revocation, no hung client.
     const qtest_faults = b.addSystemCommand(&.{
@@ -583,7 +607,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(paint_tests).step);
     const input_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/virtio_input.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(input_tests).step);
-    for ([_][]const u8{ "grain/lib/net.zig", "grain/lib/noise.zig" }) |path| {
+    for ([_][]const u8{ "grain/lib/net.zig", "grain/lib/noise.zig", "grain/lib/pci.zig", "grain/lib/xhci.zig" }) |path| {
         const t = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(path), .target = host, .optimize = optimize }) });
         test_step.dependOn(&b.addRunArtifact(t).step);
     }

@@ -114,6 +114,9 @@ pub const Device = struct {
     /// If the machine lacks it, the domain is skipped (`domain_skipped`), not
     /// failed: for hardware that is often absent, like a host agent port.
     optional: bool = false,
+    /// If the machine lacks it, the domain runs without it (the device is
+    /// listed as absent): for a choice of inputs, any of which will do.
+    extra: bool = false,
 };
 
 pub const max_domains = 16;
@@ -237,6 +240,7 @@ pub fn validate(m: Manifest, buf: []u8) ?[]const u8 {
         for (d.devices, 0..) |dev, di| {
             if (!isName(dev.name)) return f.msg("domain '{s}': device name '{s}' must be 1-{d} characters of a-z, 0-9 and _", .{ d.name, dev.name, max_name });
             for (d.devices[0..di]) |e| if (std.mem.eql(u8, e.name, dev.name)) return f.msg("domain '{s}' names two devices '{s}'", .{ d.name, dev.name });
+            if (dev.optional and dev.extra) return f.msg("domain '{s}': device '{s}' is both optional (skip the domain without it) and extra (run without it); choose one", .{ d.name, dev.name });
             if (dev.virtio == 0 and dev.pci.len == 0) return f.msg("domain '{s}': device '{s}' names no device: give it virtio = <id>, pci = <class>, or both", .{ d.name, dev.name });
             const known = for (known_virtio) |kv| {
                 if (kv.id == dev.virtio) break true;
@@ -361,6 +365,7 @@ test "each mistake gets its own explanation" {
     try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .devices = &.{.{ .name = "sound", .virtio = 25 }} }} }, "virtio id 25, which no driver here supports (known: 1 network device, 2 block device, 3 console, 4 entropy source, 16 screen, 18 keyboard or pointer)");
     try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .devices = &.{.{ .name = "sound", .pci = "hda" }} }} }, "asks for PCI class 'hda', which no driver here supports (known: nvme, ethernet, display, xhci)");
     try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .devices = &.{.{ .name = "thing" }} }} }, "device 'thing' names no device: give it virtio = <id>, pci = <class>, or both");
+    try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .devices = &.{.{ .name = "keys", .virtio = 18, .optional = true, .extra = true }} }} }, "device 'keys' is both optional (skip the domain without it) and extra (run without it); choose one");
     try expectError(.{ .name = "t", .domains = &.{
         .{ .name = "a", .program = "x", .budget_us = 6_000, .period_us = 10_000 },
         .{ .name = "b", .program = "x", .budget_us = 4_000, .period_us = 10_000 },

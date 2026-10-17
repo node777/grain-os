@@ -132,7 +132,8 @@ pub const Bar = extern struct {
     phys: u64,
 };
 
-pub const Bus = enum(u32) { virtio = 0, pci = 1 };
+/// `absent`: an `extra` device the machine lacks (the domain runs without it).
+pub const Bus = enum(u32) { virtio = 0, pci = 1, absent = 2 };
 
 pub const Device = extern struct {
     name: Name,

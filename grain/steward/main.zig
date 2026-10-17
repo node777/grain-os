@@ -620,43 +620,49 @@ fn build(comptime i: usize) !void {
     }
     info.client_count = clients.len;
     inline for (md.devices, 0..) |want, di| {
-        const dev = claimDevice(want, i) orelse {
+        if (claimDevice(want, i)) |dev| {
+            if (dev.irq == 0 and dev.irq_line != 0) {
+                dev.irq = slot();
+                try ok(g.invoke(S.irq_control, abi.IrqControlMethod.get, .{ dev.irq_line, dev.irq }));
+            }
+            const frame_slot = D.Slot.first_device + 2 * di;
+            const slot_va = D.Layout.devices + di * D.Layout.device_span;
+            if (dev.irq != 0) try mint(cnode, frame_slot + 1, dev.irq, .{ .configure = true }, 0);
+            info.devices[di] = .{ .name = undefined, .bus = dev.bus, .virtio_id = dev.virtio_id, .irq_line = dev.irq_line, .frame_slot = 0, .irq_slot = frame_slot + 1, .mmio = slot_va, .phys = dev.phys };
+            switch (dev.bus) {
+                .virtio => {
+                    try mint(cnode, frame_slot, dev.frame, rw, 0);
+                    try mapInto(region, vspace, dev.frame, slot_va, rw, &owned);
+                    info.devices[di].frame_slot = frame_slot;
+                },
+                .pci => {
+                    // Each BAR at its own offset, aligned to its frames.
+                    const out = &info.devices[di];
+                    out.vendor = dev.vendor;
+                    out.device_id = dev.device_id;
+                    out.class = dev.class;
+                    var off: u64 = 0;
+                    for (dev.bars[0..dev.bar_count], 0..) |*b, k| {
+                        off = std.mem.alignForward(u64, off, b.frameSize());
+                        if (off + b.span() > D.Layout.device_span) return error.BarsTooLarge;
+                        for (0..b.frames) |f| try mapInto(region, vspace, b.first + @as(g.CPtr, @intCast(f)), slot_va + off + f * b.frameSize(), rw, &owned);
+                        out.bars[k] = .{ .index = b.bar.index, .va = slot_va + off, .size = b.bar.size, .phys = b.cpu };
+                        off += b.span();
+                    }
+                    out.bar_count = dev.bar_count;
+                    if (dev.bar_count > 0) out.mmio = out.bars[0].va;
+                },
+                .absent => unreachable,
+            }
+            D.setName(&info.devices[di].name, want.name);
+        } else if (want.extra) {
+            // The machine lacks it; the domain runs without it.
+            info.devices[di] = .{ .name = undefined, .bus = .absent, .virtio_id = 0, .irq_line = 0, .frame_slot = 0, .irq_slot = 0, .mmio = 0, .phys = 0 };
+            D.setName(&info.devices[di].name, want.name);
+        } else {
             g.record("device_missing", .{ .domain = md.name, .device = want.name, .virtio_id = want.virtio, .pci = want.pci, .instance = want.instance });
             return error.DeviceMissing;
-        };
-        if (dev.irq == 0 and dev.irq_line != 0) {
-            dev.irq = slot();
-            try ok(g.invoke(S.irq_control, abi.IrqControlMethod.get, .{ dev.irq_line, dev.irq }));
         }
-        const frame_slot = D.Slot.first_device + 2 * di;
-        const slot_va = D.Layout.devices + di * D.Layout.device_span;
-        if (dev.irq != 0) try mint(cnode, frame_slot + 1, dev.irq, .{ .configure = true }, 0);
-        info.devices[di] = .{ .name = undefined, .bus = dev.bus, .virtio_id = dev.virtio_id, .irq_line = dev.irq_line, .frame_slot = 0, .irq_slot = frame_slot + 1, .mmio = slot_va, .phys = dev.phys };
-        switch (dev.bus) {
-            .virtio => {
-                try mint(cnode, frame_slot, dev.frame, rw, 0);
-                try mapInto(region, vspace, dev.frame, slot_va, rw, &owned);
-                info.devices[di].frame_slot = frame_slot;
-            },
-            .pci => {
-                // Each BAR at its own offset, aligned to its frames.
-                const out = &info.devices[di];
-                out.vendor = dev.vendor;
-                out.device_id = dev.device_id;
-                out.class = dev.class;
-                var off: u64 = 0;
-                for (dev.bars[0..dev.bar_count], 0..) |*b, k| {
-                    off = std.mem.alignForward(u64, off, b.frameSize());
-                    if (off + b.span() > D.Layout.device_span) return error.BarsTooLarge;
-                    for (0..b.frames) |f| try mapInto(region, vspace, b.first + @as(g.CPtr, @intCast(f)), slot_va + off + f * b.frameSize(), rw, &owned);
-                    out.bars[k] = .{ .index = b.bar.index, .va = slot_va + off, .size = b.bar.size, .phys = b.cpu };
-                    off += b.span();
-                }
-                out.bar_count = dev.bar_count;
-                if (dev.bar_count > 0) out.mmio = out.bars[0].va;
-            },
-        }
-        D.setName(&info.devices[di].name, want.name);
     }
     info.device_count = md.devices.len;
     if (envoy_index != null and envoy_index.? == i) try installAgentLeases(cnode, &info);

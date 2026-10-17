@@ -134,9 +134,13 @@ domain surf like dev {
     period = 10ms
     memory = 16MiB
     stack = 64KiB
-    device screen { virtio = 16, optional }
-    device keys { virtio = 18, optional }
-    device pointer { virtio = 18, instance = 1, optional }
+    # virtio-gpu, or a Bochs display on PCI.
+    device screen { virtio = 16, pci = display, optional }
+    # Input, from whichever the machine has: virtio keyboard and tablet,
+    # or USB through an xHCI controller.
+    device keys { virtio = 18, extra }
+    device pointer { virtio = 18, instance = 1, extra }
+    device usb { pci = xhci, extra }
     provides surf { protocol = surf.v1 }
     # What is on the screen, read back as data.
     provides scene { protocol = scene.v1 }

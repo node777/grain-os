@@ -18,6 +18,8 @@ pub const noise = @import("noise.zig");
 pub const pci = @import("pci.zig");
 pub const nvme = @import("nvme.zig");
 pub const e1000 = @import("e1000.zig");
+pub const bochs = @import("bochs.zig");
+pub const xhci = @import("xhci.zig");
 
 /// Options for a program's root (`pub const std_options = grain.std_options;`):
 /// Caravan's pages are 4 KiB, which std cannot know for a freestanding target.
@@ -233,9 +235,11 @@ pub fn provided(name: []const u8) ?CPtr {
     return findService(e.provides[0..e.provide_count], name);
 }
 
+/// A device the manifest gave this domain, by name; null if it has none by
+/// that name or the machine lacks it (an `extra` device).
 pub fn device(name: []const u8) ?*const domain.Device {
     const e = env();
-    for (e.devices[0..e.device_count]) |*d| if (std.mem.eql(u8, domain.nameOf(&d.name), name)) return d;
+    for (e.devices[0..e.device_count]) |*d| if (std.mem.eql(u8, domain.nameOf(&d.name), name)) return if (d.bus == .absent) null else d;
     return null;
 }
 
@@ -265,11 +269,14 @@ pub fn log(comptime event: []const u8, fields: anytype) void {
 /// in a program whose root file has `pub fn main() !u16`. The return value is the
 /// task's exit code; an error is reported and exits with code 1.
 pub fn exportStart() void {
-    @export(&startStub, .{ .name = "_start", .section = ".text._start" });
+    // The section goes on the function itself: an export's `.section` can
+    // leak to other symbols of the module (a mutable global once landed in
+    // read-only text).
+    @export(&startStub, .{ .name = "_start" });
     @export(&startMain, .{ .name = "grainStartMain" });
 }
 
-fn startStub() callconv(.naked) noreturn {
+fn startStub() linksection(".text._start") callconv(.naked) noreturn {
     asm volatile (
         \\ call grainStartMain
         \\ unimp

@@ -306,9 +306,11 @@ data as ZON, which grain-pack hashes and Steward embeds. It lists domains, and f
 or `task`), priority, hart, CPU budget and period, memory, restart policy,
 the services it provides (name and protocol), the services it uses
 (`"<domain>.<service>"` and the protocol it expects), its devices (by virtio
-id and `instance`, counting devices of that kind in device-tree order; a
-device marked `optional` that the machine lacks makes Steward skip the
-domain with `domain_skipped` instead of failing it), and whether it gets a
+id, PCI class or both, and `instance`, counting devices of that kind in
+device-tree or bus order; a device marked `optional` that the machine lacks
+makes Steward skip the domain with `domain_skipped` instead of failing it,
+and one marked `extra` lets the domain run without it, its record marked
+`absent`), and whether it gets a
 write-only debug console. An optional `agent` section says what an AI agent
 may hold (§3.5).
 
@@ -670,6 +672,32 @@ enforces the limits, and an exhausted or expired lease fails with
   their virtio counterpart's interface, so the domain above holds a small
   union and nothing else changes. Aurora still loads generations from
   virtio-blk only (it runs before Steward; *planned*: its own NVMe path).
+- **The PC desktop.** *Built:* a **Bochs/QEMU linear framebuffer**
+  (`grain/lib/bochs.zig`: the mode set through its DISPI registers in BAR 2,
+  the pixels straight into its memory in BAR 0, nothing to flush) and an
+  **xHCI USB host controller** (`grain/lib/xhci.zig`) with **USB HID boot
+  keyboards and absolute pointers** (tablets), both under Surf. The xHCI
+  driver resets the controller, gives it a device context array, a command
+  ring and one event ring, resets each connected USB 2 port, and for each
+  device: enables a slot, addresses it, reads its configuration, finds the
+  HID interface and its interrupt-in endpoint, configures that endpoint
+  (boot protocol for keyboards) and keeps one transfer queued on it. Each
+  report becomes the same key and pointer events virtio-input gives (usage
+  codes to Linux key codes, modifier bits to shift presses), so the rest of
+  Surf is unchanged. Single-level hubs and USB 3 ports, isochronous
+  endpoints and *mass storage* are not done.
+- **`extra` devices.** `device usb { pci = xhci, extra }` gives Surf the
+  controller if there is one and runs Surf without it if not (the record
+  says `absent`; `grain.device` returns null). `optional` stays the
+  stronger word: without the device, skip the domain. A device can't be
+  both; the validator says so.
+- **IOMMU (design, not built).** QEMU 8.2 has no RISC-V IOMMU model, so
+  until one can be tested a driver with a DMA-capable device is trusted
+  with memory, as above. The design: Steward owns the IOMMU as it owns the
+  bus, gives each driver domain its own device context, and maps into it
+  exactly the DMA frames the domain was given (the same `Frame` caps it
+  maps in its own address space), so a device can reach only its driver's
+  memory. Interrupts would move to MSI through the IOMMU's remapping.
 - *Changed from the plan:* the Envoy channel is a **second virtio-console
   device** (`instance = 1`, `optional`) rather than a second port of the
   first one. Multiport needs a control queue; two devices are simpler and
@@ -679,6 +707,9 @@ enforces the limits, and an exhausted or expired lease fails with
   xHCI USB with HID and mass storage, a framebuffer and GPU display path,
   Ethernet, and later Wi-Fi. Each is an isolated domain, so an untrusted or
   buggy driver can't hurt the rest of the system.
+- **Real boards** are untested: the drivers are written to the
+  specifications and run on QEMU's models; an RVA23 board is the first
+  target once one is at hand.
 - **Ports:** `arch/` is a small interface (boot entry, trap entry and exit,
   page-table format, timer, IPI, interrupt controller, context switch).
   RISC-V gets first-class optimisation (Sv48, Svpbmt, AIA/IMSIC, Zicbom,
@@ -856,9 +887,10 @@ Envoy's `upload` verb moves bulk bytes into a store the agent holds (base64,
 
 ### 3.9 Surf and the desktop
 
-> **Status (Phase 6):** built: `grain/programs/surf` (the compositor),
+> **Status (Phase 6, Phase 8):** built: `grain/programs/surf` (the compositor),
 > `grain/programs/shell` (the first application), `surf.v1` and `scene.v1`,
-> `grain/lib/paint.zig` with the Grain Mono font, and the desktop QEMU test.
+> `grain/lib/paint.zig` with the Grain Mono font, and the desktop QEMU test;
+> in Phase 8, the same desktop on a PCI framebuffer with USB input.
 > Surf and Brushstroke are the owner's names (GLOSSARY.md).
 
 ![The desktop in the QEMU test: the shell, opened from the dock, has answered whoami](images/desktop.png)
@@ -886,7 +918,10 @@ colour where the scene says it is topmost, and every line of text has ink.
 **One thread, every source.** Surf drives virtio-gpu (one screen-sized
 resource backed by 2 MiB frames, set as the scanout) and two virtio-input
 devices (it tells the tablet from the keyboard by whether it reports
-absolute axes). Both input devices raise one signal bound to Surf's thread
+absolute axes); or, on a PC, a Bochs linear framebuffer and an xHCI
+controller with a USB keyboard and tablet (§3.6). `device screen { virtio
+= 16, pci = display, optional }` is whichever the machine has. All input
+devices raise one signal bound to Surf's thread
 (§2.6): its receive returns for a client's call or for a key, whichever
 comes first, with no polling and no second thread. Keys go to the focused
 window; a click focuses and raises a window and is reported with the
@@ -908,12 +943,14 @@ sixteen event buffers and drops a burst beyond them, as hardware does) and
 pointer clicks. The session finds the shell's launcher in the scene, clicks
 it, types `whoami`, finds the identity among the shell's answers, clicks
 its `clear` button, puts it away from the dock, and checks scene against
-screen at each step.
+screen at each step. The same session runs again on `--display=native`:
+bochs-display, and the keyboard and tablet on USB behind xHCI.
 
 - *Planned:* moving and resizing windows, a hardware cursor, more than one
   window per application, shared-memory surfaces for applications that do
   need pixels (images, video), Rishi as the shell's name if the owner wants
-  it, and a real display path on hardware (Phase 8).
+  it, and a GPU display path on hardware (the PCI framebuffer of Phase 8
+  is enough for QEMU and firmware-set modes, not for a real GPU).
 
 ## 4. Where Grain departs from its inspirations
 

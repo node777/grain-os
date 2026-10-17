@@ -115,6 +115,9 @@ The four layers, from fastest to most real:
    step it holds the scene against a screenshot (every filled element shows
    its colour where the scene says it is topmost; every line of text has
    ink).
+9b. **QEMU, the desktop on PC hardware** (`--display=native`): the same
+   session with a Bochs linear framebuffer on PCI and a USB keyboard and
+   tablet behind an xHCI controller (Surf logs `surf_usb devices=2`).
 10. **QEMU, two instances** (`tools/pair.py`, real time): two systems with
     their own disks, entropy and identities, their network devices joined
     by a pair of Unix datagram sockets. `tools/comlink_session.py`: they
@@ -133,7 +136,9 @@ output is lost): its output goes to a temporary file (`--show-console`
 prints it, `--expect-console TEXT` checks it) and `--console-input LINE`
 types a line (the disk passphrase). `--disk IMG` attaches a virtio-blk disk,
 a fresh copy unless `--disk-inplace`. `--display` attaches a screen
-(virtio-gpu, 1024x768), a keyboard and a tablet, and a QMP socket; an agent
+(virtio-gpu, 1024x768), a keyboard and a tablet, and a QMP socket
+(`--display=native`: bochs-display, and `usb-kbd` and `usb-tablet` on a
+`qemu-xhci` controller); an agent
 script whose `run` takes a third parameter gets a `Screen`: `shot()`
 (a screendump, with `pixel(img, x, y)`), `type(text)`, `key(...)`,
 `click(x, y)`, and `wait(record)` to follow the system's records.

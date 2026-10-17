@@ -277,8 +277,9 @@ def main():
     ap.add_argument("--boots", type=int, default=1,
                     help="boot this many times in a row on the same disk; prefix --expect, "
                          "--expect-console, --console-input and --kill-on with 'N:' for one boot")
-    ap.add_argument("--display", action="store_true",
-                    help="attach a screen (virtio-gpu, 1024x768), keyboard and tablet, driven through QMP; "
+    ap.add_argument("--display", nargs="?", const="virtio", choices=["virtio", "native"], default=None,
+                    help="attach a screen (1024x768), keyboard and tablet, driven through QMP: virtio devices, "
+                         "or 'native' ones (a Bochs display on PCI, a USB keyboard and tablet on xHCI); "
                          "agent scripts with a third parameter get a Screen")
     ap.add_argument("--window", action="store_true",
                     help="with --display: show the screen in a window on the host (records still come on stdout)")
@@ -335,7 +336,11 @@ def run_boot(args, boot, tmpdir, disk):
     if args.virtio_console or args.virtio_rng or envoy_socket or disk or args.display:
         devices += ["-global", "virtio-mmio.force-legacy=false"]
     qmp_path = os.path.join(tmpdir, f"qmp{boot}.sock")
-    if args.display:
+    if args.display == "native":
+        devices += ["-device", "bochs-display", "-device", "qemu-xhci,id=xhci",
+                    "-device", "usb-kbd,bus=xhci.0", "-device", "usb-tablet,bus=xhci.0",
+                    "-qmp", f"unix:{qmp_path},server=on,wait=off"]
+    elif args.display:
         # Keyboard before tablet: device-tree order, so the manifest's
         # instance 0 and 1 (Surf tells them apart by what they report).
         devices += ["-device", "virtio-gpu-device,xres=1024,yres=768",

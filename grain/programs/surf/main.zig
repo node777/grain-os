@@ -146,17 +146,35 @@ var pointer: struct { x: i32 = 0, y: i32 = 0, shift: bool = false } = .{};
 // ---------------------------------------------------------------------------
 // Devices
 
-var gpu: g.virtio_gpu.Gpu = undefined;
+/// The screen: virtio-gpu (draw into memory we own, then have the host
+/// show it) or a Bochs display (draw straight into its framebuffer).
+const Display = union(enum) {
+    virtio: g.virtio_gpu.Gpu,
+    bochs: g.bochs.Bochs,
+
+    fn flush(d: *Display, r: Rect) void {
+        switch (d.*) {
+            .virtio => |*v| v.flush(.{ .x = @intCast(r.x), .y = @intCast(r.y), .width = @intCast(r.w), .height = @intCast(r.h) }) catch |e| g.log("surf_flush_failed", .{ .err = @errorName(e) }),
+            .bochs => {},
+        }
+    }
+};
+var display: Display = undefined;
 var fb: []u32 = &.{};
 var keys: ?vin.Input = null;
 var mouse: ?vin.Input = null;
+/// USB keyboards and tablets, through an xHCI controller.
+var usb: ?g.xhci.Xhci = null;
+var usb_irq: g.CPtr = 0;
+var usb_buttons: u8 = 0;
 var key_irq: g.CPtr = 0;
 var mouse_irq: g.CPtr = 0;
 const bit_keys: u64 = 1;
 const bit_mouse: u64 = 2;
+const bit_usb: u64 = 4;
 
 fn canvas() paint.Canvas {
-    return paint.Canvas.init(fb, gpu.width, gpu.height);
+    return paint.Canvas.init(fb, @intCast(screen.w), @intCast(screen.h));
 }
 
 // ---------------------------------------------------------------------------
@@ -228,8 +246,8 @@ fn repaint(damage: Rect) void {
     var c = canvas();
     c.clip = d;
     for (order[0..n_order]) |i| if (wins[i].shown) drawWindow(&c, i, d);
-    if (keys != null or mouse != null) drawCursor(&c);
-    gpu.flush(.{ .x = @intCast(d.x), .y = @intCast(d.y), .width = @intCast(d.w), .height = @intCast(d.h) }) catch |e| g.log("surf_flush_failed", .{ .err = @errorName(e) });
+    if (keys != null or mouse != null or usb != null) drawCursor(&c);
+    display.flush(d);
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +412,25 @@ fn key(code: u16, value: u32) void {
     wins[focused].push(.{ .kind = .key, .char = vin.char(code, pointer.shift), .code = code });
 }
 
+fn movePointer(x: u64, y: u64, max_x: u64, max_y: u64) void {
+    const before = cursorRect();
+    pointer.x = @intCast(x * @as(u64, @intCast(screen.w)) / (max_x + 1));
+    pointer.y = @intCast(y * @as(u64, @intCast(screen.h)) / (max_y + 1));
+    repaint(before.join(cursorRect()));
+}
+
 fn drainInput() void {
+    if (usb) |*u| {
+        var buf: [32]g.xhci.Event = undefined;
+        for (u.poll(&buf)) |e| switch (e) {
+            .key => |k| key(k.code, @intFromBool(k.down)),
+            .pointer => |p| {
+                movePointer(p.x, p.y, g.xhci.pointer_max, g.xhci.pointer_max);
+                if (p.buttons & 1 != 0 and usb_buttons & 1 == 0) click(pointer.x, pointer.y);
+                usb_buttons = p.buttons;
+            },
+        };
+    }
     if (keys) |*k| while (k.next()) |e| {
         if (e.kind == vin.ev_key) key(e.code, e.value);
     };
@@ -431,6 +467,7 @@ const Server = struct {
             _ = m.dev.ackInterrupt();
             _ = g.invoke(mouse_irq, g.abi.IrqMethod.ack, .{});
         }
+        if (usb != null) _ = g.invoke(usb_irq, g.abi.IrqMethod.ack, .{});
         drainInput();
     }
 
@@ -569,26 +606,40 @@ pub fn main() !u16 {
     space = .{ .untyped = D.Slot.memory, .vspace = D.Slot.vspace, .next_slot = D.Slot.first_free };
     const screen_dev = g.device("screen") orelse return error.NoDevice;
     const dma = D.Layout.heap + 0x0800_0000;
-    const q = try page(dma);
-    const cmd = try page(dma + 0x1000);
-    const gpu_sig = try space.retype(.signal, 0);
-    if (!g.invoke(screen_dev.irq_slot, g.abi.IrqMethod.set_signal, .{gpu_sig}).ok()) return error.IrqSetup;
-    gpu = try g.virtio_gpu.Gpu.init(screen_dev.mmio, q, cmd, gpu_sig, screen_dev.irq_slot);
-
-    // The framebuffer: 2 MiB frames, each physically contiguous.
-    const bytes = gpu.frameBytes();
-    const big = 2 * 1024 * 1024;
-    var backing: [4]g.virtio_gpu.Backing = undefined;
-    const n_big = (bytes + big - 1) / big;
-    if (n_big > backing.len) return error.ScreenTooLarge;
-    for (0..n_big) |k| {
-        const f = try space.retype(.frame, 21);
-        try space.map(f, D.Layout.heap + k * big, .{ .read = true, .write = true });
-        backing[k] = .{ .pa = try g.physOf(f), .len = big };
+    switch (screen_dev.bus) {
+        .virtio => {
+            const q = try page(dma);
+            const cmd = try page(dma + 0x1000);
+            const gpu_sig = try space.retype(.signal, 0);
+            if (!g.invoke(screen_dev.irq_slot, g.abi.IrqMethod.set_signal, .{gpu_sig}).ok()) return error.IrqSetup;
+            var gpu = try g.virtio_gpu.Gpu.init(screen_dev.mmio, q, cmd, gpu_sig, screen_dev.irq_slot);
+            // The framebuffer: 2 MiB frames, each physically contiguous.
+            const bytes = gpu.frameBytes();
+            const big = 2 * 1024 * 1024;
+            var backing: [4]g.virtio_gpu.Backing = undefined;
+            const n_big = (bytes + big - 1) / big;
+            if (n_big > backing.len) return error.ScreenTooLarge;
+            for (0..n_big) |k| {
+                const f = try space.retype(.frame, 21);
+                try space.map(f, D.Layout.heap + k * big, .{ .read = true, .write = true });
+                backing[k] = .{ .pa = try g.physOf(f), .len = big };
+            }
+            fb = @as([*]u32, @ptrFromInt(D.Layout.heap))[0 .. bytes / 4];
+            try gpu.attach(backing[0..n_big]);
+            screen = .{ .w = @intCast(gpu.width), .h = @intCast(gpu.height) };
+            display = .{ .virtio = gpu };
+        },
+        .pci => {
+            if (!g.bochs.supports(screen_dev.vendor, screen_dev.device_id)) return error.UnsupportedDisplay;
+            const vram = screen_dev.bar(0) orelse return error.NoFramebuffer;
+            const regs = screen_dev.bar(2) orelse return error.NoRegisters;
+            const b = try g.bochs.Bochs.init(vram.va, vram.size, regs.va, 1024, 768);
+            fb = b.fb;
+            screen = .{ .w = 1024, .h = 768 };
+            display = .{ .bochs = b };
+        },
+        .absent => unreachable,
     }
-    fb = @as([*]u32, @ptrFromInt(D.Layout.heap))[0 .. bytes / 4];
-    try gpu.attach(backing[0..n_big]);
-    screen = .{ .w = @intCast(gpu.width), .h = @intCast(gpu.height) };
 
     // Input: both devices raise one signal, bound to this thread.
     const input_sig = try space.retype(.signal, 0);
@@ -603,6 +654,24 @@ pub fn main() !u16 {
         mouse_irq = key_irq;
         key_irq = ti;
     };
+    if (g.device("usb")) |dev| {
+        // The controller's pages: rings, contexts and report buffers.
+        var pages: [28]g.xhci.Page = undefined;
+        for (&pages, 0..) |*pg, i| {
+            const d = try g.virtio.Dma.alloc(&space, dma + 0x10000 + i * 0x1000);
+            pg.* = .{ .va = d.va, .pa = d.pa };
+        }
+        const badged = try space.slot();
+        if (!g.invoke(D.Slot.cnode, g.abi.CNodeMethod.mint, .{ badged, input_sig, (g.abi.Rights{ .send = true }).bits(), bit_usb, 0 }).ok()) return error.MintFailed;
+        if (!g.invoke(dev.irq_slot, g.abi.IrqMethod.set_signal, .{badged}).ok()) return error.IrqSetup;
+        usb_irq = dev.irq_slot;
+        usb = try g.xhci.Xhci.init(dev.mmio, &pages, badged, dev.irq_slot);
+        const found = usb.?.probe() catch |e| blk: {
+            g.log("surf_usb_failed", .{ .err = @errorName(e) });
+            break :blk 0;
+        };
+        g.log("surf_usb", .{ .devices = found });
+    }
     if (g.bindSignal(input_sig) != .ok) return error.BindFailed;
     pointer = .{ .x = @divTrunc(screen.w, 2), .y = @divTrunc(screen.h, 2) };
 
@@ -612,7 +681,14 @@ pub fn main() !u16 {
     order[0] = 0;
     n_order = 1;
     refreshDesktop();
-    g.log("surf_ready", .{ .width = gpu.width, .height = gpu.height, .keyboard = keys != null, .pointer = mouse != null });
+    const usb_has = struct {
+        fn f(kind: enum { keyboard, tablet }) bool {
+            const u = usb orelse return false;
+            for (u.devices[0..u.device_count]) |d| if (@intFromEnum(d.kind) == @intFromEnum(kind)) return true;
+            return false;
+        }
+    }.f;
+    g.log("surf_ready", .{ .width = screen.w, .height = screen.h, .screen = @tagName(display), .keyboard = keys != null or usb_has(.keyboard), .pointer = mouse != null or usb_has(.tablet), .usb = usb != null });
 
     idl.recv_slot = try space.slot();
     var s: Server = .{};
