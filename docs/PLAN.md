@@ -246,6 +246,16 @@ Built:
   work was done in instructions retired under QEMU and in a callgrind
   profile of the core); a hardware root for measured boot.
 
+## Next: Grain in a browser (in progress)
+- A static site (GitHub Pages) where the system runs in the page, with a
+  choice of manifests and machine settings, built and published by CI.
+- Built: `grain-emu` (`emu/`, ARCHITECTURE §3.10), an emulated RISC-V
+  machine that boots the same images as QEMU: the kernel suite, the dev
+  system, storage, Aurora and agent sessions pass on it.
+- Next: virtio-gpu and virtio-input in the emulator (the desktop); the
+  WebAssembly build and the page; the CI workflow and the public Pages
+  repository (it needs the owner to create it).
+
 ## Owner decisions
 - **Milestone:** build through Phase 2 before the next review (done); then
   Phase 3 (done).

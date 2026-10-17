@@ -112,6 +112,15 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "tablecloth", .module = tablecloth_mod }},
     }) });
     b.installArtifact(disk_exe);
+    // The emulated RISC-V machine (emu/): QEMU's virt board as Caravan uses
+    // it, for running the system where QEMU is not (a browser, eventually).
+    const emu_exe = b.addExecutable(.{ .name = "grain-emu", .root_module = b.createModule(.{
+        .root_source_file = b.path("emu/main.zig"),
+        .target = host,
+        .optimize = b.option(std.builtin.OptimizeMode, "emu-optimize", "grain-emu's optimization (default ReleaseSafe)") orelse .ReleaseSafe,
+        .link_libc = true, // sockets and poll, the same on Linux and macOS
+    }) });
+    b.installArtifact(emu_exe);
     const test_disk_run = b.addRunArtifact(disk_exe);
     test_disk_run.addArg("format");
     const test_disk = test_disk_run.addOutputFileArg("disk.img");
@@ -601,9 +610,112 @@ pub fn build(b: *std.Build) void {
     qtest_giveup.has_side_effects = true;
     qtest_giveup.step.dependOn(&qtest_gen.step);
 
-    const qtest = b.step("qemu-test", "Boot the kernel test suite and the system in QEMU");
+    // The same boots on grain-emu (emu/), through the same harness and
+    // expectations: what a browser will run. The kernel suite needs no QEMU,
+    // so it is part of `zig build test` too.
+    var emu_kernel_runs: [2]*std.Build.Step.Run = undefined;
+    for (&emu_kernel_runs, [_][]const u8{ "1", "2" }) |*r, harts| {
+        r.* = b.addSystemCommand(&.{ "python3", "tools/harness.py", "--timeout", qemu_timeout, "--smp", harts, "--filter", "summary", "--expect", "summary failed=0", "--expect", "long_write_ok text=01234567890123456789012345678901234567890123456789012345678901234567890123456789" });
+        r.*.addPrefixedArtifactArg("--emu=", emu_exe);
+        r.*.addArtifactArg(ktest);
+        r.*.stdio = .inherit;
+        r.*.has_side_effects = true;
+    }
+    emu_kernel_runs[1].step.dependOn(&emu_kernel_runs[0].step);
+    const emu_system = b.addSystemCommand(&.{
+        "python3",                                    "tools/harness.py",
+        "--timeout",                                  "600",
+        "--smp",                                      smp,
+        "--virtio-console",                           "--filter",
+        "summary",                                    "--expect",
+        "steward_start verified=true",                "--expect",
+        "driver_ready domain=rng",                    "--expect",
+        "domain_start domain=flaky restart=1",        "--expect",
+        "echo_ok domain=checker answer=42",           "--expect",
+        "summary failed=0",                           "--expect-console",
+        "hello from grain! entropy 00f3e6dacdc0b4a7",
+    });
+    emu_system.addPrefixedArtifactArg("--emu=", emu_exe);
+    emu_system.addPrefixedFileArg("--virtio-rng=", rng_file);
+    emu_system.addArtifactArg(kernel);
+    emu_system.stdio = .inherit;
+    emu_system.has_side_effects = true;
+    emu_system.step.dependOn(&emu_kernel_runs[1].step);
+    const emu_storage = b.addSystemCommand(&.{
+        "python3",                                          "tools/harness.py",
+        "--timeout",                                        "600",
+        "--smp",                                            smp,
+        "--virtio-console",                                 "--boots",
+        "2",                                                "--filter",
+        "summary,tablecloth_unlocked,kumara_ready",         "--console-input",
+        "1:open sesame",                                    "--console-input",
+        "1:open sesame",                                    "--console-input",
+        "2:wrong guess",                                    "--console-input",
+        "2:open sesame",                                    "--expect",
+        "1:tablecloth_unlocked created=true",               "--expect",
+        "2:tablecloth_unlocked created=false tries=2",      "--expect",
+        "1:kumara_ready name=sift-noon-city created=true",  "--expect",
+        "2:kumara_ready name=sift-noon-city created=false", "--expect",
+        "summary failed=0",
+    });
+    emu_storage.addPrefixedArtifactArg("--emu=", emu_exe);
+    emu_storage.addPrefixedFileArg("--virtio-rng=", rng_file);
+    emu_storage.addPrefixedFileArg("--disk=", test_disk);
+    emu_storage.addArtifactArg(kernel);
+    emu_storage.stdio = .inherit;
+    emu_storage.has_side_effects = true;
+    emu_storage.step.dependOn(&emu_system.step);
+    // Through Aurora: the kernel comes off the disk (code loaded by DMA).
+    const emu_aurora = b.addSystemCommand(&.{
+        "python3",                     "tools/harness.py",
+        "--timeout",                   "600",
+        "--smp",                       smp,
+        "--virtio-console",            "--filter",
+        "boot,steward_start,summary",  "--console-input",
+        "open sesame",                 "--console-input",
+        "open sesame",                 "--expect",
+        "boot trial=false",            "--expect",
+        "steward_start tag=main",      "--expect",
+        "boot_measured consistent=true", "--expect",
+        "summary failed=0",
+    });
+    emu_aurora.addPrefixedArtifactArg("--emu=", emu_exe);
+    emu_aurora.addPrefixedFileArg("--virtio-rng=", rng_file);
+    emu_aurora.addPrefixedFileArg("--disk=", gen_disk);
+    emu_aurora.addArtifactArg(aurora);
+    emu_aurora.stdio = .inherit;
+    emu_aurora.has_side_effects = true;
+    emu_aurora.step.dependOn(&emu_storage.step);
+    const emu_agent = b.addSystemCommand(&.{
+        "python3",                                      "tools/harness.py",
+        "--timeout",                                    "600",
+        "--smp",                                        smp,
+        "--virtio-console",                             "--realtime",
+        "--filter",                                     "summary",
+        "--agent",                                      "tools/agent_session.py",
+        "--console-input",                              "open sesame",
+        "--console-input",                              "open sesame",
+        "--owner-approve",                              "entropy",
+        "--owner-refuse",                               "comlink",
+        "--expect",                                     "owner_answered service=entropy granted=true",
+        "--expect",                                     "envoy_bye domain=envoy",
+        "--expect",                                     "summary failed=0",
+        "--expect-console",                             "agent was here",
+    });
+    emu_agent.addPrefixedArtifactArg("--emu=", emu_exe);
+    emu_agent.addPrefixedFileArg("--virtio-rng=", rng_file);
+    emu_agent.addPrefixedFileArg("--disk=", test_disk);
+    emu_agent.addArtifactArg(kernel);
+    emu_agent.stdio = .inherit;
+    emu_agent.has_side_effects = true;
+    emu_agent.step.dependOn(&emu_aurora.step);
+    const etest = b.step("emu-test", "Boot the kernel suite and the system on grain-emu");
+    etest.dependOn(&emu_agent.step);
+
+    const qtest = b.step("qemu-test", "Boot the kernel test suite and the system in QEMU (and on grain-emu)");
     qtest.dependOn(&qtest_giveup.step);
     qtest.dependOn(&miswired.step);
+    qtest.dependOn(etest);
 
     // Benchmarks: one hart, so QEMU's global instruction counter (-icount)
     // measures only the code under test. Use -Doptimize=ReleaseFast.
@@ -629,6 +741,10 @@ pub fn build(b: *std.Build) void {
     const core_tests = b.addTest(.{ .root_module = core_host });
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
 
+    // The emulator: instruction semantics, decoder, devices; then the
+    // kernel suite running on it.
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("emu/hart_test.zig"), .target = host, .optimize = optimize, .link_libc = true }) })).step);
+    test_step.dependOn(&emu_kernel_runs[1].step);
     const sv39_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("caravan/src/arch/riscv64/sv39.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(sv39_tests).step);
     const vmsa_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("caravan/src/arch/aarch64/vmsa.zig"), .target = host, .optimize = optimize }) });

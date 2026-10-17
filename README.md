@@ -11,6 +11,10 @@ an audit ledger), and **loyal** (it answers to its owner only).
 
 RISC-V is the primary target; aarch64 runs the kernel; x86_64 follows.
 
+> Now: **Grain in a browser.** `grain-emu` (`emu/`) is an emulated RISC-V
+> machine that boots the same images as QEMU; its WebAssembly build and a
+> static site come next.
+>
 > Status: **Phase 9: hardening.** Every way into the kernel and every
 > parser of untrusted input is fuzzed (Zig's coverage-guided fuzzer, and a
 > seeded sweep in every test run); a model checker tries every order of

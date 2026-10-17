@@ -20,6 +20,11 @@
 - A parser of input someone else controls (a device, the network, a disk,
   a client) needs a fuzz target in `fuzz/user.zig` (kernel-side ones in
   `fuzz/kernel.zig`); `zig build fuzz --fuzz=100K` for a coverage-guided run.
+- `emu/` is the emulated machine (grain-emu): it must keep booting what QEMU
+  boots. Instruction or device changes need a test in `emu/hart_test.zig`
+  (or the file's own tests) and `zig build emu-test`. The machine itself
+  stays host-free (everything outside goes through `Host`), so it can be
+  built for WebAssembly.
 - Machine-readable output goes through `klog` (`@caravan` from the kernel,
   `@grain` from user space): `<event> k=v`, names `[a-z0-9_]`.
 - Benchmarks: run `zig build bench -Doptimize=ReleaseFast` (one hart). Under

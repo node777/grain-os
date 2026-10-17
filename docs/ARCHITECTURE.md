@@ -1050,6 +1050,63 @@ bochs-display, and the keyboard and tablet on USB behind xHCI.
   it, and a GPU display path on hardware (the PCI framebuffer of Phase 8
   is enough for QEMU and firmware-set modes, not for a real GPU).
 
+### 3.10 grain-emu: the machine, emulated
+
+The system runs wherever QEMU does; `grain-emu` (`emu/`) is for where it
+does not, first of all a browser. It is QEMU's RISC-V `virt` board as far
+as Caravan uses it, written in Zig: harts that execute RV64IMAC (with
+Zicsr, Zifencei and Zihintpause) in U and S mode with Sv39 paging, a PLIC,
+a 16550 UART, the SiFive test finisher, and virtio-mmio devices (entropy,
+block, console). The memory map, interrupt lines, device-tree layout and
+virtio slot order are QEMU's, so the same images boot on both unchanged:
+the kernel, Aurora, the dev system and its manifests.
+
+- **No firmware.** There is no M-mode: the machine implements SBI itself
+  (base, TIME, IPI, RFENCE, HSM, SRST, DBCN, the legacy console), so an
+  S-mode `ecall` is a function call in the emulator.
+- **Time is instructions,** as with QEMU's `-icount shift=0,sleep=off`:
+  each instruction on any hart is a nanosecond, the timebase is 10 MHz,
+  and when every hart waits the clock jumps to the next deadline. A run is
+  a function of its inputs; two runs give byte-identical output.
+  `--realtime` takes time from the host's clock instead (leases expire by
+  the wall clock, for agent sessions).
+- **Portable.** The machine (`machine.zig`, `hart.zig`, `virtio.zig`,
+  `devices.zig`) touches nothing outside itself: the console, entropy, the
+  disk and the clock come through a `Host` of function pointers. The
+  command-line front end (`main.zig`) is one host, serving the consoles as
+  Unix sockets the way the QEMU harness does; a browser page is to be
+  another.
+- **Fast enough by design, not by a JIT.** Each RAM page that is executed
+  from gets an array of decoded instructions (one per halfword), so a fetch
+  is an index while the pc stays on the page; any store to the page, by a
+  hart or by a device's DMA (Aurora loading the kernel from disk), drops
+  it. The TLB holds host pointers and per-mode permission bits, so most
+  loads and stores are a bit test and a memory access. Interrupts are
+  looked at only when something that decides them changes, or a timer
+  comes due. About 90-140 million guest instructions a second natively,
+  against QEMU's compiled code at several times that.
+- **What it costs to boot.** The dev system in a debug build runs 2.9
+  billion guest instructions to its summary (about 20 s on the emulator,
+  7 s on QEMU); in a release build, 65 million (0.6 s). The browser build
+  will ship release images.
+
+**Proved:** the kernel suite passes on 1 to 8 harts, deterministically;
+its benchmarks retire within 1-3 instructions per operation of QEMU's
+count for the same image (QEMU also counts the trapping `ecall`); the dev
+system, two boots on one disk (passphrase, refusal of a wrong one, the
+same identity name as on QEMU), a boot through Aurora (the same
+measurement chain as on QEMU) and a real-time agent session all pass
+through the same harness and expectations (`zig build emu-test`, part of
+`qemu-test`). Unit tests check the instruction semantics the spec defines
+for corner cases (division by zero and overflow, high multiplies, word
+shifts), atomics, traps and `sret`, Sv39 permissions with SUM, interrupt
+masking, and code overwritten after it ran.
+
+- *Planned:* virtio-gpu and virtio-input (the desktop), virtio-net (two
+  instances in one page), the WebAssembly build and the page that hosts it
+  (a terminal, a canvas, the disk in browser storage), and a static site
+  built and published by CI.
+
 ## 4. Where Grain departs from its inspirations
 
 | From | Kept | Changed |

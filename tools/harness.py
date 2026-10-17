@@ -304,6 +304,8 @@ def main():
     ap.add_argument("--owner-refuse", action="append", default=[],
                     help="answer no when the system asks about this agent service")
     ap.add_argument("--keep-temp", action="store_true", help="keep the temporary directory (sockets, disk copies)")
+    ap.add_argument("--emu", default=None, metavar="PATH",
+                    help="run on grain-emu (the emulated machine, emu/) at PATH instead of QEMU")
     args = ap.parse_args()
     if args.envoy_path:
         try:
@@ -392,6 +394,30 @@ class HiddenInput:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self.saved)
 
 
+def emu_command(args, disk, console_sock, envoy_path):
+    """The same machine on grain-emu: its devices take the virtio slots in the
+    order QEMU's would (rng, disk, console, Envoy's console)."""
+    unsupported = [name for name, used in (("--display", args.display), ("--disk-bus nvme", args.disk_bus == "nvme"),
+                                           ("--arch aarch64", args.arch == "aarch64"), ("--qemu-arg", args.qemu_arg))
+                   if used]
+    if unsupported:
+        raise SystemExit(f"harness: grain-emu does not support {', '.join(unsupported)} yet")
+    cmd = [args.emu, "--harts", args.smp]
+    if args.virtio_rng:
+        cmd += ["--rng", args.virtio_rng]
+    if disk:
+        cmd += ["--disk", disk]
+    if console_sock:
+        cmd += ["--console-socket", console_sock]
+    if envoy_path:
+        if not console_sock:
+            raise SystemExit("harness: on grain-emu, Envoy's console needs --virtio-console too")
+        cmd += ["--envoy-socket", envoy_path]
+    if args.realtime or args.interactive:
+        cmd.append("--realtime")
+    return cmd + [args.kernel]
+
+
 def answer_owner(rec, pump, approve, refuse):
     """Answer the system's question to its owner, as a person at the console
     would: `owner_asked service=X` is a question, `yes` or `no` the answer."""
@@ -473,7 +499,10 @@ def run_boot(args, boot, tmpdir, disk):
         # under sleep=off and free-running TCG). Free TCG is real time anyway.
         i = qemu.index("-icount")
         del qemu[i:i + 2]
-    cmd = qemu + ["-smp", args.smp] + devices + args.qemu_arg + ["-kernel", args.kernel]
+    if args.emu:
+        cmd = emu_command(args, disk, console_sock if pump else None, envoy_path if envoy_socket else None)
+    else:
+        cmd = qemu + ["-smp", args.smp] + devices + args.qemu_arg + ["-kernel", args.kernel]
     if args.interactive and not agents:
         # A person drives this run: stream the output, wait for the guest to
         # halt (the agent's `bye` ends Envoy) or for ^C.

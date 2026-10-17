@@ -32,6 +32,9 @@ zig build sim         # the deterministic simulator (16 seeds × 50k steps); -Ds
 zig build fuzz        # every fuzz target, a longer seeded sweep (-Dfuzz-sweep=percent, default 1000)
 zig build fuzz --fuzz=100K  # Zig's coverage-guided fuzzer on them (crashing inputs: .zig-cache/f/)
 zig build model       # the model checker: every order of every IPC and revocation scenario
+zig build emu-test    # the kernel suite and the system on grain-emu (emu/), not QEMU
+zig-out/bin/grain-emu --harts 2 --stats zig-out/bin/caravan-ktest   # the emulator by hand
+python3 tools/harness.py --emu zig-out/bin/grain-emu ...            # any harness run, on the emulator
 valgrind --tool=callgrind zig-out/bin/caravan-profile   # where the core spends an IPC round trip
 zig build bench -Doptimize=ReleaseFast   # one hart: benchmark and kernel-profile records
 zig build run         # boot through Aurora in real time with an Envoy socket; each build becomes the
@@ -109,6 +112,14 @@ The four layers, from fastest to most real:
    calls that led to it. Checked against planted bugs: a lease that never
    uses up, and destroyed endpoints that keep their waiters, are both
    caught.
+
+3d. **The emulated machine** (`grain-emu`, ARCHITECTURE §3.10): unit
+   tests of its instruction semantics, decoder and devices (in `zig build
+   test`, with the kernel suite on 1 and 2 emulated harts); and `zig build
+   emu-test`, which boots the dev system, the two-boot storage test, a boot
+   through Aurora and a real-time agent session on it through the same
+   harness and expectations as on QEMU (`--emu PATH`). The emulator supports
+   what those need; `--display`, NVMe and Arm are refused.
 
 4. **QEMU, kernel suite** (`caravan-ktest`): the kernel test program runs as
    root task, on 2 harts. That covers boot info, capability identity, mint and revoke, thread
