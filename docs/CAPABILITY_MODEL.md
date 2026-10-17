@@ -100,10 +100,11 @@ sender's protocol and badge with every message.
   entry names, badged per client and stamped with the protocol, and checks
   at compile time that every `uses` has a matching `provides`.
 - **The agent** (Envoy) holds only leases: send and grant, never revoke;
-  limited in time or uses where the manifest says. Askable ones are granted
-  on the agent's first request, at once: the manifest is the owner's only
-  policy (asking the owner at run time is planned). Every call is audited
-  in a hash chain.
+  limited in time or uses where the manifest says. Askable ones only after
+  the owner says yes at the console, through the owner domain the manifest
+  names (`agent.owner`), which cannot be the agent's own domain; anything
+  typed before the question appears is discarded. Every call is audited in
+  a hash chain.
 - **Kumara** signs for a caller under the caller's domain name as the
   context, so a signature asked for by one domain can never pass as
   another's. Attestations use the context `@attest`, which no domain name
@@ -163,6 +164,9 @@ docs/TESTING.md for each tool.
    manifest checks and run-time minting the right one?
 6. Kumara binds signatures to the caller's domain name. Is a name a strong
    enough context, given that Steward assigns names from the manifest?
-7. The agent holds leases, and asks for more through Steward's policy.
+7. The agent holds leases, and asks the owner for more at the console.
+   The agent can also write to that console (its `console` grant): could
+   it word output to mislead the owner into a yes? Prompts start with
+   `[owner]`, which the agent can print too.
    What could an agent do with `send` and `grant` on an endpoint that the
    owner would not expect?

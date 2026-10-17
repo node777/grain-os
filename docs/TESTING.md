@@ -36,12 +36,14 @@ valgrind --tool=callgrind zig-out/bin/caravan-profile   # where the core spends 
 zig build bench -Doptimize=ReleaseFast   # one hart: benchmark and kernel-profile records
 zig build run         # boot through Aurora in real time with an Envoy socket; each build becomes the
                       # current generation of a disk that persists between runs (zig-out/run-disk.img);
-                      # type the disk's passphrase in the terminal; -Ddisplay shows the desktop in a window
+                      # type the disk's passphrase in the terminal (it is not shown); -Ddisplay shows the
+                      # desktop in a window; -Dsocket=PATH serves Envoy at a fixed path (a private directory);
+                      # the agent's asks appear on the console: answer yes or no
 zig-out/bin/grain-disk show zig-out/run-disk.img     # what a disk holds: commits, free space, generations, names
 zig-out/bin/grain-disk passwd zig-out/run-disk.img   # change the passphrase (old, then new, on stdin)
 python3 tools/envoy.py shell --socket PATH    # grainsh, the structured shell
 python3 tools/envoy.py mcp --socket PATH      # MCP server (stdio) for any MCP-capable agent
-zig build debug       # boot halted with a GDB stub on :1234
+zig build debug       # boot halted with a GDB stub on 127.0.0.1:1234 (this machine only)
 python3 tools/harness.py --json zig-out/bin/caravan   # records as JSON lines
 ```
 
@@ -137,7 +139,9 @@ The four layers, from fastest to most real:
    askable, lease limits), describe (from the Registry), a typed call (the
    service sees the agent's badge), the MCP bridge's tools, plan changes
    nothing, apply is all-or-nothing, undo, a non-atomic plan is refused,
-   ask then exhaust a use-limited lease, refusal once a timed lease expires,
+   ask then exhaust a use-limited lease (the harness answers the owner's
+   question with yes, `--owner-approve`), an ask the owner refuses
+   (`--owner-refuse`) stays refused, refusal once a timed lease expires,
    grainsh on the same session, and the audit hash chain recomputed on the
    host. Then `bye`, Envoy exits 0, and the summary must be clean. This run
    uses real time (`--realtime`), so leases expire by the clock; it is the

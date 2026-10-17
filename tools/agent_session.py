@@ -93,6 +93,17 @@ def run(s, check):
     check("ask_and_use_limit", before == "not_granted" and granted["granted"] and a != b
           and third == "lease_exhausted" and again == "already_granted", [before, third, again])
 
+    # The owner refuses this one (the harness answers no at the console), and
+    # the answer stands: asking again changes nothing.
+    answers = []
+    for _ in range(2):
+        try:
+            s.ask("comlink", reason="meet a friend")
+            answers.append("granted")
+        except EnvoyError as e:
+            answers.append(e.response.get("detail"))
+    check("owner_refuses_ask", answers == ["owner_refused", "owner_refused"], answers)
+
     # Wait out the echo lease; then the same call is refused.
     lease = {c["name"]: c for c in s.discover()}["echo"]["lease"]
     time.sleep(lease["expires_in_ms"] / 1000 + 0.5)
@@ -115,7 +126,8 @@ def run(s, check):
         sys.stdin = stdin
     text = shown.getvalue()
     check("grainsh", "kv.v1" in text and '"value": 90' in text and "hash chain: verified" in text
-          and "refused" not in text, text[-300:])
+          # (the log shows the owner's refusal above; no shell command was refused)
+          and "refused" not in text.replace("owner_refused", ""), text[-300:])
 
     obs = s.observe()
     ok, bad = verify_chain(obs["actions"])

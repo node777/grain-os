@@ -20,6 +20,7 @@ import os
 import shlex
 import shutil
 import socket
+import stat
 import importlib.util
 import subprocess
 import sys
@@ -295,7 +296,21 @@ def main():
                     help="with --display: show the screen in a window on the host (records still come on stdout)")
     ap.add_argument("--kill-on", action="append", default=[],
                     help="'N:record': cut the power (kill QEMU) the moment boot N prints this record")
+    ap.add_argument("--envoy-path", default=None,
+                    help="serve Envoy at this socket path (its directory must be private to you) "
+                         "instead of a new one in a temporary directory")
+    ap.add_argument("--owner-approve", action="append", default=[],
+                    help="answer yes, as the owner would, when the system asks about this agent service")
+    ap.add_argument("--owner-refuse", action="append", default=[],
+                    help="answer no when the system asks about this agent service")
+    ap.add_argument("--keep-temp", action="store_true", help="keep the temporary directory (sockets, disk copies)")
     args = ap.parse_args()
+    if args.envoy_path:
+        try:
+            prepare_socket_path(args.envoy_path)
+        except RuntimeError as e:
+            print(f"harness: {e}", file=sys.stderr)
+            return 2
 
     for kv in args.agent_env:
         k, _, v = kv.partition("=")
@@ -311,16 +326,83 @@ def main():
             disk = os.path.join(tmpdir, "disk.img")
             shutil.copyfile(args.disk, disk)
     status = 0
-    for boot in range(1, args.boots + 1):
-        if args.boots > 1:
-            print(f"harness: boot {boot} of {args.boots}", flush=True)
-        st = run_boot(args, boot, tmpdir, disk)
-        if st == 130:
-            return st
-        status = status or st
+    try:
+        for boot in range(1, args.boots + 1):
+            if args.boots > 1:
+                print(f"harness: boot {boot} of {args.boots}", flush=True)
+            st = run_boot(args, boot, tmpdir, disk)
+            if st == 130:
+                return st
+            status = status or st
+    finally:
+        if args.keep_temp:
+            print(f"harness: kept {tmpdir}", file=sys.stderr)
+        else:
+            shutil.rmtree(tmpdir, ignore_errors=True)
     if status != 0:
         print(f"harness: FAIL (status {status})", file=sys.stderr)
     return status
+
+
+def prepare_socket_path(path):
+    """Make `path` ready for QEMU to serve a socket at: its directory exists
+    and is private (Envoy speaks for the agent, so only you may connect),
+    and no live instance is serving there already."""
+    d = os.path.dirname(os.path.abspath(path))
+    if not os.path.isdir(d):
+        os.makedirs(d, mode=0o700)
+    st = os.stat(d)
+    if st.st_uid != os.getuid() or st.st_mode & 0o077:
+        raise RuntimeError(f"{d} must belong to you and be private to you (chmod 700 {d})")
+    if os.path.lexists(path):
+        if not stat.S_ISSOCK(os.lstat(path).st_mode):
+            raise RuntimeError(f"{path} exists and is not a socket")
+        probe = socket.socket(socket.AF_UNIX)
+        try:
+            probe.connect(path)
+            raise RuntimeError(f"another instance is serving {path}")
+        except OSError:
+            os.unlink(path)  # left by an instance that has gone
+        finally:
+            probe.close()
+
+
+class HiddenInput:
+    """While a person types into the system's console, don't show what they
+    type (the disk's passphrase goes this way). A no-op when stdin is not a
+    terminal."""
+
+    def __enter__(self):
+        self.saved = None
+        try:
+            import termios
+            if sys.stdin.isatty():
+                fd = sys.stdin.fileno()
+                self.saved = termios.tcgetattr(fd)
+                quiet = termios.tcgetattr(fd)
+                quiet[3] &= ~termios.ECHO
+                termios.tcsetattr(fd, termios.TCSADRAIN, quiet)
+        except (ImportError, OSError):
+            self.saved = None
+        return self
+
+    def __exit__(self, *exc):
+        if self.saved is not None:
+            import termios
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self.saved)
+
+
+def answer_owner(rec, pump, approve, refuse):
+    """Answer the system's question to its owner, as a person at the console
+    would: `owner_asked service=X` is a question, `yes` or `no` the answer."""
+    if not rec or rec.get("event") != "owner_asked":
+        return
+    service = rec.get("service")
+    if service in approve or service in refuse:
+        try:
+            pump.send("yes\n" if service in approve else "no\n")
+        except (AttributeError, OSError):
+            pass  # the console is gone (or not yet up): the question stays open
 
 
 def for_boot(values, boot):
@@ -339,7 +421,7 @@ def for_boot(values, boot):
 def run_boot(args, boot, tmpdir, disk):
     devices = []
     console_path = None
-    envoy_path = os.path.join(tmpdir, f"envoy{boot}.sock")
+    envoy_path = args.envoy_path or os.path.join(tmpdir, f"envoy{boot}.sock")
     # Envoy is a task that waits for its agent: give it a port only on boots
     # that have one (elsewhere it is skipped, its port being optional).
     envoy_socket = args.envoy_socket or args.interactive or bool(for_boot(args.agent, boot))
@@ -368,8 +450,8 @@ def run_boot(args, boot, tmpdir, disk):
     agents = for_boot(args.agent, boot)
     pump = None
     if args.virtio_console or expect_console or console_input or args.interactive:
-        fd, console_path = tempfile.mkstemp(prefix="grain-console-")
-        os.close(fd)
+        console_path = os.path.join(tmpdir, f"console{boot}.txt")
+        open(console_path, "wb").close()
         console_sock = os.path.join(tmpdir, f"console{boot}.sock")
         devices += ["-device", "virtio-serial-device,id=vser0",
                     "-chardev", f"socket,id=con0,path={console_sock},server=on,wait=on",
@@ -397,21 +479,24 @@ def run_boot(args, boot, tmpdir, disk):
         # halt (the agent's `bye` ends Envoy) or for ^C.
         print(f"harness: Envoy socket: {envoy_path}", flush=True)
         print(f"harness: connect with: python3 tools/envoy.py shell --socket {envoy_path}", flush=True)
+        if pump and sys.stdin.isatty():
+            print("harness: what you type goes to the system's console and is not shown", flush=True)
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
         try:
-            if pump:
-                pump.start(proc)
-                for line in console_input:
-                    pump.send(line + "\n")
+            with HiddenInput():
+                if pump:
+                    pump.start(proc)
+                    for line in console_input:
+                        pump.send(line + "\n")
 
-                def typing():
-                    for line in sys.stdin:
-                        try:
-                            pump.send(line)
-                        except OSError:
-                            return
-                threading.Thread(target=typing, daemon=True).start()
-            return proc.wait()
+                    def typing():
+                        for line in sys.stdin:
+                            try:
+                                pump.send(line)
+                            except OSError:
+                                return
+                    threading.Thread(target=typing, daemon=True).start()
+                return proc.wait()
         except KeyboardInterrupt:
             proc.kill()
             return 130
@@ -423,6 +508,8 @@ def run_boot(args, boot, tmpdir, disk):
         for raw in proc.stdout:
             line = raw.decode("utf-8", "replace").rstrip("\r\n")
             lines.append(line)
+            if pump and record_prefix(line):
+                answer_owner(parse_record(line), pump, args.owner_approve, args.owner_refuse)
             if kill_on and record_prefix(line):
                 rec = parse_record(line)
                 if rec and any(matches(rec, k) for k in kill_on) and not killed:
@@ -449,7 +536,9 @@ def run_boot(args, boot, tmpdir, disk):
             if not ok:
                 agent_failures.append(name)
         try:
-            session = envoy.Session(envoy_path, connect_timeout=args.timeout)
+            # The harness's timeout bounds the whole boot; one request (a
+            # reclaim under emulation) may take much of it.
+            session = envoy.Session(envoy_path, connect_timeout=args.timeout, timeout=args.timeout)
             if args.display and script.run.__code__.co_argcount >= 3:
                 script.run(session, check, Screen(qmp_path, lines, proc, 1024, 768))
             else:

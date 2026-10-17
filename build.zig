@@ -82,7 +82,7 @@ pub fn build(b: *std.Build) void {
     // boot image and embedded in its own Steward. grain-pack refuses an image
     // missing a program, and Steward refuses a miswired manifest at compile time.
     const system_path = b.option([]const u8, "system", "System manifest for run/steward/check-manifest: .brix or .zon (default system/dev.brix)") orelse "system/dev.brix";
-    const program_names = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker", "crasher", "waiter", "registry", "kv", "envoy", "tablecloth", "kumara", "ledger", "surf", "shell", "mycelium", "comlink", "guestbook" };
+    const program_names = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker", "crasher", "waiter", "registry", "kv", "envoy", "tablecloth", "kumara", "ledger", "surf", "shell", "mycelium", "comlink", "guestbook", "consent" };
 
     const pack = b.addExecutable(.{ .name = "grain-pack", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/pack/main.zig"),
@@ -281,6 +281,9 @@ pub fn build(b: *std.Build) void {
     run.addArg("--virtio-rng=/dev/urandom");
     // -Ddisplay: the desktop, in a window on the host.
     if (b.option(bool, "display", "zig build run: show the desktop in a window") orelse false) run.addArgs(&.{ "--display", "--window" });
+    // -Dsocket=PATH: Envoy at a fixed path (in a directory private to you),
+    // so an MCP client's configuration need not change between runs.
+    if (b.option([]const u8, "socket", "zig build run: serve Envoy at this socket path")) |path| run.addArg(b.fmt("--envoy-path={s}", .{path}));
     run.addArtifactArg(aurora);
     run.stdio = .inherit;
     run.has_side_effects = true;
@@ -394,6 +397,12 @@ pub fn build(b: *std.Build) void {
         "--agent",          "tools/agent_session.py",
         "--console-input",  "open sesame",
         "--console-input",  "open sesame",
+        // The owner, at the console, allows one ask and refuses another.
+        "--owner-approve",  "entropy",
+        "--owner-refuse",   "comlink",
+        "--expect",         "consent_ready domain=consent",
+        "--expect",         "owner_answered service=entropy granted=true",
+        "--expect",         "owner_answered service=comlink granted=false",
         "--expect",         "kumara_ready domain=kumara created=true",
         "--expect",         "ledger_ready domain=ledger entries=0",
         "--expect",         "envoy_ready domain=envoy capabilities=8",
@@ -521,7 +530,8 @@ pub fn build(b: *std.Build) void {
         "--virtio-console",                                 "--boots",
         "8",                                                "--console-input",
         "open sesame",                                      "--console-input",
-        "open sesame",                                      "--agent",
+        "open sesame",                                      "--owner-approve",
+        "tablecloth",                                       "--agent",
         "1:tools/gen_upgrade.py",                           "--agent",
         "4:tools/gen_rollback.py",                          "--agent",
         "7:tools/gen_forget.py",                            "--kill-on",
@@ -604,7 +614,9 @@ pub fn build(b: *std.Build) void {
     b.step("bench", "Boot the kernel test suite on one hart and print benchmark and profile records").dependOn(&bench.step);
 
     const dbg = b.addSystemCommand(&qemu_base);
-    dbg.addArgs(&.{ "-smp", smp, "-s", "-S", "-kernel" });
+    // The GDB stub listens on this machine only (QEMU's -s would take every
+    // interface, so anyone on the network could attach).
+    dbg.addArgs(&.{ "-smp", smp, "-gdb", "tcp:127.0.0.1:1234", "-S", "-kernel" });
     dbg.addArtifactArg(kernel);
     dbg.stdio = .inherit;
     b.step("debug", "Boot halted, waiting for GDB on localhost:1234").dependOn(&dbg.step);

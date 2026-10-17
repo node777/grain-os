@@ -411,7 +411,8 @@ name (`grain.use("console")`, `grain.device("port")`). Nothing is wired by
 an unwritten convention.
 
 **Steward never blocks on a domain.** Domains tell it things on the
-lifecycle endpoint (exit, an agent's `ask`, `ready`) and it answers at once.
+lifecycle endpoint (exit, an agent's `ask`, `ready`, the owner domain's
+`pending` and `decide`) and it answers at once.
 `ready` is how a domain asks whether the whole boot came up (the store
 confirms a generation on trial only if it did) and then reports itself
 settled; with `halt_when_tasks_finish`, Steward does not power off before
@@ -596,12 +597,14 @@ Envoy is how an AI agent (or a script, or a human) operates Grain. An agent
 is a **principal** with its own leased capabilities. It is never root.
 
 **Authority comes from the manifest.** The `agent` section names the Envoy
-domain, the services it **grants** from boot and the ones that are
-**askable**, each with a lease limit (`uses`, `duration_ms`):
+domain, the domain that asks the owner (`owner`), the services it **grants**
+from boot and the ones that are **askable**, each with a lease limit
+(`uses`, `duration_ms`):
 
 ```brix
 agent {
     envoy = envoy
+    owner = consent
     grant store { from = store.kv, protocol = kv.v1 }
     grant echo { from = flaky.echo, protocol = echo.v1, duration = 4s }
     askable entropy { from = rng.entropy, protocol = entropy.v1, uses = 2 }
@@ -625,10 +628,33 @@ enforces the limits, and an exhausted or expired lease fails with
 | `plan` | Dry-run a list of calls: each step's effect and undo, whether the whole is **atomic** (every step pure or undoable) and executable with the authority held. Nothing changes. |
 | `apply` | Run a plan. If it is atomic, all of it happens or none of it does: on a failure the steps already done are undone in reverse. A non-atomic plan is refused unless `allow_partial` is set. Every step is recorded. |
 | `undo` | Reverse one recorded action by calling its undo method. |
-| `ask` | Request an askable service. *Changed:* Steward decides on the owner's behalf from the manifest's policy (each askable service once); a live owner prompt is *planned* with Seal. |
+| `ask` | Request an askable service. The owner is asked, and the answer is final for the boot (see **Asking the owner** below). |
 | `observe` | The audit log. *Changed:* a snapshot, not a subscription (*planned*). |
 | `bye` | End the session. Envoy is a task, so this ends the run. |
 
+- **Asking the owner** (*changed* from manifest-only policy). Nothing
+  askable is granted without the owner's yes. The first `ask` for a service
+  makes Steward hold the question (`agent_ask_pending`) and answer
+  *pending*; Envoy tells the agent, and `tools/envoy.py` asks again every
+  quarter second until the answer comes (MCP's `grain_ask` waits up to two
+  minutes). The **owner domain** the manifest names (`agent.owner`, in the
+  dev system `consent`) polls Steward for waiting questions
+  (`Lifecycle.pending`), shows each on the owner's console, reads the
+  owner's `yes` or `no` from `input.v1` and gives it to Steward
+  (`Lifecycle.decide`); only that domain may do either, and it can't be the
+  agent's own. On yes, Steward makes the lease and mints it into Envoy's
+  CSpace, and the agent's next ask gets it; on no, every later ask is
+  refused `owner_refused`. Lines typed before a question appears are thrown
+  away, so a stray `yes` typed ahead answers nothing. Questions wait until
+  the boot has settled (every `await_ready` domain is ready): until then
+  the console belongs to the store asking for its passphrase, and a
+  question would swallow it. The schema requires an
+  owner domain whenever there are askable services, and that it reads an
+  `input.v1` service; with no owner domain running (no console), asks are
+  refused `no_owner`. Steward still never blocks: the question waits in
+  Steward, not in a call. *Planned:* the question on the desktop as well,
+  and the agent's stated reason shown with it (it is the agent's text, so it
+  needs care).
 - **Audit chain.** Every verb that uses authority appends
   `seq|verb|cap|method|outcome|undo_of` to a BLAKE3 hash chain (starting at
   32 zero bytes) and emits an `envoy_action` record. `observe` returns the
@@ -918,10 +944,8 @@ the new one.
   good one.
 
 **The agent's part.** The store is `askable` in the dev manifest: the agent
-must ask before it can upgrade or roll back. Today the manifest is the
-owner's whole policy: Steward grants an askable lease on the first request,
-without asking anyone. Asking the owner at that moment (on the console or
-the desktop) is *planned*.
+must ask before it can upgrade or roll back, and the owner answers at the
+console (§3.5, **Asking the owner**).
 Envoy's `upload` verb moves bulk bytes into a store the agent holds (base64,
 2 KiB per line, one audited action per object), and `tools/envoy.py`'s
 `upload_generation` sends only the chunks the store lacks.

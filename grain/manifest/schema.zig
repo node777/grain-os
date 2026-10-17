@@ -22,10 +22,14 @@ pub const Manifest = struct {
 
 /// The agent's authority. It is never root: it holds exactly these services,
 /// each as a kernel lease with optional limits, and may ask for the askable
-/// ones. Steward approves asks on the owner's behalf within this policy.
+/// ones. Each ask is put to the owner, through the `owner` domain.
 pub const Agent = struct {
     /// The domain that speaks the Envoy protocol for the agent.
     envoy: []const u8,
+    /// The domain that puts the agent's asks to the owner and tells Steward
+    /// the answer (it reads what the owner types, through an input.v1
+    /// service). Required when there are askable services.
+    owner: []const u8 = "",
     /// Services the agent holds from boot.
     grants: []const Grant = &.{},
     /// Services the agent may request, once each.
@@ -119,7 +123,7 @@ pub const Device = struct {
     extra: bool = false,
 };
 
-pub const max_domains = 16;
+pub const max_domains = 32;
 pub const max_provides = 8;
 pub const max_uses = 8;
 pub const max_devices = 4;
@@ -284,6 +288,15 @@ pub fn validate(m: Manifest, buf: []u8) ?[]const u8 {
 
     if (m.agent) |a| {
         if (findDomain(m, a.envoy) == null) return f.msg("agent.envoy names '{s}', which is not a domain", .{a.envoy});
+        if (a.askable.len > 0 and a.owner.len == 0) return f.msg("the agent has askable services but no agent.owner domain to ask the owner", .{});
+        if (a.owner.len > 0) {
+            const o = findDomain(m, a.owner) orelse return f.msg("agent.owner names '{s}', which is not a domain", .{a.owner});
+            if (std.mem.eql(u8, a.owner, a.envoy)) return f.msg("agent.owner cannot be the agent's own domain '{s}'", .{a.owner});
+            const reads_input = for (m.domains[o].uses) |u| {
+                if (std.mem.eql(u8, u.protocol, "input.v1")) break true;
+            } else false;
+            if (!reads_input) return f.msg("agent.owner '{s}' must use an input.v1 service: it reads the owner's answers", .{a.owner});
+        }
         if (a.grants.len + a.askable.len > max_agent_caps) return f.msg("the agent has {d} grants and askable services; at most {d}", .{ a.grants.len + a.askable.len, max_agent_caps });
         const lists = [_][]const Grant{ a.grants, a.askable };
         for (lists, 0..) |list, li| for (list, 0..) |g, gi| {
@@ -376,15 +389,23 @@ test "each mistake gets its own explanation" {
 test "agent grants and device claims are checked" {
     const rng: Domain = .{ .name = "rng", .program = "virtio_rng", .devices = &.{.{ .name = "source", .virtio = 4 }}, .provides = &.{.{ .name = "entropy", .protocol = "entropy.v1" }} };
     const envoy: Domain = .{ .name = "envoy", .program = "envoy", .devices = &.{.{ .name = "port", .virtio = 3, .instance = 1 }} };
+    const keyboard: Domain = .{ .name = "keyboard", .program = "virtio_console", .devices = &.{.{ .name = "port", .virtio = 3, .instance = 2 }}, .provides = &.{.{ .name = "input", .protocol = "input.v1" }} };
+    const consent: Domain = .{ .name = "consent", .program = "consent", .uses = &.{.{ .name = "input", .from = "keyboard.input", .protocol = "input.v1" }} };
     var buf: [512]u8 = undefined;
-    try std.testing.expectEqual(@as(?[]const u8, null), validate(.{ .name = "t", .domains = &.{ console, rng, envoy }, .agent = .{
+    try std.testing.expectEqual(@as(?[]const u8, null), validate(.{ .name = "t", .domains = &.{ console, rng, envoy, keyboard, consent }, .agent = .{
         .envoy = "envoy",
+        .owner = "consent",
         .grants = &.{.{ .name = "console", .from = "console.console", .protocol = "console.v1", .uses = 5 }},
         .askable = &.{.{ .name = "entropy", .from = "rng.entropy", .protocol = "entropy.v1" }},
     } }, &buf));
     try expectError(.{ .name = "t", .domains = &.{console}, .agent = .{ .envoy = "nobody" } }, "agent.envoy names 'nobody'");
+    const ask_entropy: []const Grant = &.{.{ .name = "entropy", .from = "rng.entropy", .protocol = "entropy.v1" }};
+    try expectError(.{ .name = "t", .domains = &.{ rng, envoy }, .agent = .{ .envoy = "envoy", .askable = ask_entropy } }, "askable services but no agent.owner domain");
+    try expectError(.{ .name = "t", .domains = &.{ rng, envoy }, .agent = .{ .envoy = "envoy", .owner = "nobody", .askable = ask_entropy } }, "agent.owner names 'nobody'");
+    try expectError(.{ .name = "t", .domains = &.{ rng, envoy }, .agent = .{ .envoy = "envoy", .owner = "envoy", .askable = ask_entropy } }, "agent.owner cannot be the agent's own domain 'envoy'");
+    try expectError(.{ .name = "t", .domains = &.{ rng, envoy, console }, .agent = .{ .envoy = "envoy", .owner = "console", .askable = ask_entropy } }, "agent.owner 'console' must use an input.v1 service");
     try expectError(.{ .name = "t", .domains = &.{ console, envoy }, .agent = .{ .envoy = "envoy", .grants = &.{.{ .name = "x", .from = "console.console", .protocol = "echo.v1" }} } }, "agent grant 'x' expects echo.v1, but 'console.console' speaks console.v1");
-    try expectError(.{ .name = "t", .domains = &.{ console, envoy }, .agent = .{ .envoy = "envoy", .grants = &.{
+    try expectError(.{ .name = "t", .domains = &.{ console, envoy, keyboard, consent }, .agent = .{ .envoy = "envoy", .owner = "consent", .grants = &.{
         .{ .name = "x", .from = "console.console", .protocol = "console.v1" },
     }, .askable = &.{.{ .name = "x", .from = "console.console", .protocol = "console.v1" }} } }, "two services named 'x'");
     const con_a: Domain = .{ .name = "con_a", .program = "virtio_console", .devices = &.{.{ .name = "port", .virtio = 3 }} };

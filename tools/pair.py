@@ -29,7 +29,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import envoy  # noqa: E402
-from harness import QEMU_RISCV64, ConsolePump, matches, parse_record, record_prefix  # noqa: E402
+from harness import QEMU_RISCV64, ConsolePump, answer_owner, matches, parse_record, record_prefix  # noqa: E402
 
 
 class Instance:
@@ -77,6 +77,10 @@ class Instance:
             self.lines.append(line)
             if record_prefix(line):
                 print(f"{self.name}| {line}", flush=True)
+                # The owner of each instance says yes to whatever its agent asks for.
+                rec = parse_record(line)
+                if rec and rec.get("event") == "owner_asked":
+                    answer_owner(rec, self.pump, [rec.get("service")], [])
 
     def session(self):
         if self._session is None:
@@ -153,6 +157,7 @@ def main():
             if st not in (0, None) and not failures:
                 print(f"pair: instance {inst.name} exited with {st}", file=sys.stderr)
                 status = status or st
+    shutil.rmtree(tmpdir, ignore_errors=True)
     if failures:
         print(f"pair: checks failed: {', '.join(failures)}", file=sys.stderr)
         status = status or 1

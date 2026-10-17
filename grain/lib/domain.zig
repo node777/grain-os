@@ -51,9 +51,12 @@ pub const Layout = struct {
 pub const Lifecycle = enum(u32) {
     /// w0 = exit code. The domain is torn down; the call never returns.
     exit = 1,
-    /// Envoy only: w0 = index of an askable agent service. Steward approves
-    /// within the manifest's policy (once per service) and replies label 0
-    /// with w0 = the slot of the new lease, or label 1 with w0 = a reason.
+    /// Envoy only: w0 = index of an askable agent service. The first ask
+    /// puts the question to the owner (through the manifest's owner domain)
+    /// and is answered label 2: pending. Asking again gets label 2 while the
+    /// owner has not answered, then label 0 with w0 = the slot of the new
+    /// lease, or label 1 with w0 = a reason (`owner_refused`, ...). Once per
+    /// service per boot.
     ask = 2,
     /// w0 = 0: the domain is up and asks whether the whole boot is; Steward
     /// replies label 0 with w0 = 1 if every domain it was asked to start is
@@ -61,6 +64,24 @@ pub const Lifecycle = enum(u32) {
     /// (the store: confirmed the generation on trial) and is settled; a test
     /// system does not halt before every domain marked `await_ready` is.
     ready = 3,
+    /// The owner domain only: the oldest question waiting for the owner,
+    /// once the boot has settled (every `await_ready` domain is ready, so
+    /// nothing else is waiting for the owner's typing, like the store for
+    /// its passphrase). Label 0, w0 = 0 if none, else the ask's number
+    /// (index + 1); w1..w3 =
+    /// the service's name (up to 24 bytes, zero-padded); w4 = its lease
+    /// limits, uses | duration_ms << 32.
+    pending = 4,
+    /// The owner domain only: w0 = an ask's number, w1 = 1 to grant, 0 to
+    /// refuse. Label 0 when recorded, label 1 (w0 = a reason) otherwise.
+    decide = 5,
+};
+
+/// Labels of Steward's answers to `ask`.
+pub const AskAnswer = enum(u32) {
+    granted = 0,
+    refused = 1,
+    pending = 2,
 };
 
 pub const AskRefusal = enum(u32) {
@@ -68,6 +89,14 @@ pub const AskRefusal = enum(u32) {
     already_granted = 2,
     not_envoy = 3,
     failed = 4,
+    /// The owner said no (final for this boot).
+    owner_refused = 5,
+    /// `pending` or `decide` from a domain that is not the owner domain,
+    /// or about an ask that is not waiting.
+    not_owner = 6,
+    not_pending = 7,
+    /// No owner domain is running to ask (e.g. no console): refused.
+    no_owner = 8,
 };
 
 /// The badge services see when the agent calls them through Envoy.

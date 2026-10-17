@@ -213,8 +213,18 @@ class Session:
     def undo(self, action):
         return self.ok("undo", action=action)
 
-    def ask(self, cap, reason=""):
-        return self.ok("ask", cap=cap, reason=reason)
+    def ask(self, cap, reason="", wait=300.0, on_pending=None):
+        """Ask for an askable capability. The system puts the question to its
+        owner; this waits up to `wait` seconds for the answer (returning the
+        last `pending` result if none came). Raises EnvoyError if refused."""
+        deadline = time.time() + wait
+        result = self.ok("ask", cap=cap, reason=reason)
+        if result.get("pending") and on_pending:
+            on_pending()
+        while result.get("pending") and time.time() < deadline:
+            time.sleep(0.25)
+            result = self.ok("ask", cap=cap, reason=reason)
+        return result
 
     def observe(self, since=0):
         return self.ok("observe", since=since)
@@ -311,7 +321,9 @@ class Bridge:
         tools += [
             {"name": "grain_discover", "description": "List the capabilities you hold, with lease limits.",
              "inputSchema": {"type": "object", "properties": {}}},
-            {"name": "grain_ask", "description": "Ask the owner for an askable capability.",
+            {"name": "grain_ask", "description": "Ask the owner for an askable capability. The owner is asked "
+                                                 "at the system's console and may take a while (this waits up to two "
+                                                 "minutes); if the answer is still pending, ask again later.",
              "inputSchema": {"type": "object", "properties": {"cap": {"type": "string"}, "reason": {"type": "string"}},
                              "required": ["cap"]}},
             {"name": "grain_plan", "description": "Dry-run a list of steps {cap, method, args}; changes nothing.",
@@ -328,6 +340,13 @@ class Bridge:
         return tools
 
     def call_tool(self, name, args):
+        if name == "grain_ask":
+            try:
+                result = self.s.ask(args.get("cap", ""), args.get("reason", ""), wait=120.0)
+                text, error = json.dumps(result, separators=(",", ":")), False
+            except EnvoyError as e:
+                text, error = json.dumps(e.response, separators=(",", ":")), True
+            return {"content": [{"type": "text", "text": text}], "isError": error}
         verbs = {"grain_discover": ("discover", {}), "grain_ask": ("ask", args), "grain_plan": ("plan", args),
                  "grain_apply": ("apply", args), "grain_undo": ("undo", args), "grain_observe": ("observe", args)}
         if name in verbs:
@@ -473,7 +492,9 @@ def run_shell(session):
             elif cmd == "undo":
                 print(json.dumps(session.undo(int(words[1]))))
             elif cmd == "ask":
-                print(json.dumps(session.ask(words[1], " ".join(words[2:]))))
+                print(json.dumps(session.ask(words[1], " ".join(words[2:]),
+                                             on_pending=lambda: print("(waiting for the owner to answer at the system's console)",
+                                                                      flush=True))))
             elif cmd == "log":
                 obs = session.observe()
                 ok, bad = verify_chain(obs["actions"])

@@ -2,8 +2,8 @@
 
 > **Status: not yet run on macOS.** Everything here comes from reading the
 > code and the tools; the whole suite passes on Linux (QEMU 8.2). Section 2
-> lists what should change in the repository first, section 9 what to send
-> back when something breaks.
+> lists what was changed to get ready and what is left; section 9 says what
+> to send back when something breaks.
 
 Grain runs on a Mac the way it runs everywhere today: inside QEMU, which
 emulates a RISC-V computer in software. There is nothing to install into
@@ -19,12 +19,12 @@ only channels between the Mac and the guest:
 | Channel | When | Who can use it | Note |
 |---|---|---|---|
 | Terminal output (serial console) | always | you | records and log lines |
-| Your typing (virtio console) | `zig build run` | you | the passphrase goes this way, **visible on screen** (§6) |
-| The Envoy socket, `$TMPDIR/grain-XXXX/envoy1.sock` | `zig build run` | your user only (the directory is mode 0700) | grainsh or an AI agent connects here; one client at a time |
+| Your typing (virtio console) | `zig build run` | you | the passphrase and your answers to the agent's asks; not shown as you type |
+| The Envoy socket: `$TMPDIR/grain-XXXX/envoy1.sock`, or the path you give with `-Dsocket` | `zig build run` | your user only (the directory must be mode 0700) | grainsh or an AI agent connects here; one client at a time |
 | The disk image, `zig-out/run-disk.img` | `zig build run` | your user | encrypted with your passphrase, but see §6 |
 | `/dev/urandom` (read only) | `zig build run` | QEMU | gives the guest real randomness for its keys |
 | The window, and a QMP socket beside the Envoy socket | `-Ddisplay` | your user only | QMP controls QEMU itself; nothing exposes it to the agent |
-| **A GDB stub on TCP port 1234, all interfaces** | `zig build debug` only | **anyone on your network** | fix before using (§2, item 2) |
+| A GDB stub on TCP port 1234, **this Mac only** (127.0.0.1) | `zig build debug` only | programs on your Mac | nothing on the network can reach it |
 | Two guests linked by Unix datagram sockets | `tools/pair.py` | the two guests | stays on your Mac |
 
 So the outer safety boundary is QEMU. A bug in QEMU that let the guest out
@@ -32,41 +32,58 @@ would give it **your** user's rights (not root's). The guest only runs code
 built from this repository, so that risk is small. Keep QEMU up to date
 anyway, and never run QEMU or the build with `sudo`.
 
-## 2. What should change in the repository first
+## 2. What was changed to get ready, and what is left
 
-None of these block a first try (section 4 has workarounds), but each one is
-small, and the first three are about safety.
+| Change | Why | Status |
+|---|---|---|
+| `zig build debug` listens on 127.0.0.1 only | QEMU's `-s` listened on every interface: anyone on the same Wi-Fi could have attached a debugger | done |
+| What you type into the system's console is not shown | the passphrase used to appear in the terminal and stay in its scrollback | done |
+| **The owner is asked before an agent gets an askable capability** | before, an `askable` lease was granted at once on the agent's first request, without asking you | done: the question appears on the console, you type `yes` or `no` (§6) |
+| `tools/setup.sh` installs on macOS (Homebrew, Zig in your home directory, the download checked against Zig's published checksum, no `sudo`) | it knew only `apt` and Linux | done; tested on Linux, not yet on a Mac |
+| `zig build run -Dsocket=PATH` serves Envoy at a fixed path | the path used to change every run, so an MCP client's config had to be edited each time | done |
+| The test tools delete their temporary directories | runs used to leave `$TMPDIR/grain-*` behind, some with 256 MiB disk copies | done (`--keep-temp` keeps one for debugging) |
+| Run the whole suite on Homebrew's QEMU (9.x or 10.x) and its Cocoa window | everything was tested on QEMU 8.2 with GTK | **left: needs your Mac** |
 
-| # | Change | Why | Kind |
-|---|---|---|---|
-| 1 | `zig build debug`: QEMU's `-s` becomes `-gdb tcp:127.0.0.1:1234` | `-s` listens on every interface: anyone on the same Wi-Fi could attach a debugger to the guest | safety, one line |
-| 2 | Read the passphrase without echoing it | today it shows in the terminal and stays in its scrollback | safety, small (harness.py) |
-| 3 | Ask the owner before granting an agent an **askable** capability | today an `askable` lease is granted **at once** on the agent's first request: no question is put to you. In the dev system those are `tablecloth` (install or roll back system generations), `comlink` (meet other instances) and `entropy` | safety, a design change (a prompt on the console or the desktop) |
-| 4 | `tools/setup.sh` learns macOS (Homebrew, the `aarch64-macos` Zig) | it handles only `apt` and Linux Zig, and on a Mac it stops with an error | convenience |
-| 5 | A fixed Envoy socket path (`zig build run -Dsocket=PATH`) | the path changes on every run, so an MCP client's config must be edited each time | convenience |
-| 6 | The harness deletes its temporary directory | test runs leave `$TMPDIR/grain-*` behind, some with 256 MiB disk copies | tidiness |
-| 7 | Confirm the suite on Homebrew's QEMU (9.x or 10.x) and its Cocoa window | everything was tested on QEMU 8.2 with GTK | needs your Mac |
-
-Unix socket paths are limited to 104 characters on macOS. The harness's
+Unix socket paths are limited to 104 characters on macOS. The temporary
 paths come to about 80 there, so they should fit; if you see `AF_UNIX path
-too long`, run with `TMPDIR=/tmp`.
+too long`, run with `TMPDIR=/tmp` or use `-Dsocket` with a short path.
 
 ## 3. Install, without sudo
 
 Apple Silicon or Intel both work: the RISC-V machine is emulated either way.
 
-**Homebrew packages** (Homebrew installs as your user):
+**The source first:**
 
 ```sh
-brew install qemu python@3.12
+git clone https://github.com/node777/grain-os && cd grain-os
+git checkout claude/grain-os-caravan-design-dbqp0x
+```
+
+Building runs the repository's `build.zig` with your rights, as every build
+system does. Build only branches you trust.
+
+**Then the tools, with one script** (it needs [Homebrew](https://brew.sh)
+and refuses to run under `sudo`):
+
+```sh
+tools/setup.sh
+```
+
+It installs QEMU and Python 3.12 with Homebrew, downloads Zig 0.17.0
+(exactly that version: others will not build this tree) into
+`~/opt/zig-0.17.0`, checks the download against the checksum ziglang.org
+publishes and refuses it on a mismatch, then prints the line that puts Zig
+on your PATH. Run that line, then check:
+
+```sh
+zig version                       # 0.17.0
 qemu-system-riscv64 --version     # note the version for your report
 ```
 
 Homebrew's QEMU includes the OpenSBI firmware the boot uses
 (`-bios default`).
 
-**Zig 0.17.0, exactly.** Other versions will not build this tree. Unless
-`brew info zig` shows exactly 0.17.0, install it into your home directory:
+**The same by hand**, if you'd rather see each step:
 
 ```sh
 mkdir -p ~/opt/zig-0.17.0 && cd ~/opt
@@ -95,16 +112,6 @@ virtual environment, not in the system Python:
 python3.12 -m venv ~/.venvs/grain && source ~/.venvs/grain/bin/activate
 pip install cryptography
 ```
-
-**The source.**
-
-```sh
-git clone https://github.com/node777/grain-os && cd grain-os
-git checkout claude/grain-os-caravan-design-dbqp0x
-```
-
-Building runs the repository's `build.zig` with your rights, as every build
-system does. Build only branches you trust.
 
 **Optional:** keep the build cache and the disk image out of Time Machine:
 `tmutil addexclusion .zig-cache zig-out`.
@@ -136,8 +143,9 @@ zig build run
 ```
 
 The first boot finds a blank disk and asks you to choose a passphrase (§6);
-later boots ask for it to unlock the disk. The harness then prints the
-Envoy socket path and the command to connect, for example:
+later boots ask for it to unlock the disk. What you type is not shown. The
+harness prints the Envoy socket path and the command to connect, for
+example:
 
 ```
 harness: connect with: python3 tools/envoy.py shell --socket /var/folders/.../grain-ab12cd34/envoy1.sock
@@ -168,14 +176,23 @@ zig-out/run-disk.img` shows what the disk holds.
 ### Claude as the operator (MCP)
 
 `tools/envoy.py mcp` is an MCP server (stdio) that connects to the Envoy
-socket. Start `zig build run` first, then point a client at the socket path
-it printed. The path changes on every run until item 5 of §2 is done, so
-update it each time.
+socket. Give the socket a fixed path in a directory only you can open (the
+harness creates `~/.grain` with mode 0700, and refuses a directory others
+can read):
+
+```sh
+zig build run -Dsocket=$HOME/.grain/envoy.sock
+```
+
+Start the system first: the MCP server waits 30 seconds for the socket and
+then gives up (restart it from your client, e.g. `/mcp` in Claude Code).
+In the commands below, write your home directory out in full
+(`/Users/you`), as MCP clients don't expand `~` or `$HOME`.
 
 Claude Code:
 
 ```sh
-claude mcp add grain -- python3 /ABSOLUTE/PATH/grain-os/tools/envoy.py mcp --socket /PATH/PRINTED/envoy1.sock
+claude mcp add grain -- python3 /Users/you/grain-os/tools/envoy.py mcp --socket /Users/you/.grain/envoy.sock
 ```
 
 Claude Desktop, in `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -186,8 +203,8 @@ Claude Desktop, in `~/Library/Application Support/Claude/claude_desktop_config.j
   "mcpServers": {
     "grain": {
       "command": "python3",
-      "args": ["/ABSOLUTE/PATH/grain-os/tools/envoy.py", "mcp",
-               "--socket", "/PATH/PRINTED/envoy1.sock"]
+      "args": ["/Users/you/grain-os/tools/envoy.py", "mcp",
+               "--socket", "/Users/you/.grain/envoy.sock"]
     }
   }
 }
@@ -203,10 +220,9 @@ passphrase, but that cryptography has had no outside review
 (docs/CAPABILITY_MODEL.md lists what has). Keep real secrets and personal
 data out of it.
 
-**Use a throwaway passphrase.** Until item 2 of §2 is done it appears in
-the terminal as you type it and stays in the scrollback. Choose one you use
-nowhere else. `zig-out/bin/grain-disk passwd zig-out/run-disk.img` changes
-it.
+**Pick a passphrase you use nowhere else.** It is no longer shown as you
+type, but it is a test system. `zig-out/bin/grain-disk passwd
+zig-out/run-disk.img` changes it.
 
 **Know what an agent can do.** Connected through MCP, an AI agent holds
 exactly the leases in the `agent` block of `system/dev.brix`:
@@ -214,13 +230,29 @@ exactly the leases in the `agent` block of `system/dev.brix`:
 - from boot: `echo` (15 s), `store` (the key-value store), `console`
   (20 uses), `scene` (reads the screen as data), `attest` (signed reports
   of what booted);
-- **on request, granted without asking you** (item 3 of §2): `entropy`
-  (2 uses), `tablecloth` (upload, switch to and roll back system
-  generations, so it can change what the guest boots next), `comlink`
-  (meet other instances and lend them things).
+- **only if you say yes**: `entropy` (2 uses), `tablecloth` (upload,
+  switch to and roll back system generations, so it can change what the
+  guest boots next), `comlink` (meet other instances and lend them things).
 
-To keep an agent away from any of these, delete its `askable` line in
-`system/dev.brix` before `zig build run`. Whatever it does, it stays inside
+When the agent asks for one, the terminal shows:
+
+```
+console| [owner] The agent asks for 'tablecloth' (no limit). Allow it? Type yes or no.
+```
+
+Type `yes` or `no` and press Return in the terminal running `zig build run`
+(not in grainsh or Claude). Questions only appear once the system has
+finished booting and the disk is unlocked, so they never get mixed up with
+the passphrase. Your answer stands for the rest of the boot: a
+refused service stays refused however often the agent asks. Anything typed
+before a question appears is thrown away, so typing ahead can't approve
+something you haven't seen. The agent waits up to two minutes for you
+(through MCP; then it may ask again). The agent can also write to the
+console, so read each question, and answer only the ones whose name you
+expect. To take a service off the table entirely, delete its `askable` line
+in `system/dev.brix`.
+
+Whatever the agent does, it stays inside
 the guest: nothing in the agent's reach touches your Mac's files or
 network. Every action is recorded in an audit log (`grain_observe`), and
 `grain_plan` dry-runs steps before `grain_apply`. Leave your MCP client's
@@ -229,9 +261,9 @@ per-call approval on. Methods that reach another instance (Comlink's
 that only read are marked read-only, so a client can treat them
 differently.
 
-**Don't expose the debugger.** Use `zig build debug` only after item 1 of
-§2, or on a network you trust. If macOS asks whether QEMU may accept
-incoming connections, choose **Deny**: GDB on the same Mac still connects.
+**The debugger stays on your Mac.** `zig build debug` listens on 127.0.0.1
+only. If macOS still asks whether QEMU may accept incoming connections,
+choose **Deny**: GDB on the same Mac connects anyway.
 
 **Run nothing as root.** Not the build, not QEMU, not the tools. Nothing here
 needs it.
@@ -242,14 +274,15 @@ needs it.
   core while the guest is busy.
 - `zig-out/run-disk.img` is 256 MiB. `.zig-cache` grows with every build;
   delete it whenever you like (the next build is slower).
-- Test runs leave `$TMPDIR/grain-*` directories (sockets, copies of disks):
-  `rm -rf "$TMPDIR"/grain-*` while no Grain VM is running.
+- The tools delete their temporary directories when they finish. One
+  killed hard (or run with `--keep-temp`) can leave a `$TMPDIR/grain-*`
+  behind: `rm -rf "$TMPDIR"/grain-*` while no Grain VM is running.
 
 ## 8. Starting over and removing it
 
 - Start over with a new identity and passphrase: `rm zig-out/run-disk.img`.
 - Remove everything: delete the repository folder, `~/opt/zig-0.17.0`,
-  `~/.venvs/grain`, the `$TMPDIR/grain-*` directories, any `grain` entry in
+  `~/.venvs/grain`, `~/.grain`, any `$TMPDIR/grain-*` directories, any `grain` entry in
   your MCP configuration (`claude mcp remove grain`), and the export line in
   `~/.zshrc`; then `brew uninstall qemu` if nothing else uses it.
 
@@ -257,11 +290,13 @@ needs it.
 
 | Symptom | Likely cause | Try |
 |---|---|---|
-| `tools/setup.sh` fails | it only knows Linux (item 4 of §2) | install by hand (§3) |
+| `tools/setup.sh` fails | untested on a Mac so far | send its output; install by hand meanwhile (§3) |
+| `must belong to you and be private to you` | `-Dsocket` in a shared directory | use `~/.grain/…`, or `chmod 700` the directory |
+| The agent's ask never gets an answer | the question is on the console, waiting for you | type `yes` or `no` in the `zig build run` terminal |
 | Zig errors in the standard library | not Zig 0.17.0 | `zig version`, then §3 |
 | `qemu-system-riscv64: command not found` | Homebrew's bin not on PATH | `eval "$(/opt/homebrew/bin/brew shellenv)"` |
 | `AF_UNIX path too long` | long `$TMPDIR` | `TMPDIR=/tmp zig build run` |
-| The boot hangs after `harness: Envoy socket` | waiting for the passphrase | type it in the terminal and press Return |
+| The boot hangs after `harness: Envoy socket` | waiting for the passphrase | type it in the terminal (it is not shown) and press Return |
 | No window with `-Ddisplay` | QEMU's display backend | send `qemu-system-riscv64 -display help` |
 | A test fails in `qemu-test` only | QEMU 9/10 versus 8.2 | send the failing step's output |
 

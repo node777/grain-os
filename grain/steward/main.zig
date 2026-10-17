@@ -352,6 +352,26 @@ const agent_grants: []const schema.Grant = if (agent) |a| a.grants else &.{};
 const agent_askable: []const schema.Grant = if (agent) |a| a.askable else &.{};
 const agent_caps = agent_grants.len + agent_askable.len;
 const envoy_index: ?usize = if (agent) |a| schema.findDomain(manifest, a.envoy) else null;
+/// The domain that puts the agent's asks to the owner (schema.Agent.owner).
+const owner_index: ?usize = if (agent) |a| (if (a.owner.len > 0) schema.findDomain(manifest, a.owner) else null) else null;
+
+/// Where each agent service's ask stands. Grants start `collected`.
+const AskState = enum(u8) {
+    /// Not asked for yet.
+    none,
+    /// Put to the owner; no answer yet.
+    pending,
+    /// The owner said yes: the lease is in Envoy's CNode, Envoy not told yet.
+    approved,
+    /// Envoy holds it.
+    collected,
+    /// The owner said no.
+    refused,
+};
+var ask_state: [agent_caps]AskState = @splat(.none);
+/// Asks put to the owner, in order (ask numbers: index + 1).
+var ask_queue: [agent_caps]u8 = undefined;
+var ask_queue_len: usize = 0;
 
 var agent_leases: [agent_caps]g.CPtr = @splat(0);
 
@@ -438,22 +458,102 @@ fn installAgentLeases(cnode: g.CPtr, info: *D.DomainInfo) !void {
     info.agent_count = agent_caps;
 }
 
-const AskOutcome = union(enum) { slot: u32, refused: D.AskRefusal };
+const AskOutcome = union(enum) { slot: u32, refused: D.AskRefusal, pending };
 
 /// Envoy asks for agent service `index` (counting over grants, then
-/// askables). Returns the slot of the new lease or a refusal.
+/// askables). The first ask puts the question to the owner; later ones learn
+/// the answer. Nothing is granted without the owner's yes.
 fn onAsk(i: usize, index: usize) AskOutcome {
     if (envoy_index == null or envoy_index.? != i) return .{ .refused = .not_envoy };
     inline for (0..agent_caps) |k| if (k == index) {
         if (k < agent_grants.len) return .{ .refused = .not_askable };
-        if (agent_leases[k] != 0) return .{ .refused = .already_granted };
-        makeAgentLease(k) catch return .{ .refused = .failed };
-        const s_ = D.Slot.first_agent + k;
-        mint(domains[i].cnode, s_, agent_leases[k], .{ .send = true, .grant = true }, 0) catch return .{ .refused = .failed };
-        g.record("agent_ask", .{ .service = comptime agentGrant(k).name, .granted = true, .slot = s_ });
-        return .{ .slot = s_ };
+        const gr = comptime agentGrant(k);
+        switch (ask_state[k]) {
+            .none => {
+                if (owner_index == null or domains[owner_index.?].status != .running) return .{ .refused = .no_owner };
+                ask_state[k] = .pending;
+                ask_queue[ask_queue_len] = k;
+                ask_queue_len += 1;
+                // The owner domain finds it with `pending` and asks the owner.
+                g.record("agent_ask_pending", .{ .service = gr.name, .from = gr.from, .uses = gr.uses, .duration_ms = gr.duration_ms });
+                return .pending;
+            },
+            .pending => return .pending,
+            .approved => {
+                ask_state[k] = .collected;
+                return .{ .slot = D.Slot.first_agent + k };
+            },
+            .collected => return .{ .refused = .already_granted },
+            .refused => return .{ .refused = .owner_refused },
+        }
     };
     return .{ .refused = .not_askable };
+}
+
+/// The owner domain asks what is waiting for the owner.
+fn onPending(i: usize) void {
+    if (owner_index == null or owner_index.? != i) {
+        _ = g.reply(.{ .label = 1, .length = 1 }, .{@backingInt(D.AskRefusal.not_owner)});
+        return;
+    }
+    // Not before the boot has settled: until then the console belongs to
+    // the domains waiting on the owner (the store, for its passphrase), and
+    // a question would take their input.
+    if (ask_queue_len == 0 or !awaitedReady()) {
+        _ = g.reply(.{ .label = 0, .length = 1 }, .{0});
+        return;
+    }
+    const k = ask_queue[0];
+    var name: [24]u8 = @splat(0);
+    var limits: usize = 0;
+    inline for (agent_grants.len..agent_caps) |kk| if (kk == k) {
+        const gr = comptime agentGrant(kk);
+        @memcpy(name[0..gr.name.len], gr.name);
+        limits = gr.uses | @as(usize, gr.duration_ms) << 32;
+    };
+    const w = std.mem.bytesAsSlice(usize, &name);
+    _ = g.reply(.{ .label = 0, .length = 5 }, .{ @as(usize, k) + 1, w[0], w[1], w[2], limits });
+}
+
+/// The owner domain gives the owner's answer to ask number `number`.
+fn onDecide(i: usize, number: usize, yes: bool) void {
+    const why: ?D.AskRefusal = decide(i, number, yes);
+    if (why) |r| {
+        _ = g.reply(.{ .label = 1, .length = 1 }, .{@backingInt(r)});
+    } else _ = g.reply(.{ .label = 0, .length = 0 }, .{});
+}
+
+fn decide(i: usize, number: usize, yes: bool) ?D.AskRefusal {
+    if (owner_index == null or owner_index.? != i) return .not_owner;
+    if (number == 0 or number > agent_caps or ask_state[number - 1] != .pending) return .not_pending;
+    const k = number - 1;
+    // Out of the queue, wherever it is.
+    var j: usize = 0;
+    while (ask_queue[j] != k) j += 1;
+    std.mem.copyForwards(u8, ask_queue[j .. ask_queue_len - 1], ask_queue[j + 1 .. ask_queue_len]);
+    ask_queue_len -= 1;
+    inline for (agent_grants.len..agent_caps) |kk| if (kk == k) {
+        const name = comptime agentGrant(kk).name;
+        if (!yes) {
+            ask_state[k] = .refused;
+            g.record("owner_answered", .{ .service = name, .granted = false });
+            return null;
+        }
+        const e = envoy_index.?;
+        makeAgentLease(kk) catch {
+            ask_state[k] = .refused;
+            g.record("owner_answered", .{ .service = name, .granted = false, .err = "lease_failed" });
+            return .failed;
+        };
+        mint(domains[e].cnode, D.Slot.first_agent + kk, agent_leases[kk], .{ .send = true, .grant = true }, 0) catch {
+            ask_state[k] = .refused;
+            return .failed;
+        };
+        ask_state[k] = .approved;
+        g.record("owner_answered", .{ .service = name, .granted = true });
+        g.record("agent_ask", .{ .service = name, .granted = true, .slot = D.Slot.first_agent + kk });
+    };
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -875,12 +975,15 @@ export fn stewardMain(bi: *const abi.BootInfo) callconv(.c) noreturn {
                 }
             }
             if (m.tag.label == @backingInt(D.Lifecycle.ask)) switch (onAsk(i, m.w[0])) {
-                .slot => |s_| _ = g.reply(.{ .label = 0, .length = 1 }, .{s_}),
+                .slot => |s_| _ = g.reply(.{ .label = @backingInt(D.AskAnswer.granted), .length = 1 }, .{s_}),
+                .pending => _ = g.reply(.{ .label = @backingInt(D.AskAnswer.pending), .length = 0 }, .{}),
                 .refused => |why| {
                     g.record("agent_ask", .{ .index = m.w[0], .granted = false, .reason = @tagName(why) });
-                    _ = g.reply(.{ .label = 1, .length = 1 }, .{@backingInt(why)});
+                    _ = g.reply(.{ .label = @backingInt(D.AskAnswer.refused), .length = 1 }, .{@backingInt(why)});
                 },
             };
+            if (m.tag.label == @backingInt(D.Lifecycle.pending)) onPending(i);
+            if (m.tag.label == @backingInt(D.Lifecycle.decide)) onDecide(i, m.w[0], m.w[1] == 1);
         }
     }
 }

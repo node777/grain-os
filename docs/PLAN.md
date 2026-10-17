@@ -109,7 +109,8 @@ Built:
   against the ZON files they replace before those were removed.
 
 ### Left over from Phase 4
-- `ask` decided by a live owner prompt instead of manifest policy (with Seal).
+- ~~`ask` decided by a live owner prompt instead of manifest policy.~~ Done
+  (the `consent` domain asks at the console); the desktop prompt remains.
 - `observe` as a subscription to typed events, not a snapshot.
 - Descriptors carry no required rights yet; plans don't report a diff of
   service state.

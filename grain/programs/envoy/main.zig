@@ -851,6 +851,10 @@ fn verbUndo(o: *Out, req: Value) void {
     o.end("}");
 }
 
+/// Asks already put to the owner (audited once, however often the agent
+/// asks again while waiting).
+var asked: [D.max_agent_caps]bool = @splat(false);
+
 fn verbAsk(o: *Out, req: Value) void {
     const name = req.object.get("cap") orelse return err(o, "invalid_request", "ask needs \"cap\"");
     if (name != .string) return err(o, "invalid_request", "\"cap\" must be a string");
@@ -858,7 +862,20 @@ fn verbAsk(o: *Out, req: Value) void {
     const index = (@intFromPtr(c) - @intFromPtr(&caps[0])) / @sizeOf(Cap);
     const r = g.syscall(.call, D.Slot.steward, @bitCast(g.Tag{ .label = @backingInt(D.Lifecycle.ask), .length = 1 }), .{ index, 0, 0, 0, 0 });
     if (r.status != .ok) return err(o, @tagName(r.status), "Steward did not answer");
-    if (r.tag.label != 0) {
+    if (r.tag.label == @backingInt(D.AskAnswer.pending)) {
+        // The owner has been asked and has not answered: ask again later.
+        if (!asked[index]) _ = audit("ask", c.name(), "", "pending", false, @splat(0), @splat(0), 0);
+        asked[index] = true;
+        okResult(o);
+        o.obj();
+        o.field("granted");
+        o.boolean(false);
+        o.field("pending");
+        o.boolean(true);
+        o.end("}");
+        return;
+    }
+    if (r.tag.label != @backingInt(D.AskAnswer.granted)) {
         const why: D.AskRefusal = @fromBackingInt(@intCast(r.w[0]));
         _ = audit("ask", c.name(), "", @tagName(why), false, @splat(0), @splat(0), 0);
         return err(o, "refused", @tagName(why));

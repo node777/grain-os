@@ -32,7 +32,8 @@ domain console like driver {
     restart = on_fault
     device port { virtio = 3 }
     provides console { protocol = console.v1 }
-    # What the owner types: only the store (for the passphrase) reads it.
+    # What the owner types: only the store (the passphrase) and consent (the
+    # owner's answers to the agent's asks) read it.
     provides input { protocol = input.v1 }
 }
 
@@ -53,6 +54,8 @@ domain flaky like dev {
 domain hello like dev {
     program = hello
     kind = task
+    # One greeting, then it exits: half a driver's share is plenty.
+    budget = 500us
     uses console { from = console.console, protocol = console.v1 }
     uses entropy { from = rng.entropy, protocol = entropy.v1 }
 }
@@ -83,6 +86,18 @@ domain envoy like dev {
     uses registry { from = registry.registry, protocol = registry.v1 }
     uses ledger { from = ledger.ledger, protocol = ledger.v1 }
     uses kumara { from = kumara.kumara, protocol = kumara.v1 }
+}
+
+# Puts the agent's asks to the owner on the console and reads the answer.
+# Without a console it is skipped, and every ask is refused.
+domain consent like dev {
+    program = consent
+    priority = 100
+    # It polls a few times a second and otherwise sleeps.
+    budget = 200us
+    period = 10ms
+    uses console { from = console.console, protocol = console.v1 }
+    uses input { from = console.input, protocol = input.v1 }
 }
 
 # The content store. It drives its disk itself; without a disk it is skipped.
@@ -206,9 +221,11 @@ domain checker like dev {
 }
 
 # The agent holds these leases from boot, and may ask for the askable ones
-# once each. It never holds anything else.
+# once each; the owner answers each ask. It never holds anything else.
 agent {
     envoy = envoy
+    # Every askable service is put to the owner first (domain consent).
+    owner = consent
     grant echo { from = flaky.echo, protocol = echo.v1, duration = 15s }
     grant store { from = store.kv, protocol = kv.v1 }
     grant console { from = console.console, protocol = console.v1, uses = 20 }
