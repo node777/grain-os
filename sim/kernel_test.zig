@@ -314,6 +314,21 @@ test "interrupts arrive as signals and stay masked until acked" {
     try std.testing.expect(!machine.arch.irq_masked[10]);
 }
 
+test "on a GIC, the kernel's own interrupt lines are refused" {
+    // An Arm platform: lines below 32 are IPIs and per-CPU timers.
+    var plat = machine.arch.platform(1, ram_size);
+    plat.irq_first = 32;
+    plat.irq_end = 64;
+    var m = try Machine.bootOn(1, ram_size, plat);
+    defer m.deinit();
+    try m.check();
+    for ([_]u64{ 0, 27, 31, 64 }) |line|
+        try expectEqual(abi.Status.invalid_argument, (try m.invoke(0, S.irq_control, abi.IrqControlMethod.get, &.{ line, 102 })).status);
+    try expectEqual(abi.Status.ok, (try m.invoke(0, S.irq_control, abi.IrqControlMethod.get, &.{ 32, 102 })).status);
+    try expectEqual(abi.Status.ok, (try m.invoke(0, S.irq_control, abi.IrqControlMethod.get, &.{ 63, 103 })).status);
+    try m.check();
+}
+
 test "destroying a server aborts its waiting caller" {
     var m = try bootMachine();
     defer m.deinit();

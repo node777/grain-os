@@ -9,9 +9,17 @@ Grain is designed to be **intimate** (local-first, owner-held keys),
 authority, a minimal kernel), **clear** (typed, self-describing interfaces;
 an audit ledger), and **loyal** (it answers to its owner only).
 
-RISC-V is the primary target; aarch64 and x86_64 follow.
+RISC-V is the primary target; aarch64 runs the kernel; x86_64 follows.
 
-> Status: **Phase 7: the social layer.** Grain instances find each other on
+> Status: **Phase 8: reach.** Grain drives the hardware a PC has as well
+> as virtio: Steward owns the PCI Express bus and hands each function to
+> the domain the manifest names; NVMe storage, Intel Ethernet, a linear
+> framebuffer, and USB keyboards and tablets over xHCI each have a native
+> driver in the domain that uses them. Caravan runs on Arm (aarch64, QEMU
+> virt) as well as RISC-V: the same portable core passes the same kernel
+> suite on both.
+>
+> Phase 7: the social layer. Grain instances find each other on
 > the network and open sessions keyed by their identities (Noise XX; the
 > identity key never leaves Kumara). An owner lends another person a hosted
 > application or a file: a sturdy reference backed by a kernel lease, used

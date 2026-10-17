@@ -30,10 +30,23 @@ pub fn makeTable(pa: u64) u64 {
     return ((pa >> page_shift) << 10) | pte_v;
 }
 
+/// A user leaf: what the core asks for, in any format.
+pub const Leaf = struct {
+    pa: u64,
+    /// 0 for a page, 1 for a megapage, 2 for a gigapage.
+    level: u8,
+    read: bool,
+    write: bool,
+    execute: bool,
+    /// Device memory. Sv39 needs nothing here: the platform's physical
+    /// memory attributes already make device ranges uncached.
+    device: bool,
+};
+
 /// A user leaf. A and D are preset: hardware without Svadu would otherwise
 /// fault on first access.
-pub fn makeLeaf(pa: u64, r: bool, w: bool, x: bool) u64 {
-    return ((pa >> page_shift) << 10) | perms(r, w, x) | pte_u | pte_a | pte_d | pte_v;
+pub fn makeLeaf(l: Leaf) u64 {
+    return ((l.pa >> page_shift) << 10) | perms(l.read, l.write, l.execute) | pte_u | pte_a | pte_d | pte_v;
 }
 
 /// A global kernel leaf (no U bit).
@@ -59,7 +72,7 @@ pub fn address(pte: u64) u64 {
 
 test "encode and decode" {
     const std = @import("std");
-    const l = makeLeaf(0x8020_3000, true, true, false);
+    const l = makeLeaf(.{ .pa = 0x8020_3000, .level = 0, .read = true, .write = true, .execute = false, .device = false });
     try std.testing.expect(isValid(l) and isLeaf(l));
     try std.testing.expectEqual(@as(u64, 0x8020_3000), address(l));
     try std.testing.expect(l & pte_u != 0 and l & pte_x == 0);

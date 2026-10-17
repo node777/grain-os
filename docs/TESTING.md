@@ -8,7 +8,7 @@ terminal, by a human or an AI, with a pass or fail answer in seconds.**
 | Tool | Version | Why |
 |---|---|---|
 | Zig | 0.17.0 (pinned) | Compiler, build system, cross-compiler, host test runner |
-| QEMU | 8.2+ (`qemu-system-riscv64`, later `-x86_64`, `-aarch64`) | The machine. 9.2+ is needed later for the RISC-V IOMMU and newer AIA models. |
+| QEMU | 8.2+ (`qemu-system-riscv64`, `-aarch64`; later `-x86_64`) | The machine. 9.2+ is needed later for the RISC-V IOMMU and newer AIA models. |
 | OpenSBI | the one bundled with QEMU (`-bios default`) | M-mode firmware on RISC-V |
 | gdb-multiarch | any | Source-level kernel debugging over QEMU's GDB stub |
 | Python 3 | 3.10+ | Test harness and, later, the Envoy driver |
@@ -20,7 +20,7 @@ terminal, by a human or an AI, with a pass or fail answer in seconds.**
 ```sh
 zig build test        # host: unit tests, kernel scenarios, manifest, image, IDL, Brix, Kumara,
                       # generation format, and Tablecloth with its crash simulator; a short simulator run
-zig build qemu-test   # QEMU riscv64, 2 harts: kernel suite; the dev system; the dev system on a disk,
+zig build qemu-test   # QEMU riscv64, 2 harts: kernel suite (and again on aarch64); the dev system; the dev system on a disk,
                       # booted twice; an agent driving Envoy; the desktop through QMP; two instances
                       # meeting and sharing (tools/pair.py); the faults system;
                       # generations through Aurora with power cuts; a broken generation given up;
@@ -66,6 +66,10 @@ The four layers, from fastest to most real:
    while it runs on the other hart, and a cross-hart call. Results are
    `@grain test ...` records, and the exit status comes from the test
    finisher.
+4b. **QEMU, kernel suite on Arm** (`caravan-aarch64-ktest`, harness
+   `--arch aarch64`): the same program, built for aarch64, on QEMU virt with
+   two Cortex-A72 cores. PSCI's power-off carries no status, so the
+   `summary failed=0` record decides.
 
 5. **QEMU, whole systems** (`caravan`, `caravan-faults`): Steward boots a
    manifest, and the harness checks the records. For the dev system that

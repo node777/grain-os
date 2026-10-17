@@ -20,6 +20,7 @@ pub const nvme = @import("nvme.zig");
 pub const e1000 = @import("e1000.zig");
 pub const bochs = @import("bochs.zig");
 pub const xhci = @import("xhci.zig");
+pub const cpu = @import("cpu.zig");
 
 /// Options for a program's root (`pub const std_options = grain.std_options;`):
 /// Caravan's pages are 4 KiB, which std cannot know for a freestanding target.
@@ -49,32 +50,15 @@ pub const Result = struct {
 
 /// The raw system call: a7 = call, a0 = capability, a1 = tag/method, a2..a6 = words.
 pub inline fn syscall(number: abi.Syscall, a0: usize, a1: usize, w: [5]usize) Result {
-    var r0: usize = undefined;
-    var r1: usize = undefined;
-    var r2: usize = undefined;
-    var r3: usize = undefined;
-    var r4: usize = undefined;
-    var r5: usize = undefined;
-    var r6: usize = undefined;
-    var r7: usize = undefined;
-    asm volatile ("ecall"
-        : [r0] "={a0}" (r0),
-          [r1] "={a1}" (r1),
-          [r2] "={a2}" (r2),
-          [r3] "={a3}" (r3),
-          [r4] "={a4}" (r4),
-          [r5] "={a5}" (r5),
-          [r6] "={a6}" (r6),
-          [r7] "={a7}" (r7),
-        : [a0] "{a0}" (a0),
-          [a1] "{a1}" (a1),
-          [a2] "{a2}" (w[0]),
-          [a3] "{a3}" (w[1]),
-          [a4] "{a4}" (w[2]),
-          [a5] "{a5}" (w[3]),
-          [a6] "{a6}" (w[4]),
-          [a7] "{a7}" (@backingInt(number)),
-        : .{ .memory = true });
+    const r = cpu.syscall(.{ a0, a1, w[0], w[1], w[2], w[3], w[4], @backingInt(number) });
+    const r0 = r[0];
+    const r1 = r[1];
+    const r2 = r[2];
+    const r3 = r[3];
+    const r4 = r[4];
+    const r5 = r[5];
+    const r6 = r[6];
+    const r7 = r[7];
     return .{ .status = @fromBackingInt(@intCast(r0)), .tag = @bitCast(r1), .w = .{ r2, r3, r4, r5, r6 }, .badge = r7 & 0xffff_ffff, .protocol = @truncate(r7 >> 32), .signalled = r7 & abi.recv_signalled != 0 };
 }
 
@@ -138,21 +122,9 @@ pub fn bindSignal(sig: CPtr) Status {
 // ---------------------------------------------------------------------------
 // Counters (user-readable on Caravan: scounteren enables them).
 
-pub inline fn time() u64 {
-    return asm volatile ("rdtime %[r]"
-        : [r] "=r" (-> u64),
-    );
-}
-pub inline fn cycles() u64 {
-    return asm volatile ("rdcycle %[r]"
-        : [r] "=r" (-> u64),
-    );
-}
-pub inline fn instret() u64 {
-    return asm volatile ("rdinstret %[r]"
-        : [r] "=r" (-> u64),
-    );
-}
+pub const time = cpu.time;
+pub const cycles = cpu.cycles;
+pub const instret = cpu.instret;
 
 // ---------------------------------------------------------------------------
 // Debug console and structured records
@@ -277,10 +249,7 @@ pub fn exportStart() void {
 }
 
 fn startStub() linksection(".text._start") callconv(.naked) noreturn {
-    asm volatile (
-        \\ call grainStartMain
-        \\ unimp
-    );
+    asm volatile (cpu.callStub("grainStartMain"));
 }
 
 fn startMain() callconv(.c) noreturn {
@@ -300,7 +269,7 @@ pub const panic = std.debug.FullPanic(panicFn);
 fn panicFn(msg: []const u8, ret: ?usize) noreturn {
     @branchHint(.cold);
     log("panic", .{ .msg = msg, .pc = klog.hex(ret orelse @returnAddress()) });
-    while (true) asm volatile ("unimp");
+    while (true) cpu.trap();
 }
 
 // ---------------------------------------------------------------------------
@@ -430,6 +399,4 @@ pub fn physOf(frame: CPtr) !u64 {
     return r.w[0];
 }
 
-pub inline fn fence() void {
-    asm volatile ("fence rw, rw" ::: .{ .memory = true });
-}
+pub const fence = cpu.fence;

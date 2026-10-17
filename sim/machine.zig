@@ -25,10 +25,14 @@ pub const Machine = struct {
     root: *Thread,
 
     pub fn boot(harts: u32, ram_size: usize) !Machine {
+        return bootOn(harts, ram_size, arch.platform(harts, ram_size));
+    }
+
+    /// Boot on a platform the test changed (from `arch.platform`).
+    pub fn bootOn(harts: u32, ram_size: usize, plat: core.fdt.Platform) !Machine {
         try arch.init(ram_size);
         const k = try std.heap.page_allocator.create(K);
         k.* = .{};
-        const plat = arch.platform(harts, ram_size);
         const elf_bytes = arch.fakeRootElf();
         try k.boot(.{ .platform = &plat, .reserved = &.{}, .root_elf = &elf_bytes, .now = 1000, .root_budget_ticks = 100_000 });
         for (0..harts) |h| k.hartOnline(@intCast(h), 1000);

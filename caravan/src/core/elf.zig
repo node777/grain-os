@@ -75,6 +75,7 @@ pub const SegmentIterator = struct {
 };
 
 pub const machine_riscv: u16 = 243;
+pub const machine_aarch64: u16 = 183;
 
 fn rd(comptime T: type, b: []const u8, off: usize) T {
     return std.mem.readInt(T, b[off..][0..@sizeOf(T)], .little);

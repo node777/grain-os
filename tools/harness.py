@@ -35,6 +35,14 @@ QEMU_RISCV64 = [
     "-icount", "shift=0,sleep=off",
 ]
 
+# Arm: QEMU loads the ELF and enters it at EL1, PSCI through hvc (no
+# firmware), the device tree at the start of RAM.
+QEMU_AARCH64 = [
+    "qemu-system-aarch64", "-machine", "virt", "-cpu", "cortex-a72",
+    "-m", "256M", "-nographic", "-no-reboot",
+    "-icount", "shift=0,sleep=off",
+]
+
 
 def record_prefix(line):
     for p in PREFIXES:
@@ -242,6 +250,8 @@ def main():
     ap.add_argument("--raw", action="store_true", help="also print non-record console output")
     ap.add_argument("--timeout", type=float, default=60.0)
     ap.add_argument("--smp", default="2", help="number of harts")
+    ap.add_argument("--arch", choices=["riscv64", "aarch64"], default="riscv64",
+                    help="the kernel's architecture (QEMU virt either way)")
     ap.add_argument("--expect", action="append", default=[],
                     help='record that must appear, e.g. "test name=timer_interrupt result=pass"')
     ap.add_argument("--qemu-arg", action="append", default=[], help="extra QEMU argument")
@@ -370,7 +380,7 @@ def run_boot(args, boot, tmpdir, disk):
         # in device-tree order (manifest: instance = 1).
         devices += ["-device", "virtio-serial-device,id=vser1", "-chardev", f"socket,id=envoy0,path={envoy_path},server=on,wait=off",
                     "-device", "virtconsole,chardev=envoy0,bus=vser1.0"]
-    qemu = list(QEMU_RISCV64)
+    qemu = list(QEMU_AARCH64 if args.arch == "aarch64" else QEMU_RISCV64)
     if args.window:
         # A window for the screen; the serial console stays on stdout.
         qemu.remove("-nographic")

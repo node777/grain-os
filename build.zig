@@ -29,6 +29,13 @@ pub fn build(b: *std.Build) void {
     });
     // User programs get the same baseline for now (no FP context switching yet).
     const user_target = kernel_target;
+    // The Arm port: no floating point or SIMD either (the kernel turns it off).
+    const arm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .aarch64,
+        .os_tag = .freestanding,
+        .abi = .none,
+        .cpu_features_sub = std.Target.aarch64.featureSet(&.{ .fp_armv8, .neon }),
+    });
 
     // ---- Shared modules ---------------------------------------------------
     // abi: the system-call contract. core: the portable kernel (imports abi
@@ -50,12 +57,17 @@ pub fn build(b: *std.Build) void {
     const fdt_mod = b.createModule(.{ .root_source_file = b.path("caravan/src/core/fdt.zig") });
 
     const UserProgram = struct {
+        /// RISC-V's default reaches only the low 2 GiB; Arm's covers 4 GiB around pc.
+        fn codeModel(target: std.Build.ResolvedTarget) std.builtin.CodeModel {
+            return if (target.result.cpu.arch == .riscv64) .medium else .default;
+        }
+
         fn add(bb: *std.Build, name: []const u8, root: []const u8, target: std.Build.ResolvedTarget, opt: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
             const exe = bb.addExecutable(.{ .name = name, .root_module = bb.createModule(.{
                 .root_source_file = bb.path(root),
                 .target = target,
                 .optimize = opt,
-                .code_model = .medium,
+                .code_model = codeModel(target),
                 .imports = imports,
             }) });
             exe.setLinkerScript(bb.path("grain/user.ld"));
@@ -171,11 +183,12 @@ pub fn build(b: *std.Build) void {
     // caravan-ktest: the kernel with the kernel test suite as root task
     const Kernel = struct {
         fn add(bb: *std.Build, name: []const u8, root: *std.Build.Step.Compile, packer: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, opt: std.builtin.OptimizeMode, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
+            const arch = @tagName(target.result.cpu.arch);
             const mod = bb.createModule(.{
                 .root_source_file = bb.path("caravan/src/main.zig"),
                 .target = target,
                 .optimize = opt,
-                .code_model = .medium,
+                .code_model = UserProgram.codeModel(target),
                 .red_zone = false,
                 .strip = false,
                 .imports = imports,
@@ -187,7 +200,7 @@ pub fn build(b: *std.Build) void {
             compact.addFileArg(root.getEmittedBin());
             mod.addAnonymousImport("root_task.elf", .{ .root_source_file = compact.addOutputFileArg("root_task.elf") });
             const k = bb.addExecutable(.{ .name = name, .root_module = mod });
-            k.setLinkerScript(bb.path("caravan/src/arch/riscv64/link.ld"));
+            k.setLinkerScript(bb.path(bb.fmt("caravan/src/arch/{s}/link.ld", .{arch})));
             k.entry = .{ .symbol_name = "_start" };
             bb.installArtifact(k);
             return k;
@@ -221,6 +234,17 @@ pub fn build(b: *std.Build) void {
     const steward_next = System.steward(b, "next", "next", system_zon, pack, &programs, &program_names, user_target, optimize, steward_imports);
     const kernel_next = Kernel.add(b, "caravan-next", steward_next, pack, kernel_target, optimize, kernel_imports);
     const kernel_faults = Kernel.add(b, "caravan-faults", steward_faults, pack, kernel_target, optimize, kernel_imports);
+
+    // The Arm port: the same core and the same kernel test suite.
+    const core_arm = b.createModule(.{ .root_source_file = b.path("caravan/src/core/core.zig"), .target = arm_target, .optimize = optimize, .red_zone = false });
+    core_arm.addImport("abi", abi_mod);
+    const vmsa_mod = b.createModule(.{ .root_source_file = b.path("caravan/src/arch/aarch64/vmsa.zig") });
+    const ktest_arm_root = UserProgram.add(b, "ktest-aarch64", "grain/ktest/main.zig", arm_target, optimize, user_imports);
+    const ktest_arm = Kernel.add(b, "caravan-aarch64-ktest", ktest_arm_root, pack, arm_target, optimize, &.{
+        .{ .name = "core", .module = core_arm },
+        .{ .name = "abi", .module = abi_mod },
+        .{ .name = "vmsa", .module = vmsa_mod },
+    });
 
     // Devices for the system image. virtio-rng reads a fixed pattern file, so
     // runs stay deterministic; the virtio console writes to a file the
@@ -271,6 +295,14 @@ pub fn build(b: *std.Build) void {
     qtest_kernel.stdio = .inherit;
     qtest_kernel.has_side_effects = true;
 
+    // The same kernel suite on Arm (QEMU virt, Cortex-A72). PSCI carries
+    // no exit status, so the records decide.
+    const qtest_arm = b.addSystemCommand(&.{ "python3", "tools/harness.py", "--arch", "aarch64", "--timeout", qemu_timeout, "--smp", smp, "--expect", "summary failed=0", "--expect", "long_write_ok text=01234567890123456789012345678901234567890123456789012345678901234567890123456789" });
+    qtest_arm.addArtifactArg(ktest_arm);
+    qtest_arm.stdio = .inherit;
+    qtest_arm.has_side_effects = true;
+    qtest_arm.step.dependOn(&qtest_kernel.step);
+
     const qtest_system = b.addSystemCommand(&.{
         "python3",                                           "tools/harness.py",
         "--timeout",                                         qemu_timeout,
@@ -292,7 +324,7 @@ pub fn build(b: *std.Build) void {
     qtest_system.addArtifactArg(kernel);
     qtest_system.stdio = .inherit;
     qtest_system.has_side_effects = true;
-    qtest_system.step.dependOn(&qtest_kernel.step);
+    qtest_system.step.dependOn(&qtest_arm.step);
 
     // Storage: the dev system with a disk, booted twice. The first boot finds
     // a blank store and takes a new passphrase; the second refuses a wrong
@@ -587,6 +619,8 @@ pub fn build(b: *std.Build) void {
 
     const sv39_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("caravan/src/arch/riscv64/sv39.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(sv39_tests).step);
+    const vmsa_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("caravan/src/arch/aarch64/vmsa.zig"), .target = host, .optimize = optimize }) });
+    test_step.dependOn(&b.addRunArtifact(vmsa_tests).step);
 
     const schema_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/manifest/schema.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(schema_tests).step);

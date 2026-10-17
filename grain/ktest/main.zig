@@ -18,10 +18,7 @@ var ut: g.CPtr = 0; // the largest RAM untyped
 
 export fn _start() linksection(".text._start") callconv(.naked) noreturn {
     // The kernel sets sp and passes the boot-info address in a0.
-    asm volatile (
-        \\ call rootMain
-        \\ unimp
-    );
+    asm volatile (g.cpu.callStub("rootMain"));
 }
 
 fn slot() g.CPtr {
@@ -475,9 +472,31 @@ fn findDeviceUntyped(base: u64) ?g.CPtr {
     return null;
 }
 
+/// The board's UART (QEMU virt): a 16550 on RISC-V, a PL011 on Arm.
+const arm = @import("builtin").cpu.arch == .aarch64;
+const uart_base: u64 = if (arm) 0x0900_0000 else 0x1000_0000;
+const uart_irq: usize = if (arm) 33 else 10;
+
+/// Make the UART raise its interrupt now (transmitter empty), or stop.
+fn uartTxInterrupt(va: usize, on: bool) void {
+    if (arm) {
+        const imsc: *volatile u32 = @ptrFromInt(va + 0x38);
+        const icr: *volatile u32 = @ptrFromInt(va + 0x44);
+        const dr: *volatile u32 = @ptrFromInt(va);
+        if (on) {
+            imsc.* = 1 << 5;
+            dr.* = '\n'; // a sent byte raises the transmit interrupt
+        } else {
+            imsc.* = 0;
+            icr.* = 1 << 5;
+        }
+    } else {
+        const ier: *volatile u8 = @ptrFromInt(va + 1);
+        ier.* = if (on) 0x02 else 0x00;
+    }
+}
+
 fn testUartInterrupt() !void {
-    const uart_base: u64 = 0x1000_0000;
-    const uart_irq: usize = 10;
     const dev = findDeviceUntyped(uart_base) orelse return error.NoUartUntyped;
     const frame = slot();
     try expectStatus(.ok, g.invoke(dev, abi.UntypedMethod.retype, .{ Kind.frame, 12, frame }).status);
@@ -490,10 +509,9 @@ fn testUartInterrupt() !void {
     try expectStatus(.ok, g.invoke(S.irq_control, abi.IrqControlMethod.get, .{ uart_irq, irq }).status);
     try expectStatus(.ok, g.invoke(irq, abi.IrqMethod.set_signal, .{badged}).status);
     // Enable the "transmitter empty" interrupt: it fires straight away.
-    const ier: *volatile u8 = @ptrFromInt(va + 1);
-    ier.* = 0x02;
+    uartTxInterrupt(va, true);
     const r = g.wait(sig);
-    ier.* = 0x00;
+    uartTxInterrupt(va, false);
     try expectStatus(.ok, r.status);
     try check(r.w[0] == 1 << 10);
     try expectStatus(.ok, g.invoke(irq, abi.IrqMethod.ack, .{}).status);
@@ -522,12 +540,12 @@ fn testForeignTeardown() !void {
     const code_va: usize = 0x10000;
     try expectStatus(.ok, g.invoke(vs, abi.VSpaceMethod.map_table, .{ l1, code_va }).status);
     try expectStatus(.ok, g.invoke(vs, abi.VSpaceMethod.map_table, .{ l0, code_va }).status);
-    // The program is one instruction, `j .`, written through a temporary
-    // mapping in our own address space.
+    // The program is one instruction, `j .` (`b .`), written through a
+    // temporary mapping in our own address space.
     const code = try retypeFrom(region, .frame, 12);
     const tmp_va: usize = 0x6200_0000;
     try mapPage(code, tmp_va, rw);
-    @as(*volatile u32, @ptrFromInt(tmp_va)).* = 0x0000006f;
+    @as(*volatile u32, @ptrFromInt(tmp_va)).* = g.cpu.spin_instruction;
     try expectStatus(.ok, g.invoke(S.vspace, abi.VSpaceMethod.unmap, .{tmp_va}).status);
     const rx: abi.Rights = .{ .read = true, .execute = true };
     try expectStatus(.ok, g.invoke(vs, abi.VSpaceMethod.map_frame, .{ code, code_va, rx.bits() }).status);

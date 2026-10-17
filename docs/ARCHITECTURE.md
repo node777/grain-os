@@ -711,10 +711,31 @@ enforces the limits, and an exhausted or expired lease fails with
   specifications and run on QEMU's models; an RVA23 board is the first
   target once one is at hand.
 - **Ports:** `arch/` is a small interface (boot entry, trap entry and exit,
-  page-table format, timer, IPI, interrupt controller, context switch).
+  page-table format, timer, IPI, interrupt controller, context switch):
+  the core's half is listed at the top of `core/kernel.zig`, the glue's at
+  the top of `main.zig`, which is shared by every architecture. User space
+  differs only in `grain/lib/cpu.zig` (the system call, counters, fence,
+  entry stub); the ABI names registers a0..a7, which are x0..x7 on Arm.
   RISC-V gets first-class optimisation (Sv48, Svpbmt, AIA/IMSIC, Zicbom,
-  vector state handled lazily); aarch64 and x86_64 follow the same
-  interface.
+  vector state handled lazily).
+- **aarch64** (*built*, `caravan/src/arch/aarch64`): the kernel runs at EL1
+  (dropping from EL2 if entered there) in TTBR1, mapped exactly as on
+  RISC-V (the physmap at `0xffff_ffc0_0000_0000`, the image at
+  `kernel_offset = 0xffff_ffff_0000_0000`); user address spaces are TTBR0
+  tables holding user mappings only, in the same 39-bit layout. Leaves are
+  made by the page format (`vmsa.zig`) from what the core asks for (level,
+  rights, device or normal memory: the core now says which, since Arm maps
+  device memory with its own attribute). TLB maintenance is broadcast in
+  hardware, so `flushTlb` needs no IPIs; `retireRoot` still waits for the
+  other cores to leave a dying table. A GICv2 (software interrupt 0 is the
+  IPI, per-CPU 27 the virtual timer, shared interrupts 32 and up are what
+  user space may hold), the virtual counter as the timebase, PSCI for
+  starting cores and powering off, a PL011 for the kernel's records. The
+  user's counters are the virtual counter and the PMU (cycles, and
+  INST_RETIRED in event counter 0). No floating point or SIMD, as on
+  RISC-V. *Not yet:* ASIDs (a switch flushes this core's TLB), GICv3,
+  cache maintenance for real hardware (QEMU needs none), Steward and the
+  full system on Arm. x86_64 is next.
 
 ### 3.7 Kumara, Mycelium and Comlink: identity and the social layer
 

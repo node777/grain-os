@@ -13,8 +13,9 @@
 //!                             fn get(*const Context, Reg) usize
 //!                             fn set(*Context, Reg, usize) void
 //!   Paging                  page-table format: levels, entries, index(),
-//!                           makeTable(), makeLeaf(), isValid(), isLeaf(),
-//!                           address(), levelShift(), user_top, user_root_entries
+//!                           makeTable(), makeLeaf(Leaf{pa, level, read, write,
+//!                           execute, device}), isValid(), address(),
+//!                           levelShift(), user_top, user_root_entries
 //!   physToVirt(u64) usize   kernel address of physical memory
 //!   initRootTable(*[N]u64)  install kernel mappings in a new root table
 //!   flushTlb(root)          after a change to tables under root table `root`
@@ -333,6 +334,8 @@ pub fn Kernel(comptime A: type) type {
         timebase_hz: u64 = 0,
         irqs: [max_irqs]IrqState = @splat(.{}),
         irq_count: u32 = 0,
+        /// Lines below this are the kernel's own (a GIC's software and per-CPU interrupts).
+        irq_first: u32 = 1,
         irq_control: ObjId = 0,
         sched_control: ObjId = 0,
         debug_console: ObjId = 0,
@@ -451,7 +454,9 @@ pub fn Kernel(comptime A: type) type {
             k.now = cfg.now;
             k.timebase_hz = plat.timebase_hz;
             k.hart_count = @intCast(@min(max_harts, @max(1, plat.harts_len)));
-            k.irq_count = @min(plat.plic_ndev + 1, max_irqs);
+            const lines = plat.deviceIrqs();
+            k.irq_first = lines.first;
+            k.irq_count = @min(lines.end, max_irqs);
 
             var free: [max_free]Range = undefined;
             var nfree: usize = 0;
@@ -612,6 +617,10 @@ pub fn Kernel(comptime A: type) type {
                 const dst: [*]u8 = @ptrFromInt(A.physToVirt(k.table[f].addr));
                 const n = @min(page_size, dtb_len - p * page_size);
                 @memcpy(dst[0..n], cfg.dtb[p * page_size ..][0..n]);
+                // Whole but shorter than its header says (free space left
+                // out): the copy's header says how long it is.
+                if (p == 0 and dtb_len == cfg.dtb.len and dtb_len >= 8 and std.mem.readInt(u32, dst[4..8], .big) > dtb_len)
+                    std.mem.writeInt(u32, dst[4..8], @intCast(dtb_len), .big);
                 try k.mapRootPage(ut, vspace, f, L.dtb + p * page_size, ro);
             }
 
@@ -954,7 +963,14 @@ pub fn Kernel(comptime A: type) type {
             if (pt.shadow[idx] != 0 or P.isValid(pt.ptes[idx])) return error.AlreadyMapped;
             const fe = &k.table[frame];
             if (fe.link != 0) return error.AlreadyMapped;
-            pt.ptes[idx] = P.makeLeaf(fe.addr, rights.read, rights.write, rights.execute);
+            pt.ptes[idx] = P.makeLeaf(.{
+                .pa = fe.addr,
+                .level = k.table[tbl].size_bits,
+                .read = rights.read,
+                .write = rights.write,
+                .execute = rights.execute,
+                .device = fe.flags & flag_device != 0,
+            });
             pt.shadow[idx] = frame;
             fe.link = tbl;
             fe.flags = (fe.flags & flag_device) | @as(u16, @intCast(idx));
@@ -2183,7 +2199,7 @@ pub fn Kernel(comptime A: type) type {
             _ = std.enums.fromInt(abi.IrqControlMethod, method) orelse return error.UnknownMethod;
             try need(c, .{ .configure = true });
             const line = arg(t, .a2);
-            if (line == 0 or line >= k.irq_count) return error.InvalidArgument;
+            if (line < k.irq_first or line >= k.irq_count) return error.InvalidArgument;
             const dest = try k.slot(t, arg(t, .a3));
             if (!dest.isNull()) return error.SlotOccupied;
             const st = &k.irqs[@intCast(line)];
@@ -2340,6 +2356,9 @@ pub fn Kernel(comptime A: type) type {
                 if (free > k.table.len) return "free list cycles";
             }
             if (free != k.free_count) return "free count mismatch";
+            for (k.table) |e| {
+                if (e.kind == .irq and (e.addr < k.irq_first or e.addr >= k.irq_count)) return "an Irq object holds one of the kernel's own lines";
+            }
 
             var running: [max_harts]u32 = @splat(0);
             for (k.table, 0..) |e, i| {

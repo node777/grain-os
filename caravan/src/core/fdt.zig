@@ -60,6 +60,15 @@ pub const Fdt = struct {
         return self.blob.len;
     }
 
+    /// The bytes that hold anything: a blob may declare free space after
+    /// its blocks (QEMU's Arm tree declares 1 MiB).
+    pub fn usedSize(self: Fdt) usize {
+        const base = @intFromPtr(self.blob.ptr);
+        const struct_end = @intFromPtr(self.structs.ptr) + self.structs.len - base;
+        const strings_end = @intFromPtr(self.strings.ptr) + self.strings.len - base;
+        return @max(struct_end, strings_end, self.rsvmap_off);
+    }
+
     /// Entries of the memory reservation block (address, size).
     pub fn reservations(self: Fdt) ReservationIterator {
         return .{ .fdt = self, .off = self.rsvmap_off };
@@ -184,7 +193,7 @@ pub const Walker = struct {
 pub const max_memory = 8;
 pub const max_reserved = 16;
 pub const max_harts = 16;
-pub const max_devices = 32;
+pub const max_devices = 64;
 
 pub const Hart = struct {
     id: u32,
@@ -208,6 +217,18 @@ pub const Platform = struct {
     test_finisher: ?u64 = null,
     uart: ?Range = null,
     uart_irq: ?u32 = null,
+    /// The UART is an Arm PL011 (else a 16550).
+    uart_pl011: bool = false,
+    /// Arm GICv2: distributor and CPU interface.
+    gic_dist: ?Range = null,
+    gic_cpu: ?Range = null,
+    /// Arm PSCI firmware calls, and whether they go through `smc` (else `hvc`).
+    psci: bool = false,
+    psci_smc: bool = false,
+    /// Device interrupt lines, when not a PLIC's (set by the arch layer for
+    /// a GIC, which reports its own size): [irq_first, irq_end).
+    irq_first: u32 = 1,
+    irq_end: u32 = 0,
     /// MMIO ranges of every device node with a `reg` outside RAM, to hand to
     /// userspace as device memory.
     devices: [max_devices]Range = undefined,
@@ -224,6 +245,13 @@ pub const Platform = struct {
     }
     pub fn deviceRanges(self: *const Platform) []const Range {
         return self.devices[0..self.devices_len];
+    }
+
+    /// The interrupt lines user space may hold: a PLIC's 1..ndev, or what
+    /// the arch layer set.
+    pub fn deviceIrqs(self: *const Platform) struct { first: u32, end: u32 } {
+        if (self.irq_end != 0) return .{ .first = self.irq_first, .end = self.irq_end };
+        return .{ .first = 1, .end = self.plic_ndev + 1 };
     }
 
     pub fn hartIndex(self: *const Platform, hart_id: u32) ?usize {
@@ -248,6 +276,8 @@ const NodeInfo = struct {
     status_ok: bool = true,
     phandle: u32 = 0,
     interrupts: ?u32 = null,
+    interrupts_prop: ?Prop = null,
+    method: ?[]const u8 = null,
     interrupts_extended: ?Prop = null,
     ndev: u32 = 0,
     timebase: ?u64 = null,
@@ -287,7 +317,11 @@ pub fn parsePlatform(fdt: Fdt) Error!Platform {
             if (eql(u8, prop.name, "device_type")) n.device_type = prop.str();
             if (eql(u8, prop.name, "status")) n.status_ok = eql(u8, prop.str(), "okay") or eql(u8, prop.str(), "ok");
             if (eql(u8, prop.name, "phandle")) n.phandle = prop.u32At(0) orelse 0;
-            if (eql(u8, prop.name, "interrupts")) n.interrupts = prop.u32At(0);
+            if (eql(u8, prop.name, "interrupts")) {
+                n.interrupts = prop.u32At(0);
+                n.interrupts_prop = prop;
+            }
+            if (eql(u8, prop.name, "method")) n.method = prop.str();
             if (eql(u8, prop.name, "interrupts-extended")) n.interrupts_extended = prop;
             if (eql(u8, prop.name, "riscv,ndev")) n.ndev = prop.u32At(0) orelse 0;
             if (eql(u8, prop.name, "interrupt-controller")) n.is_intc = true;
@@ -329,8 +363,28 @@ pub fn parsePlatform(fdt: Fdt) Error!Platform {
                         p.uart = first;
                         p.uart_irq = n.interrupts;
                     }
+                } else if (c.hasString("arm,pl011")) {
+                    if (p.uart == null) {
+                        p.uart = first;
+                        p.uart_pl011 = true;
+                        if (n.interrupts_prop) |ip| p.uart_irq = gicInterrupt(ip);
+                    }
+                } else if (c.hasString("arm,cortex-a15-gic") or c.hasString("arm,gic-400")) {
+                    if (n.reg) |r| {
+                        var regs: [2]Range = undefined;
+                        var nr: usize = 0;
+                        appendRegs(r, n.reg_cells, &regs, &nr);
+                        if (nr == 2) {
+                            p.gic_dist = regs[0];
+                            p.gic_cpu = regs[1];
+                        }
+                    }
+                } else if (c.hasString("arm,psci-0.2") or c.hasString("arm,psci-1.0") or c.hasString("arm,psci")) {
+                    p.psci = true;
+                    p.psci_smc = if (n.method) |m| std.mem.eql(u8, m, "smc") else false;
                 }
-                if (first) |f| if (n.status_ok and f.size > 0 and p.devices_len < max_devices) {
+                // Interrupt controllers stay the kernel's: never device memory.
+                if (!n.is_intc) if (first) |f| if (n.status_ok and f.size > 0 and p.devices_len < max_devices) {
                     p.devices[p.devices_len] = f;
                     p.devices_len += 1;
                 };
@@ -373,6 +427,15 @@ pub fn parsePlatform(fdt: Fdt) Error!Platform {
         }
     }
     return p;
+}
+
+/// An Arm GIC interrupt specifier (type, number, flags) as an interrupt ID:
+/// shared peripheral interrupts start at 32, per-CPU ones at 16.
+fn gicInterrupt(prop: Prop) ?u32 {
+    const kind = prop.u32At(0) orelse return null;
+    const number = prop.u32At(1) orelse return null;
+    if (prop.u32At(2) == null) return null;
+    return number + if (kind == 0) @as(u32, 32) else 16;
 }
 
 /// A PCI memory window: where the bus addresses `pci` appear to the CPU.
@@ -532,6 +595,28 @@ test "parse QEMU virt (2 harts, 256 MiB)" {
     try std.testing.expectEqual(Range{ .base = 0x1000_0000, .size = 0x100 }, p.uart.?);
     try std.testing.expectEqual(@as(?u32, 10), p.uart_irq);
     try std.testing.expect(p.devices_len >= 4);
+}
+
+test "parse QEMU virt for Arm (2 cores, GICv2, PSCI, PL011)" {
+    const fdt = try Fdt.init(@embedFile("testdata/qemu-virt-arm64-smp2.dtb"));
+    const p = try parsePlatform(fdt);
+    try std.testing.expectEqual(Range{ .base = 0x4000_0000, .size = 0x1000_0000 }, p.memory[0]);
+    try std.testing.expectEqual(@as(usize, 2), p.harts_len);
+    try std.testing.expectEqual(@as(u32, 1), p.harts[1].id);
+    try std.testing.expectEqual(Range{ .base = 0x0800_0000, .size = 0x1_0000 }, p.gic_dist.?);
+    try std.testing.expectEqual(Range{ .base = 0x0801_0000, .size = 0x1_0000 }, p.gic_cpu.?);
+    try std.testing.expect(p.psci and !p.psci_smc);
+    try std.testing.expect(p.uart_pl011);
+    try std.testing.expect(fdt.usedSize() <= fdt.totalSize() and fdt.usedSize() > 4096);
+    try std.testing.expectEqual(Range{ .base = 0x0900_0000, .size = 0x1000 }, p.uart.?);
+    try std.testing.expectEqual(@as(?u32, 33), p.uart_irq);
+    // Every virtio transport is device memory; the GIC is not.
+    var virtio: usize = 0;
+    for (p.deviceRanges()) |d| {
+        if (d.base >= 0x0a00_0000 and d.base < 0x0a00_4000) virtio += 1;
+        try std.testing.expect(d.base != 0x0800_0000);
+    }
+    try std.testing.expectEqual(@as(usize, 32), virtio);
 }
 
 test "the PCI host: configuration space, windows, interrupt routing" {

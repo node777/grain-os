@@ -59,6 +59,10 @@ pub const Frame = extern struct {
     x: [32]u64,
     sepc: u64,
     sstatus: u64,
+
+    pub fn pc(f: *const Frame) u64 {
+        return f.sepc;
+    }
 };
 
 const off_pc = @offsetOf(Context, "pc");
@@ -99,6 +103,7 @@ comptime {
                 \\    ld sp, {[ksp]d}(a0)
                 \\    ld tp, {[hl]d}(a0)
                 \\    csrw sscratch, zero
+                \\    li a1, 0
                 \\    call caravanUserTrap
                 \\    unimp
                 \\.Lfrom_kernel:
@@ -115,6 +120,7 @@ comptime {
                 \\    csrr t0, sstatus
                 \\    sd t0, 264(sp)
                 \\    mv a0, sp
+                \\    li a1, 0
                 \\    call caravanKernelTrap
                 \\    ld t0, 256(sp)
                 \\    csrw sepc, t0
@@ -149,24 +155,17 @@ comptime {
 pub extern fn caravanTrapEntry() callconv(.c) void;
 pub extern fn caravanResume(ctx: *Context) callconv(.c) noreturn;
 
-pub const Interrupt = enum { software, timer, external };
-
 pub const Cause = union(enum) {
-    interrupt: Interrupt,
+    /// The raw cause, for `interruptEvent`.
+    interrupt: u64,
     syscall,
     fault: core.kernel.Fault,
-    unknown_interrupt: u64,
 };
 
-const interrupt_bit: u64 = 1 << 63;
+pub const interrupt_bit: u64 = 1 << 63;
 
 pub fn decode(scause: u64, stval: u64, pc: u64) Cause {
-    if (scause & interrupt_bit != 0) return switch (scause & ~interrupt_bit) {
-        1 => .{ .interrupt = .software },
-        5 => .{ .interrupt = .timer },
-        9 => .{ .interrupt = .external },
-        else => .{ .unknown_interrupt = scause },
-    };
+    if (scause & interrupt_bit != 0) return .{ .interrupt = scause };
     const kind: @import("abi").FaultKind = switch (scause) {
         8 => return .syscall,
         0, 4, 6 => .misaligned,

@@ -198,11 +198,27 @@ Built:
 - Left for later: friend relays, persistent shares, petnames and signed
   introductions, sending only missing chunks.
 
-## Phase 8: reach
+## Phase 8: reach (done, as far as QEMU reaches)
 - Native drivers for personal hardware: NVMe, xHCI with USB HID and storage,
   display, Ethernet; then Wi-Fi.
 - RISC-V IOMMU; real-board bring-up (an RVA23 board first); aarch64 and
   x86_64 ports running the same suite on QEMU.
+- Built: PCI Express in Steward (ECAM enumeration, BAR placement, INTx
+  routing; drivers never touch configuration space); manifest devices named
+  by class with alternatives (`virtio = 2, pci = nvme`) and `extra` devices;
+  NVMe under Tablecloth; the Intel e1000 under Mycelium; a Bochs linear
+  framebuffer and xHCI with USB boot keyboards and tablets under Surf; the
+  aarch64 port of Caravan (EL1, GICv2, the generic timer, PSCI; the same
+  core, the same kernel suite).
+- Exit, met: the storage test on NVMe; the two-instance test with one side
+  on e1000; the desktop test on bochs-display with USB input; the kernel
+  suite on QEMU virt for Arm (Cortex-A72, 2 and 4 cores).
+- Not done, and why: the RISC-V IOMMU (QEMU 8.2 has no model; the design is
+  in ARCHITECTURE §3.6); real boards (none at hand); x86_64 (next port: the
+  arch interface and the user-side `cpu.zig` are where it goes); USB mass
+  storage; Wi-Fi; Aurora reading generations from NVMe; Steward and the
+  full system on Arm (they are portable; the Arm system needs PCI interrupt
+  routing for GIC specifiers and a pass of the system tests).
 
 ## Phase 9: hardening
 - Fuzzing of every kernel entry point; model checks of IPC and revocation;

@@ -510,7 +510,7 @@ fn build(comptime i: usize) !void {
     const st = &domains[i];
     const entry = img.find(md.program) orelse return error.ProgramMissing;
     const program = img.data(entry);
-    const exe = try elf.Image.parse(program, elf.machine_riscv);
+    const exe = try elf.Image.parse(program, if (@import("builtin").cpu.arch == .aarch64) elf.machine_aarch64 else elf.machine_riscv);
 
     // Size the region: the domain's own memory plus room for its kernel
     // objects (program pages, stack, tables, CNode, thread, ...).
@@ -781,10 +781,7 @@ fn summary() noreturn {
 }
 
 export fn _start() linksection(".text._start") callconv(.naked) noreturn {
-    asm volatile (
-        \\ call stewardMain
-        \\ unimp
-    );
+    asm volatile (g.cpu.callStub("stewardMain"));
 }
 
 pub const panic = std.debug.FullPanic(panicFn);

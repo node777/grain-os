@@ -1,22 +1,41 @@
-//! Caravan — the Grain OS microkernel (riscv64 entry and glue).
+//! Caravan — the Grain OS microkernel: entry and glue, for every architecture.
 //!
 //! This file connects the hardware to the portable kernel core: it brings up
 //! harts, turns every trap into a `core.Event`, runs `handle` under the
 //! kernel lock, then resumes whichever thread the core chose (or idles).
+//!
+//! Besides the core's interface (core/kernel.zig), `arch` gives this file:
+//!
+//!   HartLocal, harts, hart_count, self(), relax()
+//!   bootRootPhys(), switchRoot(h, pa), serviceRequests(h)
+//!   name                    the architecture, for the boot record
+//!   kernel_offset           virtual minus physical address of the image
+//!   now(), instret()        the platform timer; instructions retired
+//!   setupHart(h)            per-hart registers (trap vector, interrupts)
+//!   initPlatform(p, id)     harts and interrupt controller from the device tree
+//!   platformRecord(p)       fields for the `platform` record
+//!   startHart(h)            start a secondary hart at kmainSecondary
+//!   sendIpi(h)              make hart h trap into the kernel
+//!   trapCause(kind, pc)     why we trapped (`kind` comes from the entry code)
+//!   skipSyscall(ctx)        step a thread past its system-call instruction
+//!   interruptEvent(h, raw, *claimed)  the core event for an interrupt
+//!   completeIrq(h, line)    finish a claimed device interrupt
+//!   resumeThread(ctx)       load a thread's registers and drop to user mode
+//!   idle(h)                 wait for interrupts on this hart's stack
+//!   exit(code)              power off, reporting `code` if the board can
 const std = @import("std");
+const builtin = @import("builtin");
 const core = @import("core");
 const abi = @import("abi");
 const klog = core.klog;
-const arch = @import("arch/riscv64/arch.zig");
-const boot = @import("arch/riscv64/boot.zig");
-const csr = @import("arch/riscv64/csr.zig");
-const sbi = @import("arch/riscv64/sbi.zig");
-const trap = @import("arch/riscv64/trap.zig");
-const plic = @import("arch/riscv64/plic.zig");
-const board = @import("arch/riscv64/board.zig");
+const arch = switch (builtin.cpu.arch) {
+    .riscv64 => @import("arch/riscv64/arch.zig"),
+    .aarch64 => @import("arch/aarch64/arch.zig"),
+    else => @compileError("no Caravan port for this architecture"),
+};
 
 comptime {
-    _ = boot;
+    _ = arch.boot;
 }
 
 pub const panic = std.debug.FullPanic(panicHandler);
@@ -61,7 +80,7 @@ fn log(comptime event: []const u8, fields: anytype) void {
 fn panicHandler(msg: []const u8, ret_addr: ?usize) noreturn {
     @branchHint(.cold);
     log("panic", .{ .pc = klog.hex(ret_addr orelse @returnAddress()), .msg = msg });
-    board.exit(0xff);
+    arch.exit(0xff);
 }
 
 // ---------------------------------------------------------------------------
@@ -72,9 +91,9 @@ const ProfileKind = enum { syscall_call, syscall_reply_recv, syscall_invoke, sys
 var profile_count: [std.meta.fieldNames(ProfileKind).len]u64 = @splat(0);
 var profile_instret: [std.meta.fieldNames(ProfileKind).len]u64 = @splat(0);
 
-fn profileKind(ev: core.kernel.Event, ctx: ?*trap.Context) ProfileKind {
+fn profileKind(ev: core.kernel.Event, ctx: ?*arch.Context) ProfileKind {
     return switch (ev) {
-        .syscall => switch (@as(abi.Syscall, @fromBackingInt(@intCast(ctx.?.x[17])))) {
+        .syscall => switch (@as(abi.Syscall, @fromBackingInt(@intCast(ctx.?.get(.a7))))) {
             .call => .syscall_call,
             .reply_recv => .syscall_reply_recv,
             .invoke => .syscall_invoke,
@@ -87,17 +106,11 @@ fn profileKind(ev: core.kernel.Event, ctx: ?*trap.Context) ProfileKind {
     };
 }
 
-inline fn instret() u64 {
-    return asm volatile ("rdinstret %[r]"
-        : [r] "=r" (-> u64),
-    );
-}
-
-fn handleProfiled(h: *arch.HartLocal, ev: core.kernel.Event, ctx: ?*trap.Context) void {
+fn handleProfiled(h: *arch.HartLocal, ev: core.kernel.Event, ctx: ?*arch.Context) void {
     const kind = @backingInt(profileKind(ev, ctx));
-    const start = instret();
-    kernel.handle(h.index, csr.time(), ev);
-    profile_instret[kind] += instret() - start;
+    const start = arch.instret();
+    kernel.handle(h.index, arch.now(), ev);
+    profile_instret[kind] += arch.instret() - start;
     profile_count[kind] += 1;
 }
 
@@ -116,7 +129,7 @@ fn enterNext(h: *arch.HartLocal) noreturn {
     deliverKicks(h);
     if (kernel.exitRequested()) |code| {
         printProfile();
-        board.exit(code);
+        arch.exit(code);
     }
     if (kernel.currentThread(h.index)) |t| {
         const root = kernel.vspaceRoot(t).?;
@@ -125,7 +138,7 @@ fn enterNext(h: *arch.HartLocal) noreturn {
         t.ctx.hart_local = @intFromPtr(h);
         h.in_user.store(true, .release);
         unlock();
-        trap.caravanResume(&t.ctx);
+        arch.resumeThread(&t.ctx);
     }
     if (kernel.stuck()) {
         if (!stuck_reported) {
@@ -138,29 +151,15 @@ fn enterNext(h: *arch.HartLocal) noreturn {
         // receives the host's I/O completion (a flush can wait forever); a
         // pending deadline keeps QEMU's clock, and so its I/O, moving. On
         // hardware it costs one interrupt per 10 ms while fully idle.
-        sbi.setTimer(csr.time() + platform.timebase_hz / 100);
+        arch.setTimer(h.index, arch.now() + platform.timebase_hz / 100);
     }
     // Idle on the kernel's own table, so no user root stays live here.
     if (h.active_root.raw != arch.bootRootPhys()) arch.switchRoot(h, arch.bootRootPhys());
     unlock();
-    idle(h);
+    arch.idle(h);
 }
 
 var stuck_reported = false;
-
-fn idle(h: *arch.HartLocal) noreturn {
-    _ = h;
-    // Reset to the top of this hart's stack: whatever was below is finished.
-    asm volatile (
-        \\mv sp, %[top]
-        \\csrsi sstatus, 2
-        \\1: wfi
-        \\j 1b
-        :
-        : [top] "r" (arch.self().stack_top),
-    );
-    unreachable;
-}
 
 /// Make other harts notice changes to their state, and wait until any hart
 /// that was running user code has trapped into the kernel. After this, no
@@ -172,7 +171,7 @@ fn deliverKicks(h: *arch.HartLocal) void {
     for (arch.harts[0..arch.hart_count], 0..) |*o, i| {
         if (mask & (@as(u32, 1) << @intCast(i)) == 0 or o == h or !o.online) continue;
         snap[i] = o.epoch.load(.acquire);
-        sbi.sendIpi(o.hart_id);
+        arch.sendIpi(o);
     }
     for (arch.harts[0..arch.hart_count], 0..) |*o, i| {
         if (mask & (@as(u32, 1) << @intCast(i)) == 0 or o == h or !o.online) continue;
@@ -180,29 +179,17 @@ fn deliverKicks(h: *arch.HartLocal) void {
     }
 }
 
-fn eventFor(h: *arch.HartLocal, cause: trap.Cause, claimed: *?u32) core.kernel.Event {
+fn eventFor(h: *arch.HartLocal, cause: arch.Cause, claimed: *?u32) core.kernel.Event {
     return switch (cause) {
         .syscall => .syscall,
         .fault => |f| .{ .fault = f },
-        .interrupt => |i| switch (i) {
-            .timer => .timer,
-            .software => blk: {
-                csr.clear("sip", csr.sip_ssip);
-                break :blk .ipi;
-            },
-            .external => blk: {
-                const ctx = h.plic_context orelse break :blk .ipi;
-                const line = plic.claim(ctx);
-                if (line == 0) break :blk .ipi;
-                claimed.* = line;
-                break :blk .{ .irq = line };
-            },
-        },
-        .unknown_interrupt => .ipi,
+        .interrupt => |raw| arch.interruptEvent(h, raw, claimed),
     };
 }
 
-export fn caravanUserTrap(ctx: *trap.Context) callconv(.c) noreturn {
+/// `kind` is set by the entry code where the hardware has no register
+/// that tells a synchronous exception from an interrupt.
+export fn caravanUserTrap(ctx: *arch.Context, kind: usize) callconv(.c) noreturn {
     const h = arch.self();
     // The entry code has saved every register into ctx; from here another
     // hart may tear the thread down, so ctx is only touched under the lock
@@ -210,36 +197,32 @@ export fn caravanUserTrap(ctx: *trap.Context) callconv(.c) noreturn {
     _ = h.epoch.fetchAdd(1, .acq_rel);
     h.in_user.store(false, .release);
     arch.serviceRequests(h);
-    const scause = csr.read("scause");
-    const stval = csr.read("stval");
     var claimed: ?u32 = null;
     lock(h);
     const ours = if (kernel.currentThread(h.index)) |t| &t.ctx == ctx else false;
-    var cause = trap.decode(scause, stval, if (ours) ctx.pc else 0);
-    if (!ours and cause != .interrupt) cause = .{ .interrupt = .software }; // stale: just reschedule
-    if (cause == .syscall) ctx.pc += 4;
+    var cause = arch.trapCause(kind, if (ours) ctx.get(.pc) else 0);
+    if (!ours and cause != .interrupt) cause = .{ .interrupt = arch.stale_trap }; // stale: just reschedule
+    if (cause == .syscall) arch.skipSyscall(ctx);
     const ev = eventFor(h, cause, &claimed);
     handleProfiled(h, ev, if (ours) ctx else null);
-    if (claimed) |line| plic.complete(h.plic_context.?, line);
+    if (claimed) |line| arch.completeIrq(h, line);
     enterNext(h);
 }
 
 /// Traps taken in kernel mode: expected only while idling (interrupts).
-export fn caravanKernelTrap(frame: *trap.Frame) callconv(.c) void {
+export fn caravanKernelTrap(frame: *arch.Frame, kind: usize) callconv(.c) void {
     const h = arch.self();
-    const scause = csr.read("scause");
-    const cause = trap.decode(scause, csr.read("stval"), frame.sepc);
+    const cause = arch.trapCause(kind, frame.pc());
     if (cause != .interrupt) {
-        log("kernel_fault", .{ .scause = scause, .stval = klog.hex(csr.read("stval")), .pc = klog.hex(frame.sepc), .ra = klog.hex(frame.x[1]) });
+        log("kernel_fault", arch.kernelFaultRecord(frame));
         @panic("fault in kernel mode");
     }
-    csr.clear("sstatus", csr.sstatus_sie);
     arch.serviceRequests(h);
     var claimed: ?u32 = null;
     const ev = eventFor(h, cause, &claimed);
     lock(h);
     handleProfiled(h, ev, null);
-    if (claimed) |line| plic.complete(h.plic_context.?, line);
+    if (claimed) |line| arch.completeIrq(h, line);
     enterNext(h);
 }
 
@@ -248,74 +231,36 @@ export fn caravanKernelTrap(frame: *trap.Frame) callconv(.c) void {
 
 extern const __kernel_start: u8;
 extern const __kernel_end: u8;
-extern const __stacks_start: u8;
-extern fn _start_secondary() callconv(.naked) void;
-
-fn setupHart(h: *arch.HartLocal) void {
-    asm volatile ("mv tp, %[hl]"
-        :
-        : [hl] "r" (@intFromPtr(h)),
-    );
-    csr.write("stvec", @intFromPtr(&trap.caravanTrapEntry));
-    csr.write("sscratch", 0);
-    // Let user code read cycle, time and instret.
-    csr.write("scounteren", 0b111);
-    csr.set("sie", csr.sie_stie | csr.sie_ssie | csr.sie_seie);
-    if (h.plic_context) |ctx| plic.setThreshold(ctx, 0);
-    h.active_root.store(arch.bootRootPhys(), .release);
-}
 
 export fn kmain(hart_id: usize, dtb_pa: usize) callconv(.c) noreturn {
     // Hart-local block 0 is the boot hart until the device tree says more.
     const h0 = &arch.harts[0];
-    h0.* = .{ .hart_id = @intCast(hart_id), .stack_top = @intFromPtr(&__stacks_start) + boot.stack_size };
-    setupHart(h0);
+    h0.* = .{ .hart_id = @intCast(hart_id), .stack_top = arch.stackTop(0) };
+    arch.setupHart(h0);
 
     const fdt = core.fdt.Fdt.fromPtr(@ptrFromInt(arch.physToVirt(dtb_pa))) catch @panic("bad device tree");
     platform = core.fdt.parsePlatform(fdt) catch @panic("unreadable device tree");
-    if (platform.test_finisher) |f| board.finisher = arch.physToVirt(f);
-
-    // Logical hart 0 is whichever hart SBI booted us on (any hart may win
-    // the boot lottery); the others follow in device-tree order. Manifests
-    // and the core only ever see logical indices.
-    const harts = platform.hartList();
-    const boot_index = platform.hartIndex(@intCast(hart_id)) orelse @panic("boot hart is not in the device tree");
-    var n: usize = 0;
-    for (0..harts.len) |k| {
-        // k = 0 places the boot hart; after that, device-tree order without it.
-        const di = if (k == 0) boot_index else if (k <= boot_index) k - 1 else k;
-        if (n == arch.max_harts) break;
-        const h = &arch.harts[n];
-        h.index = @intCast(n);
-        h.hart_id = harts[di].id;
-        h.plic_context = harts[di].plic_context;
-        h.stack_top = @intFromPtr(&__stacks_start) + (n + 1) * boot.stack_size;
-        n += 1;
-    }
-    arch.hart_count = @intCast(n);
-    if (platform.plic) |p| plic.init(arch.physToVirt(p.base), platform.plic_ndev);
-    setupHart(h0);
+    // Logical hart 0 is whichever hart booted us; the others follow in
+    // device-tree order. Manifests and the core only see logical indices.
+    arch.initPlatform(&platform, @intCast(hart_id)) catch |e| {
+        log("platform_failed", .{ .err = @errorName(e) });
+        @panic("unsupported platform");
+    };
+    arch.setupHart(h0);
 
     log("boot", .{
         .kernel = "caravan",
-        .arch = .riscv64,
+        .arch = arch.name,
         .hart = hart_id,
         .harts = arch.hart_count,
         .timebase_hz = platform.timebase_hz,
         .dtb = klog.hex(dtb_pa),
-        .image = klog.hex(@intFromPtr(&__kernel_start) - boot.kernel_offset),
+        .image = klog.hex(@intFromPtr(&__kernel_start) - arch.kernel_offset),
     });
-    log("platform", .{
-        .plic = klog.hex(if (platform.plic) |p| p.base else 0),
-        .plic_lines = platform.plic_ndev,
-        .plic_context = if (h0.plic_context) |c| c else 0xffff,
-        .uart = klog.hex(if (platform.uart) |u| u.base else 0),
-        .uart_irq = platform.uart_irq orelse 0,
-        .finisher = klog.hex(platform.test_finisher orelse 0),
-    });
+    log("platform", arch.platformRecord(&platform));
 
-    const image_pa = @intFromPtr(&__kernel_start) - boot.kernel_offset;
-    const image_end = @intFromPtr(&__kernel_end) - boot.kernel_offset;
+    const image_pa = @intFromPtr(&__kernel_start) - arch.kernel_offset;
+    const image_end = @intFromPtr(&__kernel_end) - arch.kernel_offset;
     const reserved = [_]core.fdt.Range{
         .{ .base = image_pa, .size = image_end - image_pa },
         .{ .base = dtb_pa, .size = fdt.totalSize() },
@@ -324,35 +269,35 @@ export fn kmain(hart_id: usize, dtb_pa: usize) callconv(.c) noreturn {
         .platform = &platform,
         .reserved = &reserved,
         .root_elf = root_elf,
-        .dtb = @as([*]const u8, @ptrFromInt(arch.physToVirt(dtb_pa)))[0..fdt.totalSize()],
-        .now = csr.time(),
+        .dtb = @as([*]const u8, @ptrFromInt(arch.physToVirt(dtb_pa)))[0..fdt.usedSize()],
+        .now = arch.now(),
         .root_budget_ticks = platform.timebase_hz / 1000 * root_slice_ms,
     }) catch |e| {
         log("boot_failed", .{ .err = @errorName(e) });
         @panic("kernel boot failed");
     };
 
-    // Start the other harts; each joins at kmainSecondary.
-    const secondary_pa = @intFromPtr(&_start_secondary) - boot.kernel_offset;
+    lock(h0);
+    h0.online = true;
+    kernel.hartOnline(0, arch.now());
+    // Start the other harts once this one is online (else the first to
+    // join sees no hart running anything); each joins at kmainSecondary,
+    // waiting for the lock this one holds.
     for (arch.harts[1..arch.hart_count]) |*h| {
-        sbi.hartStart(h.hart_id, secondary_pa, h.index) catch {
+        arch.startHart(h) catch {
             log("hart_start_failed", .{ .hart = h.hart_id });
             continue;
         };
     }
-
-    lock(h0);
-    h0.online = true;
-    kernel.hartOnline(0, csr.time());
     enterNext(h0);
 }
 
 export fn kmainSecondary(hart_id: usize, index: usize) callconv(.c) noreturn {
     const h = &arch.harts[index];
-    setupHart(h);
+    arch.setupHart(h);
     lock(h);
     h.online = true;
     log("hart_online", .{ .hart = hart_id, .index = index });
-    kernel.hartOnline(@intCast(index), csr.time());
+    kernel.hartOnline(@intCast(index), arch.now());
     enterNext(h);
 }
