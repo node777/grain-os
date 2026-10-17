@@ -525,9 +525,15 @@ and reports settled; a test system does not power off before that. Steward
 never blocks on a domain (an earlier draft had Steward call the store, and a
 store fault would have deadlocked the supervisor).
 
-- *Planned:* an index that is not rewritten whole per commit, reclaiming on
-  a schedule (today an agent or Steward asks), changing the passphrase, and
-  directories as capabilities.
+**Changing the passphrase** (`rekey`, `grain-disk passwd`) rewraps the
+master key under a fresh salt in one commit: nothing sealed changes, and a
+power cut leaves the old passphrase or the new one working (the crash
+scenario's last step). When less than a quarter of the log is free at boot,
+the store reclaims by itself once it is unlocked.
+
+- *Planned:* an index that is not rewritten whole per commit, changing the
+  passphrase from the device itself (it needs the owner present, so it
+  waits for the desktop), and directories as capabilities.
 
 ### 3.5 Envoy: the AI interface
 
@@ -590,7 +596,10 @@ enforces the limits, and an exhausted or expired lease fails with
   `grain_undo`, `grain_ask`, `grain_observe`. Nothing about Grain's services
   is hard-coded on the host: it all comes from `discover` and `describe`.
 - `zig build run` boots the system in real time and prints the socket to
-  connect grainsh or an MCP client to.
+  connect grainsh or an MCP client to. It boots the way a device does:
+  `grain-disk dev` adds each build to a persistent development disk as a
+  generation and makes it current (the build before stays the rollback
+  target, older ones are forgotten), and Aurora loads it from there.
 
 ### 3.6 Drivers and hardware
 

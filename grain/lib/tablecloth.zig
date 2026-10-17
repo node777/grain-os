@@ -779,26 +779,46 @@ pub fn Store(comptime Dev: type, comptime cap: Capacity) type {
             if (s.passphraseSet()) return error.AlreadyUnlocked;
             // entropy: 32 bytes of master key, 16 of salt, 16 that seed the nonce.
             var l = s.sup.lock;
-            l.set = 1;
-            l.salt = entropy[32..48].*;
-            var nonce: Hash = undefined;
-            Blake3.hash(entropy[48..64], &nonce, .{});
-            l.nonce = nonce[0..24].*;
             const master = entropy[0..32].*;
-            const k = try kek(gpa, pass, l);
-            Aead.encrypt(&l.wrapped, &l.tag, &master, "grain tablecloth v1 lock", l.nonce, k);
+            try wrap(gpa, pass, master, &l, entropy[32..64].*);
             s.sup.lock = l;
             s.keys = Keys.derive(master);
             try s.commit();
         }
 
-        pub fn unlock(s: *Self, gpa: std.mem.Allocator, pass: []const u8) Error!void {
-            if (s.keys != null) return error.AlreadyUnlocked;
-            const l = s.sup.lock;
+        fn unwrap(gpa: std.mem.Allocator, pass: []const u8, l: Lock) Error![32]u8 {
             if (!l.isSet()) return error.NotFound;
             const k = try kek(gpa, pass, l);
             var master: [32]u8 = undefined;
             Aead.decrypt(&master, &l.wrapped, l.tag, "grain tablecloth v1 lock", l.nonce, k) catch return error.BadPassphrase;
+            return master;
+        }
+
+        fn wrap(gpa: std.mem.Allocator, pass: []const u8, master: [32]u8, l: *Lock, entropy: [32]u8) Error!void {
+            l.set = 1;
+            l.salt = entropy[0..16].*;
+            var nonce: Hash = undefined;
+            Blake3.hash(entropy[16..32], &nonce, .{});
+            l.nonce = nonce[0..24].*;
+            const k = try kek(gpa, pass, l.*);
+            Aead.encrypt(&l.wrapped, &l.tag, &master, "grain tablecloth v1 lock", l.nonce, k);
+        }
+
+        /// Change the passphrase. The master key stays (nothing sealed
+        /// changes); only its wrapping does, under a fresh salt from
+        /// `entropy`. One commit: a power cut leaves the old passphrase or
+        /// the new one working.
+        pub fn rekey(s: *Self, gpa: std.mem.Allocator, old: []const u8, new: []const u8, entropy: [32]u8) Error!void {
+            const master = try unwrap(gpa, old, s.sup.lock);
+            var l = s.sup.lock;
+            try wrap(gpa, new, master, &l, entropy);
+            s.sup.lock = l;
+            try s.commit();
+        }
+
+        pub fn unlock(s: *Self, gpa: std.mem.Allocator, pass: []const u8) Error!void {
+            if (s.keys != null) return error.AlreadyUnlocked;
+            const master = try unwrap(gpa, pass, s.sup.lock);
             s.keys = Keys.derive(master);
             if (!std.mem.eql(u8, &s.secret_names, &zero)) {
                 const e = s.entry(s.secret_names) orelse return error.Corrupt;
@@ -861,10 +881,16 @@ pub fn Store(comptime Dev: type, comptime cap: Capacity) type {
             return prev;
         }
 
-        /// The first generation of a fresh disk, current without a trial.
+        /// Make `gen` current without a trial (a fresh disk's first
+        /// generation, or a developer's build); the one it replaces becomes
+        /// the rollback target. Commits.
         pub fn install(s: *Self, gen: Hash) Error!void {
             if (!s.has(gen)) return error.NotFound;
-            s.sup.boot.current = gen;
+            const b = &s.sup.boot;
+            if (!std.mem.eql(u8, &b.current, &gen)) {
+                if (!std.mem.eql(u8, &b.current, &zero)) b.previous = b.current;
+                b.current = gen;
+            }
             try s.commit();
         }
     };
@@ -990,6 +1016,15 @@ test "objects, names, sealing, dedupe, remount" {
     try testing.expectEqualSlices(u8, &sec, &(try t.lookup("kumara/secret", true)).?);
     try testing.expectEqualStrings("the secret", try t.get(sec, "kumara", &buf));
     try testing.expectError(error.NotFound, t.get(sec, "ledger", &buf));
+
+    // A new passphrase opens the same secrets; the old one no longer does.
+    try testing.expectError(error.BadPassphrase, t.rekey(testing.allocator, "wrong", "new horse", testEntropy(5)[0..32].*));
+    try t.rekey(testing.allocator, "correct horse", "new horse", testEntropy(5)[0..32].*);
+    var u: TestStore = undefined;
+    try u.mount(&disk);
+    try testing.expectError(error.BadPassphrase, u.unlock(testing.allocator, "correct horse"));
+    try u.unlock(testing.allocator, "new horse");
+    try testing.expectEqualStrings("the secret", try u.get(sec, "kumara", &buf));
     // Sealed names are not readable from the public table.
     try testing.expect(try t.lookup("kumara/secret", false) == null);
 
@@ -1037,6 +1072,7 @@ test "generations: stage, trial boots, confirm, give up" {
 const Snapshot = struct {
     seq: u64,
     lock_set: bool,
+    salt: [16]u8,
     objects: usize,
     names: usize,
     current: Hash,
@@ -1046,11 +1082,11 @@ const Snapshot = struct {
 };
 
 fn snap(s: *const TestStore) Snapshot {
-    return .{ .seq = s.sup.seq, .lock_set = s.passphraseSet(), .objects = s.n_objects, .names = s.n_names, .current = s.sup.boot.current, .pending = s.sup.boot.pending, .tries = s.sup.boot.tries, .secrets = s.n_secrets };
+    return .{ .seq = s.sup.seq, .lock_set = s.passphraseSet(), .salt = s.sup.lock.salt, .objects = s.n_objects, .names = s.n_names, .current = s.sup.boot.current, .pending = s.sup.boot.pending, .tries = s.sup.boot.tries, .secrets = s.n_secrets };
 }
 
 fn sameState(a: Snapshot, b: Snapshot) bool {
-    return a.lock_set == b.lock_set and a.objects == b.objects and a.names == b.names and std.mem.eql(u8, &a.current, &b.current) and
+    return a.lock_set == b.lock_set and std.mem.eql(u8, &a.salt, &b.salt) and a.objects == b.objects and a.names == b.names and std.mem.eql(u8, &a.current, &b.current) and
         std.mem.eql(u8, &a.pending, &b.pending) and a.tries == b.tries and a.secrets == b.secrets;
 }
 
@@ -1092,10 +1128,12 @@ fn scenarioStep(s: *TestStore, i: usize) !void {
             try s.retire("scratch", false);
             _ = try s.reclaim(1000);
         },
+        // A new wrapping (the same passphrase, so every recovery unlocks).
+        20 => try s.rekey(testing.allocator, "pass", "pass", testEntropy(77)[0..32].*),
         else => unreachable,
     }
 }
-const scenario_steps = 20;
+const scenario_steps = 21;
 
 test "a power cut at any device operation leaves the old state or the new one" {
     var prng = std.Random.DefaultPrng.init(0x7ab1ec10);

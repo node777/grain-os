@@ -23,7 +23,8 @@
 - Systems are manifests in `system/`. A new program goes in
   `grain/programs/<name>/main.zig` (with `comptime { grain.exportStart(); }`
   and `pub fn main() !u16`), and its name in `program_names` in build.zig.
-  Domain-facing contracts live in `grain/lib/domain.zig` and `protocols.zig`.
+  Domain-facing contracts live in `grain/lib/domain.zig`; protocols are one
+  file each in `grain/proto/`, listed in `proto.zig`.
 - Manifest checks live in `schema.validate`; each new rule needs a test with
   its message in `schema.zig`.
 - Storage tests boot several times on one disk (`--boots`, `N:` prefixes,

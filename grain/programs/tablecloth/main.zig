@@ -329,6 +329,13 @@ pub fn main() !u16 {
         const now = cloth.sup.boot.current;
         g.log("generation_confirmed", .{ .promoted = promoted, .current = g.klog.hex(std.mem.readInt(u64, now[0..8], .big)) });
     } else g.log("generation_not_confirmed", .{ .reason = "boot_unhealthy" });
+
+    // Running low on space: bring back what nothing keeps alive.
+    if (cloth.freeBlocks() < cloth.sup.logBlocks() / 4) {
+        if (cloth.reclaim(cloth.sup.logBlocks())) |rc| {
+            g.log("tablecloth_reclaimed", .{ .dropped = rc.dropped, .copied = rc.copied, .free_blocks = rc.free, .by = "tablecloth" });
+        } else |e| g.log("tablecloth_reclaim_failed", .{ .err = @errorName(e) });
+    }
     _ = g.call(D.Slot.steward, .{ .label = ready, .length = 1 }, .{1});
 
     var s: Server = .{};

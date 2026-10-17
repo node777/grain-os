@@ -153,15 +153,20 @@ Built:
   a generation that never comes up is given up; the identity persists
   across reboots, the upgrade and the rollback.
 
+### Cleanup after Phase 5 (done)
+- One endpoint per domain, serving several protocols; the receiver learns
+  each sender's protocol. Console input is its own service (`input.v1`).
+- Tablecloth reclaims space: a circular log, links, retired names,
+  `forget` and `reclaim` (agent-driven, and by itself at boot when low).
+- Changing the passphrase (`grain-disk passwd`).
+- `zig build run` boots through Aurora: each build becomes the current
+  generation of the persistent development disk.
+
 ### Left over from Phase 5
-- Reclaiming space (the log only grows; unnamed generations stay).
-- Changing the passphrase; a hardware-held key; measured boot.
+- Changing the passphrase on the device; a hardware-held key; measured boot.
 - Kumara device keys signed by an owner root key; petnames.
 - The Ledger for grants, revocations and generation switches made by
   Steward itself (agent actions and the agent's switches are recorded).
-- `zig build run` boots the kernel directly with a persistent disk;
-  booting it through Aurora, with each build staged as a generation, is the
-  natural next step.
 
 ## Phase 6: the personal desktop
 - virtio-gpu and virtio-input drivers, a compositor domain, a minimal

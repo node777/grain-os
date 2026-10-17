@@ -27,9 +27,11 @@ zig build check-manifest -Dsystem=system/my.brix  # check a manifest (Brix or ZO
 zig-out/bin/brix --print system/my.brix           # what a .brix evaluates to
 zig build sim         # the deterministic simulator (16 seeds × 50k steps); -Dseed=N replays one
 zig build bench -Doptimize=ReleaseFast   # one hart: benchmark and kernel-profile records
-zig build run         # boot in real time with an Envoy socket and a disk that persists between runs
-                      # (zig-out/run-disk.img); type the disk's passphrase in the terminal
-zig-out/bin/grain-disk show zig-out/run-disk.img   # what a disk holds: commits, generations, names
+zig build run         # boot through Aurora in real time with an Envoy socket; each build becomes the
+                      # current generation of a disk that persists between runs (zig-out/run-disk.img);
+                      # type the disk's passphrase in the terminal
+zig-out/bin/grain-disk show zig-out/run-disk.img     # what a disk holds: commits, free space, generations, names
+zig-out/bin/grain-disk passwd zig-out/run-disk.img   # change the passphrase (old, then new, on stdin)
 python3 tools/envoy.py shell --socket PATH    # grainsh, the structured shell
 python3 tools/envoy.py mcp --socket PATH      # MCP server (stdio) for any MCP-capable agent
 zig build debug       # boot halted with a GDB stub on :1234
@@ -90,11 +92,13 @@ The four layers, from fastest to most real:
    (typed on the console by the harness) and makes the identity; boot 2
    refuses a wrong passphrase, unlocks with the right one, and the identity
    comes back by the same name.
-8. **QEMU, generations through Aurora** (six boots on one disk): an agent
+8. **QEMU, generations through Aurora** (eight boots on one disk): an agent
    uploads and switches to the next generation; the power is cut right
    after Aurora records the trial boot; the trial comes up and is confirmed;
    the agent rolls back; the power is cut mid-confirm; the rollback
-   completes. The identity is the same in every boot that runs. A second run
+   completes; the agent forgets the generation it left and reclaims its
+   space; the next boot comes up whole. The identity is the same in every
+   boot that runs. A second run
    stages a generation that can never come up and checks Aurora gives it up
    after three tries and boots the last good one.
 9. **Manifest compile failure:** `zig build check-manifest

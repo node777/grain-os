@@ -5,12 +5,20 @@
 //!   grain-disk show <disk.img>
 //!   grain-disk add <disk.img> <kernel.elf> <label> [--current | --stage]
 //!   grain-disk pack <kernel.elf> <label> <out-dir>
+//!   grain-disk dev <disk.img> <size MiB> <kernel.elf> <label>
+//!   grain-disk passwd <disk.img>      (old and new passphrase on stdin)
 //!
 //! `add` stores a kernel image as a generation (see lib/generation.zig) and
 //! names it `system@N`; `--current` makes it the one Aurora boots (a fresh
 //! disk's first generation), `--stage` puts it on trial. `pack` writes a
 //! generation as files instead: `descriptor` and `chunks/<hash>`, plus
 //! `generation` (its hash in hex), for an agent to upload through Envoy.
+//!
+//! `dev` is what `zig build run` does with each build: make the disk if it
+//! is missing (cheap to unlock: a development disk), add the build and make
+//! it current, so Aurora boots it; the build before stays the rollback
+//! target, and the one before that is forgotten (the store reclaims its
+//! space when it runs low).
 //!
 //! The image is a raw disk (QEMU: -drive format=raw). The Argon2id cost is
 //! fixed when the disk is formatted; the default (16 MiB, 2 passes) is for
@@ -92,7 +100,7 @@ pub const FileDisk = struct {
 
 pub const Store = tc.Store(FileDisk, .{});
 
-fn addGeneration(arena: std.mem.Allocator, io: std.Io, s: *Store, elf_path: []const u8, label: []const u8, mode: []const u8) !void {
+fn addGeneration(arena: std.mem.Allocator, io: std.Io, s: *Store, elf_path: []const u8, label: []const u8, mode: []const u8) !tc.Hash {
     const elf = try std.Io.Dir.cwd().readFileAlloc(io, elf_path, arena, .unlimited);
     const g = try build(arena, elf, label);
     var fresh: usize = 0;
@@ -101,20 +109,32 @@ fn addGeneration(arena: std.mem.Allocator, io: std.Io, s: *Store, elf_path: []co
         _ = try s.put(c);
     }
     _ = try s.put(g.descriptor);
+    // Its Mantra name: the one it has, or the next `system@N`.
     var n: usize = 1;
+    var name_buf: [tc.name_len]u8 = undefined;
+    var name: ?[]const u8 = null;
     for (s.publicNames()) |*nm| if (std.mem.startsWith(u8, nm.text(), "system@")) {
         n += 1;
+        if (std.mem.eql(u8, &nm.hash, &g.hash)) name = std.fmt.bufPrint(&name_buf, "{s}", .{nm.text()}) catch unreachable;
     };
-    var name_buf: [32]u8 = undefined;
-    const name = try std.fmt.bufPrint(&name_buf, "system@{d}", .{n});
-    try s.bind(name, g.hash, false, false);
+    if (name == null) {
+        name = try std.fmt.bufPrint(&name_buf, "system@{d}", .{n});
+        try s.bind(name.?, g.hash, false, false);
+    }
     try s.commit();
     if (std.mem.eql(u8, mode, "--current")) try s.install(g.hash) else if (std.mem.eql(u8, mode, "--stage")) try s.stage(g.hash);
-    std.debug.print("@disk added name={s} generation={x} label={s} chunks={d} new_chunks={d} {s}\n", .{ name, g.hash, label, g.chunks.len, fresh, mode });
+    std.debug.print("@disk added name={s} generation={x} label={s} chunks={d} new_chunks={d} {s}\n", .{ name.?, g.hash, label, g.chunks.len, fresh, mode });
+    return g.hash;
+}
+
+/// Read one line (without its newline) from stdin.
+fn readLine(r: *std.Io.Reader) ![]const u8 {
+    const line = (try r.takeDelimiter('\n')) orelse return error.EndOfStream;
+    return std.mem.trimEnd(u8, line, "\r");
 }
 
 fn usage() u8 {
-    std.debug.print("usage: grain-disk format <disk.img> <size MiB> [--kdf-kib N] [--kdf-t N]\n       grain-disk show <disk.img>\n       grain-disk add <disk.img> <kernel.elf> <label> [--current | --stage]\n       grain-disk pack <kernel.elf> <label> <out-dir>\n", .{});
+    std.debug.print("usage: grain-disk format <disk.img> <size MiB> [--kdf-kib N] [--kdf-t N]\n       grain-disk show <disk.img>\n       grain-disk add <disk.img> <kernel.elf> <label> [--current | --stage]\n       grain-disk pack <kernel.elf> <label> <out-dir>\n       grain-disk dev <disk.img> <size MiB> <kernel.elf> <label>\n       grain-disk passwd <disk.img>   (old and new passphrase on stdin)\n", .{});
     return 2;
 }
 
@@ -153,7 +173,54 @@ pub fn main(init: std.process.Init) !u8 {
         const s = try arena.create(Store);
         try s.format(&d, mib * 1024 * 1024 / tc.block_size, cost);
         std.debug.print("@disk formatted path={s} blocks={d} kdf_kib={d} kdf_t={d}\n", .{ args[2], s.sup.blocks, cost.m_kib, cost.t });
-        for (adds[0..n_adds]) |a| try addGeneration(arena, io, s, a.elf, a.label, a.mode);
+        for (adds[0..n_adds]) |a| _ = try addGeneration(arena, io, s, a.elf, a.label, a.mode);
+        return 0;
+    }
+    if (std.mem.eql(u8, args[1], "dev")) {
+        if (args.len < 6) return usage();
+        const fresh = if (cwd.access(io, args[2], .{})) false else |_| true;
+        const file = if (fresh) try cwd.createFile(io, args[2], .{ .read = true }) else try cwd.openFile(io, args[2], .{ .mode = .read_write });
+        defer file.close(io);
+        var d: FileDisk = .{ .file = file, .io = io };
+        const s = try arena.create(Store);
+        if (fresh) {
+            const mib = try std.fmt.parseUnsigned(u64, args[3], 10);
+            try file.setLength(io, mib * 1024 * 1024);
+            try s.format(&d, mib * 1024 * 1024 / tc.block_size, .{ .t = 1, .m_kib = 1024 });
+            std.debug.print("@disk formatted path={s} blocks={d} kdf_kib=1024 kdf_t=1\n", .{ args[2], s.sup.blocks });
+        } else s.mount(&d) catch |e| {
+            std.debug.print("@disk mount_failed path={s} err={s} (an older format? delete it to start over)\n", .{ args[2], @errorName(e) });
+            return 1;
+        };
+        const before = s.sup.boot;
+        const g = try addGeneration(arena, io, s, args[4], args[5], "--current");
+        // Keep this build and the one before; forget older ones.
+        if (!std.mem.eql(u8, &before.previous, &tc.zero) and !std.mem.eql(u8, &before.previous, &g) and !std.mem.eql(u8, &before.previous, &s.sup.boot.previous) and
+            !std.mem.eql(u8, &before.previous, &s.sup.boot.pending))
+        {
+            try s.forget(before.previous);
+            std.debug.print("@disk forgot generation={x}\n", .{before.previous[0..8]});
+        }
+        return 0;
+    }
+    if (std.mem.eql(u8, args[1], "passwd")) {
+        const file = try cwd.openFile(io, args[2], .{ .mode = .read_write });
+        defer file.close(io);
+        var d: FileDisk = .{ .file = file, .io = io };
+        const s = try arena.create(Store);
+        try s.mount(&d);
+        var in_buf: [256]u8 = undefined;
+        var in = std.Io.File.stdin().reader(io, &in_buf);
+        const old = try arena.dupe(u8, try readLine(&in.interface));
+        const new = try readLine(&in.interface);
+        if (new.len == 0) return usage();
+        var entropy: [32]u8 = undefined;
+        io.random(&entropy);
+        s.rekey(arena, old, new, entropy) catch |e| {
+            std.debug.print("@disk passwd_failed err={s}\n", .{if (e == error.NotFound) "no_passphrase_yet" else @errorName(e)});
+            return 1;
+        };
+        std.debug.print("@disk passwd_changed seq={d}\n", .{s.sup.seq});
         return 0;
     }
     if (std.mem.eql(u8, args[1], "add")) {
@@ -163,7 +230,7 @@ pub fn main(init: std.process.Init) !u8 {
         var d: FileDisk = .{ .file = file, .io = io };
         const s = try arena.create(Store);
         try s.mount(&d);
-        try addGeneration(arena, io, s, args[3], args[4], if (args.len > 5) args[5] else "");
+        _ = try addGeneration(arena, io, s, args[3], args[4], if (args.len > 5) args[5] else "");
         return 0;
     }
     if (std.mem.eql(u8, args[1], "pack")) {

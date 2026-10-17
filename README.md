@@ -35,8 +35,8 @@ RISC-V is the primary target; aarch64 and x86_64 follow.
 tools/setup.sh        # Zig 0.17.0, QEMU, OpenSBI, gdb-multiarch (Debian/Ubuntu)
 zig build test        # host: unit tests, kernel scenario tests, short simulator run
 zig build qemu-test   # QEMU, 2 harts: kernel suite, the dev system, an agent session, faults, a miswired manifest
-zig build run         # boot the dev system in real time on a disk that persists (type its passphrase);
-                      # it prints an Envoy socket to connect to
+zig build run         # boot the dev system through Aurora, in real time, on a disk that persists
+                      # (type its passphrase); it prints an Envoy socket to connect to
 python3 tools/envoy.py shell --socket PATH   # grainsh: operate the running system
 python3 tools/envoy.py mcp --socket PATH     # the same, as MCP tools for an agent
 zig build sim         # deterministic simulator: random events, invariants every step

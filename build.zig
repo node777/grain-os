@@ -236,16 +236,22 @@ pub fn build(b: *std.Build) void {
 
     // Interactive: real time, and an Envoy socket to connect an agent or
     // grainsh to (the harness prints the command). `bye` ends the run.
-    const run = b.addSystemCommand(&.{ "python3", "tools/harness.py", "--interactive", "--smp", smp, "--virtio-console", "--disk-inplace" });
-    // A disk that persists between runs (the passphrase, identity and Ledger
-    // live there): zig-out/run-disk.img, made on the first run. Delete it
-    // to start over.
-    run.addArg("--disk=zig-out/run-disk.img");
-    run.addPrefixedFileArg("--disk-seed=", test_disk);
+    // The system boots the way a device does: Aurora loads it from the disk.
+    // Each build is added to a disk that persists between runs (the
+    // passphrase, identity and Ledger live there), zig-out/run-disk.img, and
+    // made current; the build before stays the rollback target. Delete the
+    // disk to start over.
+    const run_disk = b.addRunArtifact(disk_exe);
+    run_disk.addArgs(&.{ "dev", "zig-out/run-disk.img", "256" });
+    run_disk.addArtifactArg(kernel);
+    run_disk.addArg("grain-dev");
+    run_disk.has_side_effects = true;
+    const run = b.addSystemCommand(&.{ "python3", "tools/harness.py", "--interactive", "--smp", smp, "--virtio-console", "--disk-inplace", "--disk=zig-out/run-disk.img" });
+    run.step.dependOn(&run_disk.step);
     // Real entropy: a new disk gets its own master key and identity (tests
     // use a fixed pattern so their names are known).
     run.addArg("--virtio-rng=/dev/urandom");
-    run.addArtifactArg(kernel);
+    run.addArtifactArg(aurora);
     run.stdio = .inherit;
     run.has_side_effects = true;
     b.step("run", "Boot the system in QEMU and show its output").dependOn(&run.step);
