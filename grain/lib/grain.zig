@@ -15,6 +15,9 @@ pub const virtio_input = @import("virtio_input.zig");
 pub const virtio_net = @import("virtio_net.zig");
 pub const net = @import("net.zig");
 pub const noise = @import("noise.zig");
+pub const pci = @import("pci.zig");
+pub const nvme = @import("nvme.zig");
+pub const e1000 = @import("e1000.zig");
 
 /// Options for a program's root (`pub const std_options = grain.std_options;`):
 /// Caravan's pages are 4 KiB, which std cannot know for a freestanding target.

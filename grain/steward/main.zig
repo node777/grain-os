@@ -5,7 +5,8 @@
 //!
 //!   1. Verify the boot image: every program's BLAKE3 hash and the closure
 //!      hash over the manifest and all programs.
-//!   2. Find devices in the device tree and probe the virtio transports.
+//!   2. Find devices: probe the virtio transports in the device tree, and
+//!      enumerate the PCI bus (placing every BAR, routing every interrupt).
 //!   3. For each domain: carve a private untyped region; build its CSpace,
 //!      address space, program, stack, DomainInfo page, CPU budget and
 //!      capabilities (services it uses and provides, devices, a write-only
@@ -57,6 +58,8 @@ const ndomains = manifest.domains.len;
 const fault_flag: usize = 1 << 16;
 /// A scratch window in Steward's own address space for filling pages.
 const scratch_va: usize = 0x5000_0000;
+/// PCI bus 0's configuration space (ECAM), mapped for good.
+const pci_config_va: usize = 0x5200_0000;
 
 var boot: *const abi.BootInfo = undefined;
 var img: image.Image = undefined;
@@ -156,17 +159,47 @@ fn withScratch(frame: g.CPtr, ctx: anytype, comptime f: fn (*[4096]u8, @TypeOf(c
 // ---------------------------------------------------------------------------
 // Devices
 
-const VirtioDevice = struct {
+/// A device Steward found: a virtio transport, or a PCI function.
+const Device = struct {
+    bus: D.Bus,
     phys: u64,
     irq_line: u32,
-    virtio_id: u32,
-    frame: g.CPtr, // Steward's capability to the MMIO page
+    virtio_id: u32 = 0,
+    frame: g.CPtr = 0, // virtio: Steward's capability to the MMIO page
+    // PCI: where it is, what it is, and its memory BARs.
+    location: struct { device: u5 = 0, function: u3 = 0 } = .{},
+    vendor: u16 = 0,
+    device_id: u16 = 0,
+    class: u32 = 0,
+    bars: [3]PciBar = undefined,
+    bar_count: u8 = 0,
     irq: g.CPtr = 0, // created on first assignment
     owner: ?usize = null,
 };
 
-var devices: [16]VirtioDevice = undefined;
+/// A placed BAR and the frames that cover it (consecutive slots).
+const PciBar = struct {
+    bar: g.pci.Bar,
+    cpu: u64 = 0,
+    first: g.CPtr = 0,
+    frames: u32 = 0,
+    bits: u6 = 12,
+
+    fn frameSize(b: *const PciBar) u64 {
+        return @as(u64, 1) << b.bits;
+    }
+    fn span(b: *const PciBar) u64 {
+        return @max(b.bar.size, g.pci.min_bar);
+    }
+};
+
+var devices: [24]Device = undefined;
 var device_count: usize = 0;
+
+comptime {
+    // Every class a manifest may name has a code here.
+    for (schema.known_pci) |kp| if (g.pci.classByName(kp.name) == null) @compileError("no PCI class code for '" ++ kp.name ++ "'");
+}
 
 fn findDeviceUntyped(base: u64) ?g.CPtr {
     for (boot.untyped[0..boot.untyped_count], 0..) |u, i| {
@@ -190,42 +223,124 @@ fn probeDevices() !void {
             release(frame); // an empty transport
             continue;
         }
-        devices[device_count] = .{ .phys = n.reg.base, .irq_line = n.irq orelse 0, .virtio_id = id, .frame = frame };
+        devices[device_count] = .{ .bus = .virtio, .phys = n.reg.base, .irq_line = n.irq orelse 0, .virtio_id = id, .frame = frame };
         device_count += 1;
         g.record("device_found", .{ .bus = "virtio_mmio", .virtio_id = id, .phys = g.klog.hex(n.reg.base), .irq = n.irq orelse 0 });
     }
+    if (try fdt.findPciHost(tree)) |host| probePci(host) catch |e| g.record("pci_probe_failed", .{ .err = @errorName(e) });
 }
 
-/// The `instance`-th device with this virtio id, in device-tree order.
-/// The validator guarantees no two domains claim the same one.
-fn devicePresent(virtio_id: u32, instance: u8) bool {
-    var seen: u8 = 0;
-    for (devices[0..device_count]) |d| if (d.virtio_id == virtio_id) {
-        if (seen == instance) return true;
-        seen += 1;
+/// Enumerate PCI bus 0: size every function's memory BARs, place them all
+/// in the host's first 32-bit window (largest first: aligned, no gaps), cut
+/// the frames that cover them in the same order, write the addresses, turn
+/// on decoding and bus mastering, and route each interrupt pin.
+fn probePci(host: fdt.PciHost) !void {
+    const window = for (host.windows[0..host.windows_len]) |w| {
+        if (!w.wide) break w;
+    } else return error.NoWindow;
+    const config_ut = findDeviceUntyped(host.ecam.base) orelse return error.NoConfigSpace;
+    const window_ut = findDeviceUntyped(window.cpu) orelse return error.NoWindow;
+    // Bus 0 is the first megabyte of configuration space: one 2 MiB frame.
+    const config = try retypeFrom(config_ut, .frame, 21);
+    try mapInto(pool, S.vspace, config, pci_config_va, .{ .read = true, .write = true }, &scratch_tables);
+
+    const first = device_count;
+    var dev: u6 = 0;
+    while (dev < 32) : (dev += 1) {
+        const f0 = g.pci.Config.at(pci_config_va, 0, @intCast(dev), 0);
+        if (f0.vendor() == 0xffff) continue;
+        const functions: u4 = if (f0.headerType() & 0x80 != 0) 8 else 1;
+        var func: u4 = 0;
+        while (func < functions) : (func += 1) {
+            const c = g.pci.Config.at(pci_config_va, 0, @intCast(dev), @intCast(func));
+            if (c.vendor() == 0xffff or c.headerType() & 0x7f != 0) continue; // absent, or a bridge
+            if (device_count == devices.len) break;
+            const d = &devices[device_count];
+            d.* = .{ .bus = .pci, .phys = 0, .irq_line = 0, .location = .{ .device = @intCast(dev), .function = @intCast(func) }, .vendor = c.vendor(), .device_id = c.deviceId(), .class = c.class() };
+            var sized: [6]g.pci.Bar = undefined;
+            for (c.bars(&sized)) |b| if (d.bar_count < d.bars.len) {
+                d.bars[d.bar_count] = .{ .bar = b };
+                d.bar_count += 1;
+            };
+            if (c.pin() != 0) d.irq_line = host.irqOf(dev, c.pin()) orelse 0;
+            device_count += 1;
+        }
+    }
+
+    var order: [devices.len * 3]*g.pci.Bar = undefined;
+    var n: usize = 0;
+    for (devices[first..device_count]) |*d| for (d.bars[0..d.bar_count]) |*b| {
+        order[n] = &b.bar;
+        n += 1;
     };
-    return false;
+    try g.pci.place(order[0..n], window.pci, window.size);
+    // Frames, in the order the BARs were placed: the window's untyped hands
+    // them out from its base upwards, so each lands on its BAR.
+    for (order[0..n]) |bp| {
+        const b: *PciBar = @fieldParentPtr("bar", bp);
+        b.cpu = window.cpu + (b.bar.addr - window.pci);
+        b.bits = if (b.span() >= 2 << 20) 21 else 12;
+        b.frames = @intCast(b.span() / b.frameSize());
+        for (0..b.frames) |k| {
+            const f = try retypeFrom(window_ut, .frame, b.bits);
+            if (k == 0) b.first = f;
+        }
+        if (try g.physOf(b.first) != b.cpu) return error.WindowOutOfOrder;
+    }
+    for (devices[first..device_count]) |*d| {
+        const c = g.pci.Config.at(pci_config_va, 0, d.location.device, d.location.function);
+        for (d.bars[0..d.bar_count]) |*b| c.setBar(b.bar, b.bar.addr);
+        c.enable();
+        d.phys = if (d.bar_count > 0) d.bars[0].cpu else 0;
+        var where: [8]u8 = undefined;
+        g.record("device_found", .{
+            .bus = "pci",
+            .at = std.fmt.bufPrint(&where, "00:{x:0>2}.{d}", .{ d.location.device, d.location.function }) catch "",
+            .vendor = g.klog.hex(d.vendor),
+            .device = g.klog.hex(d.device_id),
+            .class = g.klog.hex(d.class),
+            .bars = d.bar_count,
+            .phys = g.klog.hex(d.phys),
+            .irq = d.irq_line,
+        });
+    }
+}
+
+/// The device a manifest entry means: the `instance`-th virtio device of its
+/// id, else the `instance`-th PCI function of its class.
+fn findDevice(comptime want: schema.Device) ?*Device {
+    if (want.virtio != 0) {
+        var seen: u8 = 0;
+        for (devices[0..device_count]) |*d| if (d.bus == .virtio and d.virtio_id == want.virtio) {
+            if (seen == want.instance) return d;
+            seen += 1;
+        };
+    }
+    if (want.pci.len > 0) {
+        const class = comptime g.pci.classByName(want.pci).?;
+        var seen: u8 = 0;
+        for (devices[0..device_count]) |*d| if (d.bus == .pci and g.pci.matches(class, d.class)) {
+            if (seen == want.instance) return d;
+            seen += 1;
+        };
+    }
+    return null;
 }
 
 /// The first optional device of domain `i` that this machine lacks.
 fn absentOptional(comptime i: usize) ?[]const u8 {
     inline for (manifest.domains[i].devices) |want| {
-        if (want.optional and !devicePresent(want.virtio, want.instance)) return want.name;
+        if (want.optional and findDevice(want) == null) return want.name;
     }
     return null;
 }
 
-fn claimDevice(virtio_id: u32, instance: u8, owner: usize) ?*VirtioDevice {
-    var seen: u8 = 0;
-    for (devices[0..device_count]) |*d| if (d.virtio_id == virtio_id) {
-        if (seen == instance) {
-            if (d.owner != null and d.owner.? != owner) return null;
-            d.owner = owner;
-            return d;
-        }
-        seen += 1;
-    };
-    return null;
+/// The validator guarantees no two domains claim the same one.
+fn claimDevice(comptime want: schema.Device, owner: usize) ?*Device {
+    const d = findDevice(want) orelse return null;
+    if (d.owner != null and d.owner.? != owner) return null;
+    d.owner = owner;
+    return d;
 }
 
 // ---------------------------------------------------------------------------
@@ -505,20 +620,42 @@ fn build(comptime i: usize) !void {
     }
     info.client_count = clients.len;
     inline for (md.devices, 0..) |want, di| {
-        const dev = claimDevice(want.virtio, want.instance, i) orelse {
-            g.record("device_missing", .{ .domain = md.name, .device = want.name, .virtio_id = want.virtio, .instance = want.instance });
+        const dev = claimDevice(want, i) orelse {
+            g.record("device_missing", .{ .domain = md.name, .device = want.name, .virtio_id = want.virtio, .pci = want.pci, .instance = want.instance });
             return error.DeviceMissing;
         };
-        if (dev.irq == 0) {
+        if (dev.irq == 0 and dev.irq_line != 0) {
             dev.irq = slot();
             try ok(g.invoke(S.irq_control, abi.IrqControlMethod.get, .{ dev.irq_line, dev.irq }));
         }
         const frame_slot = D.Slot.first_device + 2 * di;
-        const mmio_va = D.Layout.devices + di * 4096;
-        try mint(cnode, frame_slot, dev.frame, rw, 0);
-        try mint(cnode, frame_slot + 1, dev.irq, .{ .configure = true }, 0);
-        try mapInto(region, vspace, dev.frame, mmio_va, rw, &owned);
-        info.devices[di] = .{ .name = undefined, .virtio_id = want.virtio, .irq_line = dev.irq_line, .frame_slot = frame_slot, .irq_slot = frame_slot + 1, .mmio = mmio_va, .phys = dev.phys };
+        const slot_va = D.Layout.devices + di * D.Layout.device_span;
+        if (dev.irq != 0) try mint(cnode, frame_slot + 1, dev.irq, .{ .configure = true }, 0);
+        info.devices[di] = .{ .name = undefined, .bus = dev.bus, .virtio_id = dev.virtio_id, .irq_line = dev.irq_line, .frame_slot = 0, .irq_slot = frame_slot + 1, .mmio = slot_va, .phys = dev.phys };
+        switch (dev.bus) {
+            .virtio => {
+                try mint(cnode, frame_slot, dev.frame, rw, 0);
+                try mapInto(region, vspace, dev.frame, slot_va, rw, &owned);
+                info.devices[di].frame_slot = frame_slot;
+            },
+            .pci => {
+                // Each BAR at its own offset, aligned to its frames.
+                const out = &info.devices[di];
+                out.vendor = dev.vendor;
+                out.device_id = dev.device_id;
+                out.class = dev.class;
+                var off: u64 = 0;
+                for (dev.bars[0..dev.bar_count], 0..) |*b, k| {
+                    off = std.mem.alignForward(u64, off, b.frameSize());
+                    if (off + b.span() > D.Layout.device_span) return error.BarsTooLarge;
+                    for (0..b.frames) |f| try mapInto(region, vspace, b.first + @as(g.CPtr, @intCast(f)), slot_va + off + f * b.frameSize(), rw, &owned);
+                    out.bars[k] = .{ .index = b.bar.index, .va = slot_va + off, .size = b.bar.size, .phys = b.cpu };
+                    off += b.span();
+                }
+                out.bar_count = dev.bar_count;
+                if (dev.bar_count > 0) out.mmio = out.bars[0].va;
+            },
+        }
         D.setName(&info.devices[di].name, want.name);
     }
     info.device_count = md.devices.len;

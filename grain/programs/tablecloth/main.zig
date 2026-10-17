@@ -20,7 +20,32 @@ comptime {
     g.exportStart();
 }
 
-const Disk = g.virtio_blk.Blk;
+/// Whatever disk Steward handed over: virtio-blk or NVMe, one interface.
+const Disk = union(enum) {
+    virtio: g.virtio_blk.Blk,
+    nvme: g.nvme.Nvme,
+
+    pub fn read(d: *Disk, block: u64, out: *tc.Block) !void {
+        return switch (d.*) {
+            inline else => |*x| x.read(block, out),
+        };
+    }
+    pub fn write(d: *Disk, block: u64, in: *const tc.Block) !void {
+        return switch (d.*) {
+            inline else => |*x| x.write(block, in),
+        };
+    }
+    pub fn flush(d: *Disk) !void {
+        return switch (d.*) {
+            inline else => |*x| x.flush(),
+        };
+    }
+    fn blocks(d: *const Disk) u64 {
+        return switch (d.*) {
+            inline else => |x| x.blocks,
+        };
+    }
+};
 const Store = tc.Store(Disk, .{ .objects = 4096, .names = 256, .secret_names = 256 });
 
 var disk: Disk = undefined;
@@ -295,16 +320,24 @@ pub fn main() !u16 {
     const q = try g.virtio.Dma.alloc(&space, D.Layout.heap);
     const req = try g.virtio.Dma.alloc(&space, D.Layout.heap + 0x1000);
     const data = try g.virtio.Dma.alloc(&space, D.Layout.heap + 0x2000);
+    const q2 = try g.virtio.Dma.alloc(&space, D.Layout.heap + 0x3000);
+    const q3 = try g.virtio.Dma.alloc(&space, D.Layout.heap + 0x4000);
     const signal = try space.retype(.signal, 0);
     if (!g.invoke(dev.irq_slot, g.abi.IrqMethod.set_signal, .{signal}).ok()) return error.IrqSetup;
-    disk = try Disk.init(dev.mmio, .{ .va = q.va, .pa = q.pa }, .{ .va = req.va, .pa = req.pa }, .{ .va = data.va, .pa = data.pa }, signal, dev.irq_slot);
+    disk = switch (dev.bus) {
+        .virtio => .{ .virtio = try g.virtio_blk.Blk.init(dev.mmio, .{ .va = q.va, .pa = q.pa }, .{ .va = req.va, .pa = req.pa }, .{ .va = data.va, .pa = data.pa }, signal, dev.irq_slot) },
+        .pci => .{ .nvme = try g.nvme.Nvme.init(dev.mmio, .{
+            .{ .va = q.va, .pa = q.pa }, .{ .va = req.va, .pa = req.pa }, .{ .va = q2.va, .pa = q2.pa }, .{ .va = q3.va, .pa = q3.pa }, .{ .va = data.va, .pa = data.pa },
+        }, signal, dev.irq_slot) },
+    };
+    g.log("disk_ready", .{ .bus = @tagName(dev.bus), .blocks = disk.blocks() });
 
     cloth.mount(&disk) catch |e| switch (e) {
         error.NotFormatted => {
             // Unlocking may take half this domain's memory.
             const m_kib: u32 = @intCast(@min(16 * 1024, g.env().memory_bytes / 2 / 1024));
-            try cloth.format(&disk, disk.blocks, .{ .t = 2, .m_kib = m_kib });
-            g.log("tablecloth_formatted", .{ .blocks = disk.blocks });
+            try cloth.format(&disk, disk.blocks(), .{ .t = 2, .m_kib = m_kib });
+            g.log("tablecloth_formatted", .{ .blocks = disk.blocks() });
         },
         else => return e,
     };

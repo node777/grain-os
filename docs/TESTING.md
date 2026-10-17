@@ -94,6 +94,10 @@ The four layers, from fastest to most real:
    (typed on the console by the harness) and makes the identity; boot 2
    refuses a wrong passphrase, unlocks with the right one, and the identity
    comes back by the same name.
+7b. **QEMU, storage on NVMe** (`--disk-bus nvme`): the same two boots on
+   an NVMe drive. Steward finds it on the PCI bus, places its BAR and
+   routes its interrupt; Tablecloth drives it natively; the identity made
+   on boot 1 comes back on boot 2.
 8. **QEMU, generations through Aurora** (eight boots on one disk): an agent
    uploads and switches to the next generation; the power is cut right
    after Aurora records the trial boot; the trial comes up and is confirmed;
@@ -117,7 +121,8 @@ The four layers, from fastest to most real:
     introduce themselves; A lends B its guestbook on a three-use lease; B's
     agent calls it as `guestbook@<A>`; the fourth call is refused by the
     kernel; a file moves by its hash; a second share is revoked and B's next
-    call is refused.
+    call is refused. A's network device is virtio-net, B's an Intel e1000 on
+    PCI, so both drivers carry the same conversation.
 11. **Manifest compile failure:** `zig build check-manifest
    -Dsystem=system/tests/miswired.brix` must fail, and its stderr must name
    the missing service (brix reports it with the line of the block).

@@ -470,10 +470,11 @@ pub fn Kernel(comptime A: type) type {
                 free_bytes += f.size;
             }
 
-            const device_budget: u64 = 64;
             const boot_reserve: u64 = 64 + k.irq_count;
+            var device_objects: u64 = 0;
+            for (plat.deviceRanges()) |d| device_objects += deviceBudget(d);
             const n_entries = free_bytes / bytes_per_object + boot_reserve +
-                plat.devices_len * device_budget + abi.max_boot_untyped;
+                device_objects + abi.max_boot_untyped;
             const table_bytes = std.mem.alignForward(u64, n_entries * @sizeOf(Entry), page_size);
             const table_pa = bootAlloc(&free, nfree, table_bytes) orelse return error.OutOfMemory;
             // Root untyped bodies (they have no parent region to live in).
@@ -513,7 +514,7 @@ pub fn Kernel(comptime A: type) type {
                 const b = std.mem.alignBackward(u64, d.base, page_size);
                 const e = std.mem.alignForward(u64, d.end(), page_size);
                 const pages = (e - b) / page_size;
-                untyped[nut] = k.makeRootUntyped(&bodies_pa, bodies_end, .{ .base = b, .size = e - b }, true, @intCast(@min(pages, device_budget)));
+                untyped[nut] = k.makeRootUntyped(&bodies_pa, bodies_end, .{ .base = b, .size = e - b }, true, @intCast(@min(pages, deviceBudget(d))));
                 nut += 1;
             }
             if (ram_untyped == 0) return error.OutOfMemory;
@@ -531,6 +532,13 @@ pub fn Kernel(comptime A: type) type {
                 .object_table = k.table.len,
                 .objects_free = k.free_count,
             });
+        }
+
+        /// How many objects (frames, mostly) a device range may be cut into:
+        /// a device's registers need few; a PCI window or configuration
+        /// space serves many devices.
+        fn deviceBudget(d: Range) u64 {
+            return if (d.size >= 0x1000_0000) 1024 else 64;
         }
 
         fn makeRootUntyped(k: *Self, bodies_pa: *u64, bodies_end: u64, r: Range, device: bool, budget: u32) ObjId {

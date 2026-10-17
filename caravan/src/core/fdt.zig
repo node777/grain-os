@@ -242,6 +242,7 @@ const NodeInfo = struct {
     /// Cell sizes this node declares for its children (spec defaults 2 and 1).
     child_cells: [2]u32 = .{ 2, 1 },
     reg: ?Prop = null,
+    ranges: ?Prop = null,
     compatible: ?Prop = null,
     device_type: ?[]const u8 = null,
     status_ok: bool = true,
@@ -281,6 +282,7 @@ pub fn parsePlatform(fdt: Fdt) Error!Platform {
             if (eql(u8, prop.name, "#address-cells")) n.child_cells[0] = prop.u32At(0) orelse 2;
             if (eql(u8, prop.name, "#size-cells")) n.child_cells[1] = prop.u32At(0) orelse 1;
             if (eql(u8, prop.name, "reg")) n.reg = prop;
+            if (eql(u8, prop.name, "ranges")) n.ranges = prop;
             if (eql(u8, prop.name, "compatible")) n.compatible = prop;
             if (eql(u8, prop.name, "device_type")) n.device_type = prop.str();
             if (eql(u8, prop.name, "status")) n.status_ok = eql(u8, prop.str(), "okay") or eql(u8, prop.str(), "ok");
@@ -332,6 +334,15 @@ pub fn parsePlatform(fdt: Fdt) Error!Platform {
                     p.devices[p.devices_len] = f;
                     p.devices_len += 1;
                 };
+                // A PCI host bridge's memory windows are device memory too:
+                // the BARs that drivers map are assigned inside them.
+                if (c.hasString("pci-host-ecam-generic") and n.status_ok) if (n.ranges) |r| {
+                    var it = PciWindows{ .ranges = r, .parent_cells = n.reg_cells[0], .size_cells = n.child_cells[1] };
+                    while (it.next()) |win| if (p.devices_len < max_devices) {
+                        p.devices[p.devices_len] = .{ .base = win.cpu, .size = win.size };
+                        p.devices_len += 1;
+                    };
+                };
             }
         },
     };
@@ -362,6 +373,123 @@ pub fn parsePlatform(fdt: Fdt) Error!Platform {
         }
     }
     return p;
+}
+
+/// A PCI memory window: where the bus addresses `pci` appear to the CPU.
+pub const PciWindow = struct { pci: u64, cpu: u64, size: u64, prefetchable: bool, wide: bool };
+
+/// The memory windows in a PCI host's `ranges` (I/O space is skipped).
+const PciWindows = struct {
+    ranges: Prop,
+    parent_cells: u32,
+    size_cells: u32,
+    i: usize = 0,
+
+    fn next(w: *PciWindows) ?PciWindow {
+        const stride = 3 + w.parent_cells + w.size_cells;
+        while (w.ranges.u32At(w.i)) |hi| {
+            defer w.i += stride;
+            const pci = w.ranges.cellsAt(w.i + 1, 2) orelse return null;
+            const cpu = w.ranges.cellsAt(w.i + 3, w.parent_cells) orelse return null;
+            const size = w.ranges.cellsAt(w.i + 3 + w.parent_cells, w.size_cells) orelse return null;
+            const space = (hi >> 24) & 3; // 1 = I/O, 2 = 32-bit memory, 3 = 64-bit memory
+            if (space < 2 or size == 0) continue;
+            return .{ .pci = pci, .cpu = cpu, .size = size, .prefetchable = hi & 0x4000_0000 != 0, .wide = space == 3 };
+        }
+        return null;
+    }
+};
+
+/// One line of a PCI host's `interrupt-map`: a device (bits 11..15 of the
+/// address, masked) and pin (1..4) to an interrupt of its parent.
+pub const PciIrq = struct { device: u32, pin: u32, irq: u32 };
+
+pub const PciHost = struct {
+    ecam: Range,
+    bus_start: u8 = 0,
+    bus_end: u8 = 255,
+    windows: [4]PciWindow = undefined,
+    windows_len: usize = 0,
+    map: [32]PciIrq = undefined,
+    map_len: usize = 0,
+    /// Which address bits and pin bits the map looks at.
+    mask_device: u32 = 0xffff_ffff,
+    mask_pin: u32 = 7,
+
+    /// The parent interrupt for `pin` (1..4) of the device at `devfn`'s slot.
+    pub fn irqOf(h: *const PciHost, device: u32, pin: u32) ?u32 {
+        const key = (device << 11) & h.mask_device;
+        for (h.map[0..h.map_len]) |e| if (e.device == key and e.pin == (pin & h.mask_pin)) return e.irq;
+        return null;
+    }
+};
+
+/// The first enabled ECAM PCI host bridge, with what Steward needs to
+/// enumerate it: configuration space, memory windows, interrupt routing.
+/// The interrupt map is read assuming a parent with no address cells and
+/// one interrupt cell (the RISC-V PLIC; most simple interrupt controllers).
+pub fn findPciHost(fdt: Fdt) Error!?PciHost {
+    var stack: [max_depth]NodeInfo = undefined;
+    var props: [max_depth]struct { map: ?Prop = null, mask: ?Prop = null, bus: ?Prop = null } = undefined;
+    var depth: usize = 0;
+    var w = fdt.walk();
+    while (try w.next()) |ev| switch (ev) {
+        .begin => |name| {
+            if (depth == max_depth) return error.BadStructure;
+            stack[depth] = .{ .name = name };
+            props[depth] = .{};
+            if (depth > 0) stack[depth].reg_cells = stack[depth - 1].child_cells;
+            depth += 1;
+        },
+        .prop => |prop| {
+            if (depth == 0) return error.BadStructure;
+            const nd = &stack[depth - 1];
+            const eql = std.mem.eql;
+            if (eql(u8, prop.name, "#address-cells")) nd.child_cells[0] = prop.u32At(0) orelse 2;
+            if (eql(u8, prop.name, "#size-cells")) nd.child_cells[1] = prop.u32At(0) orelse 1;
+            if (eql(u8, prop.name, "reg")) nd.reg = prop;
+            if (eql(u8, prop.name, "ranges")) nd.ranges = prop;
+            if (eql(u8, prop.name, "compatible")) nd.compatible = prop;
+            if (eql(u8, prop.name, "status")) nd.status_ok = eql(u8, prop.str(), "okay") or eql(u8, prop.str(), "ok");
+            if (eql(u8, prop.name, "interrupt-map")) props[depth - 1].map = prop;
+            if (eql(u8, prop.name, "interrupt-map-mask")) props[depth - 1].mask = prop;
+            if (eql(u8, prop.name, "bus-range")) props[depth - 1].bus = prop;
+        },
+        .end => {
+            if (depth == 0) return error.BadStructure;
+            depth -= 1;
+            const nd = stack[depth];
+            const c = nd.compatible orelse continue;
+            if (!c.hasString("pci-host-ecam-generic") or !nd.status_ok) continue;
+            var h: PciHost = .{ .ecam = firstReg(nd.reg, nd.reg_cells) orelse continue };
+            if (props[depth].bus) |b| {
+                h.bus_start = @truncate(b.u32At(0) orelse 0);
+                h.bus_end = @truncate(b.u32At(1) orelse 255);
+            }
+            if (nd.ranges) |r| {
+                var it = PciWindows{ .ranges = r, .parent_cells = nd.reg_cells[0], .size_cells = nd.child_cells[1] };
+                while (it.next()) |win| if (h.windows_len < h.windows.len) {
+                    h.windows[h.windows_len] = win;
+                    h.windows_len += 1;
+                };
+            }
+            if (props[depth].mask) |m| {
+                h.mask_device = m.u32At(0) orelse h.mask_device;
+                h.mask_pin = m.u32At(3) orelse h.mask_pin;
+            }
+            if (props[depth].map) |m| {
+                // child address (3) + pin (1) + parent phandle (1) + parent irq (1)
+                var i: usize = 0;
+                while (m.u32At(i + 5)) |irq| : (i += 6) {
+                    if (h.map_len == h.map.len) break;
+                    h.map[h.map_len] = .{ .device = m.u32At(i).?, .pin = m.u32At(i + 3).?, .irq = irq };
+                    h.map_len += 1;
+                }
+            }
+            return h;
+        },
+    };
+    return null;
 }
 
 fn firstReg(reg: ?Prop, cells: [2]u32) ?Range {
@@ -404,6 +532,27 @@ test "parse QEMU virt (2 harts, 256 MiB)" {
     try std.testing.expectEqual(Range{ .base = 0x1000_0000, .size = 0x100 }, p.uart.?);
     try std.testing.expectEqual(@as(?u32, 10), p.uart_irq);
     try std.testing.expect(p.devices_len >= 4);
+}
+
+test "the PCI host: configuration space, windows, interrupt routing" {
+    const fdt = try Fdt.init(virt_dtb);
+    const h = (try findPciHost(fdt)).?;
+    try std.testing.expectEqual(Range{ .base = 0x3000_0000, .size = 0x1000_0000 }, h.ecam);
+    try std.testing.expectEqual(@as(usize, 2), h.windows_len);
+    try std.testing.expectEqual(@as(u64, 0x4000_0000), h.windows[0].cpu);
+    try std.testing.expectEqual(@as(u64, 0x4000_0000), h.windows[0].size);
+    try std.testing.expect(!h.windows[0].wide and h.windows[1].wide);
+    try std.testing.expectEqual(@as(u64, 0x4_0000_0000), h.windows[1].cpu);
+    // Swizzled: slot 1 pin A is the line slot 0 pin B uses.
+    try std.testing.expectEqual(@as(?u32, 0x20), h.irqOf(0, 1));
+    try std.testing.expectEqual(@as(?u32, 0x21), h.irqOf(1, 1));
+    try std.testing.expectEqual(@as(?u32, 0x20), h.irqOf(1, 4));
+    try std.testing.expectEqual(@as(?u32, 0x23), h.irqOf(4, 4)); // slot 4 masks to slot 0
+    // The kernel offers the windows as device memory.
+    const p = try parsePlatform(fdt);
+    var found: usize = 0;
+    for (p.deviceRanges()) |r| found += @intFromBool(r.base == 0x4000_0000 or r.base == 0x4_0000_0000);
+    try std.testing.expectEqual(@as(usize, 2), found);
 }
 
 test "reject bad blobs" {

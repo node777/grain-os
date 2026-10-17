@@ -33,7 +33,7 @@ from harness import QEMU_RISCV64, ConsolePump, matches, parse_record, record_pre
 
 
 class Instance:
-    def __init__(self, name, kernel, tmpdir, disk, rng, mac, here, there, passphrase, smp, realtime):
+    def __init__(self, name, kernel, tmpdir, disk, rng, mac, here, there, passphrase, smp, realtime, nic="virtio"):
         self.name = name
         self.tmpdir = tmpdir
         self.envoy_path = os.path.join(tmpdir, f"envoy-{name}.sock")
@@ -56,7 +56,7 @@ class Instance:
                            "-chardev", f"socket,id=envoy0,path={self.envoy_path},server=on,wait=off",
                            "-device", "virtconsole,chardev=envoy0,bus=vser1.0",
                            "-netdev", f"dgram,id=net0,local.type=unix,local.path={here},remote.type=unix,remote.path={there}",
-                           "-device", f"virtio-net-device,netdev=net0,mac={mac}",
+                           "-device", f"{'e1000' if nic == 'e1000' else 'virtio-net-device'},netdev=net0,mac={mac}",
                            "-kernel", kernel]
         self.pump = ConsolePump(console_sock, self.console_path)
         self.passphrase = passphrase
@@ -119,12 +119,14 @@ def main():
     ap.add_argument("--smp", default="2")
     ap.add_argument("--timeout", type=float, default=300.0)
     ap.add_argument("--realtime", action="store_true", help="no -icount (leases expire by the clock)")
+    ap.add_argument("--nic-a", choices=["virtio", "e1000"], default="virtio", help="instance a's network card")
+    ap.add_argument("--nic-b", choices=["virtio", "e1000"], default="virtio", help="instance b's network card")
     args = ap.parse_args()
 
     tmpdir = tempfile.mkdtemp(prefix="grain-pair-")
     link_a, link_b = os.path.join(tmpdir, "link-a.sock"), os.path.join(tmpdir, "link-b.sock")
-    a = Instance("a", args.kernel, tmpdir, args.disk_a, args.rng_a, "52:54:00:00:00:0a", link_a, link_b, args.passphrase, args.smp, args.realtime)
-    b = Instance("b", args.kernel, tmpdir, args.disk_b, args.rng_b, "52:54:00:00:00:0b", link_b, link_a, args.passphrase, args.smp, args.realtime)
+    a = Instance("a", args.kernel, tmpdir, args.disk_a, args.rng_a, "52:54:00:00:00:0a", link_a, link_b, args.passphrase, args.smp, args.realtime, args.nic_a)
+    b = Instance("b", args.kernel, tmpdir, args.disk_b, args.rng_b, "52:54:00:00:00:0b", link_b, link_a, args.passphrase, args.smp, args.realtime, args.nic_b)
 
     failures = []
 

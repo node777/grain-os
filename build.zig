@@ -326,6 +326,30 @@ pub fn build(b: *std.Build) void {
     qtest_storage.has_side_effects = true;
     qtest_storage.step.dependOn(&qtest_system.step);
 
+    // The same, on an NVMe drive: Steward finds it on the PCI bus, places
+    // its BAR and routes its interrupt; Tablecloth drives it natively.
+    const qtest_nvme = b.addSystemCommand(&.{
+        "python3",                                          "tools/harness.py",
+        "--timeout",                                        qemu_timeout,
+        "--smp",                                            smp,
+        "--virtio-console",                                 "--boots",
+        "2",                                                "--disk-bus",
+        "nvme",                                             "--console-input",
+        "1:open sesame",                                    "--console-input",
+        "1:open sesame",                                    "--console-input",
+        "2:open sesame",                                    "--expect",
+        "device_found bus=pci class=0x10802",               "--expect",
+        "disk_ready domain=tablecloth bus=pci",             "--expect",
+        "1:kumara_ready name=sift-noon-city created=true",  "--expect",
+        "2:kumara_ready name=sift-noon-city created=false",
+    });
+    qtest_nvme.addPrefixedFileArg("--virtio-rng=", rng_file);
+    qtest_nvme.addPrefixedFileArg("--disk=", test_disk);
+    qtest_nvme.addArtifactArg(kernel);
+    qtest_nvme.stdio = .inherit;
+    qtest_nvme.has_side_effects = true;
+    qtest_nvme.step.dependOn(&qtest_storage.step);
+
     // The same system with a disk and an agent attached to Envoy:
     // tools/agent_session.py exercises every verb, the leases' limits, the
     // audit chain, the identity, and that every action reached the Ledger. Real time
@@ -351,7 +375,7 @@ pub fn build(b: *std.Build) void {
     qtest_agent.addArtifactArg(kernel);
     qtest_agent.stdio = .inherit;
     qtest_agent.has_side_effects = true;
-    qtest_agent.step.dependOn(&qtest_storage.step);
+    qtest_agent.step.dependOn(&qtest_nvme.step);
 
     // The desktop: a screen, keyboard and tablet driven through QEMU's
     // monitor. tools/desktop_session.py opens the shell from the dock, types
@@ -380,9 +404,10 @@ pub fn build(b: *std.Build) void {
 
     // Two instances on one link (tools/pair.py): they introduce themselves,
     // one lends the other its guestbook on a lease, a file moves by its
-    // hash, and access is revoked (tools/comlink_session.py). Real time:
+    // hash, and access is revoked (tools/comlink_session.py). A has a
+    // virtio network device, B an Intel e1000 on PCI. Real time:
     // two virtual clocks under -icount would not agree on a timeout.
-    const qtest_pair = b.addSystemCommand(&.{ "python3", "tools/pair.py", "--realtime", "--timeout", "240", "--smp", smp, "--scenario", "tools/comlink_session.py" });
+    const qtest_pair = b.addSystemCommand(&.{ "python3", "tools/pair.py", "--realtime", "--nic-b", "e1000", "--timeout", "240", "--smp", smp, "--scenario", "tools/comlink_session.py" });
     qtest_pair.addPrefixedFileArg("--rng-a=", rng_file);
     qtest_pair.addPrefixedFileArg("--rng-b=", rng_file_b);
     qtest_pair.addPrefixedFileArg("--disk-a=", test_disk);

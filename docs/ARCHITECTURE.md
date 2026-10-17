@@ -645,6 +645,31 @@ enforces the limits, and an exhausted or expired lease fails with
   DMA with physical addresses from `Frame.info`. Until the IOMMU is in use,
   a driver with a DMA-capable device is trusted with memory; that is the
   main reason drivers are separate domains with their own regions.
+- **PCI Express.** Steward owns the bus. The kernel offers the host
+  bridge's configuration space (ECAM) and its memory windows as device
+  memory; Steward maps bus 0's configuration space (one 2 MiB frame), finds
+  every function, sizes its memory BARs, and places all of them in the first
+  32-bit window largest first, so each lands aligned to its own size with no
+  gaps. Then it cuts the window's frames in that same order (BARs of 2 MiB
+  and more in 2 MiB frames), so each frame lands on its BAR (it checks),
+  writes the addresses, turns on memory decoding and bus mastering, and
+  routes each interrupt pin through the device tree's `interrupt-map`
+  (`grain/lib/pci.zig`, `fdt.findPciHost`). Drivers never touch
+  configuration space: a domain gets its function's BARs mapped in its
+  device slot (32 MiB of address space per device) and its INTx line as an
+  `Irq`, and `DomainInfo` tells it the vendor, device, class and BARs.
+- **A disk is a disk.** A manifest names a device by what it is and may
+  offer alternatives: `device disk { virtio = 2, pci = nvme, optional }` is
+  whichever the machine has (virtio first), and the driver looks at
+  `bus` to know which it got. PCI classes are named (`nvme`, `ethernet`,
+  `display`, `xhci`); the validator knows them. *Built:* **NVMe**
+  (`grain/lib/nvme.zig`: admin and one I/O queue pair, identify, 4 KiB
+  blocks through one data page, flush), under Tablecloth; and the **Intel
+  8254x** Ethernet controller (`grain/lib/e1000.zig`: legacy descriptors,
+  sixteen receive and eight transmit buffers), under Mycelium. Both share
+  their virtio counterpart's interface, so the domain above holds a small
+  union and nothing else changes. Aurora still loads generations from
+  virtio-blk only (it runs before Steward; *planned*: its own NVMe path).
 - *Changed from the plan:* the Envoy channel is a **second virtio-console
   device** (`instance = 1`, `optional`) rather than a second port of the
   first one. Multiport needs a control queue; two devices are simpler and

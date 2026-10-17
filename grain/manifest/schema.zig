@@ -103,9 +103,13 @@ pub const Use = struct {
 
 pub const Device = struct {
     name: []const u8,
-    /// virtio device id: 3 = console, 4 = entropy source.
-    virtio: u32,
-    /// Which device of that kind, counting from 0 in device-tree order.
+    /// virtio device id (1 network, 2 block, 3 console, ...), or 0.
+    virtio: u32 = 0,
+    /// A PCI function, by class name (`known_pci`), or "". With both, the
+    /// device is whichever of the two the machine has (virtio first): a disk
+    /// is a disk, whether virtio-blk or NVMe.
+    pci: []const u8 = "",
+    /// Which device of that kind, counting from 0 in device-tree (or bus) order.
     instance: u8 = 0,
     /// If the machine lacks it, the domain is skipped (`domain_skipped`), not
     /// failed: for hardware that is often absent, like a host agent port.
@@ -128,6 +132,20 @@ pub const known_virtio = [_]struct { id: u32, what: []const u8 }{
     .{ .id = 4, .what = "entropy source" },
     .{ .id = 16, .what = "screen" },
     .{ .id = 18, .what = "keyboard or pointer" },
+};
+
+/// PCI function classes a manifest may name (lib/pci.zig has their codes).
+pub const known_pci = [_]struct { name: []const u8, what: []const u8 }{
+    .{ .name = "nvme", .what = "NVMe storage" },
+    .{ .name = "ethernet", .what = "Ethernet controller" },
+    .{ .name = "display", .what = "display controller" },
+    .{ .name = "xhci", .what = "USB 3 host controller" },
+};
+
+const known_pci_list = blk: {
+    var out: []const u8 = "";
+    for (known_pci, 0..) |kp, i| out = out ++ (if (i > 0) ", " else "") ++ kp.name;
+    break :blk out;
 };
 
 /// "2 block device, 3 console, ...": for messages.
@@ -219,10 +237,15 @@ pub fn validate(m: Manifest, buf: []u8) ?[]const u8 {
         for (d.devices, 0..) |dev, di| {
             if (!isName(dev.name)) return f.msg("domain '{s}': device name '{s}' must be 1-{d} characters of a-z, 0-9 and _", .{ d.name, dev.name, max_name });
             for (d.devices[0..di]) |e| if (std.mem.eql(u8, e.name, dev.name)) return f.msg("domain '{s}' names two devices '{s}'", .{ d.name, dev.name });
+            if (dev.virtio == 0 and dev.pci.len == 0) return f.msg("domain '{s}': device '{s}' names no device: give it virtio = <id>, pci = <class>, or both", .{ d.name, dev.name });
             const known = for (known_virtio) |kv| {
                 if (kv.id == dev.virtio) break true;
             } else false;
-            if (!known) return f.msg("domain '{s}': device '{s}' asks for virtio id {d}, which no driver here supports (known: " ++ known_virtio_list ++ ")", .{ d.name, dev.name, dev.virtio });
+            if (dev.virtio != 0 and !known) return f.msg("domain '{s}': device '{s}' asks for virtio id {d}, which no driver here supports (known: " ++ known_virtio_list ++ ")", .{ d.name, dev.name, dev.virtio });
+            const known_class = for (known_pci) |kp| {
+                if (std.mem.eql(u8, kp.name, dev.pci)) break true;
+            } else false;
+            if (dev.pci.len > 0 and !known_class) return f.msg("domain '{s}': device '{s}' asks for PCI class '{s}', which no driver here supports (known: " ++ known_pci_list ++ ")", .{ d.name, dev.name, dev.pci });
         }
     }
 
@@ -248,8 +271,10 @@ pub fn validate(m: Manifest, buf: []u8) ?[]const u8 {
     for (m.domains, 0..) |d, i| for (d.devices, 0..) |dev, di| {
         for (m.domains[0 .. i + 1], 0..) |e, j| for (e.devices, 0..) |other, k| {
             if (j == i and k >= di) break;
-            if (other.virtio == dev.virtio and other.instance == dev.instance)
+            if (other.virtio != 0 and other.virtio == dev.virtio and other.instance == dev.instance)
                 return f.msg("domains '{s}' and '{s}' both claim virtio device {d} instance {d}", .{ e.name, d.name, dev.virtio, dev.instance });
+            if (other.pci.len > 0 and std.mem.eql(u8, other.pci, dev.pci) and other.instance == dev.instance)
+                return f.msg("domains '{s}' and '{s}' both claim PCI {s} instance {d}", .{ e.name, d.name, dev.pci, dev.instance });
         };
     };
 
@@ -334,6 +359,8 @@ test "each mistake gets its own explanation" {
     try expectError(.{ .name = "t", .domains = &.{ console, .{ .name = "a", .program = "x", .uses = &.{.{ .name = "out", .from = "console.consol", .protocol = "console.v1" }} } } }, "uses 'console.consol', but no domain provides it");
     try expectError(.{ .name = "t", .domains = &.{ console, .{ .name = "a", .program = "x", .uses = &.{.{ .name = "out", .from = "console.console", .protocol = "console.v2" }} } } }, "expects 'console.console' to speak console.v2, but it speaks console.v1");
     try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .devices = &.{.{ .name = "sound", .virtio = 25 }} }} }, "virtio id 25, which no driver here supports (known: 1 network device, 2 block device, 3 console, 4 entropy source, 16 screen, 18 keyboard or pointer)");
+    try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .devices = &.{.{ .name = "sound", .pci = "hda" }} }} }, "asks for PCI class 'hda', which no driver here supports (known: nvme, ethernet, display, xhci)");
+    try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .devices = &.{.{ .name = "thing" }} }} }, "device 'thing' names no device: give it virtio = <id>, pci = <class>, or both");
     try expectError(.{ .name = "t", .domains = &.{
         .{ .name = "a", .program = "x", .budget_us = 6_000, .period_us = 10_000 },
         .{ .name = "b", .program = "x", .budget_us = 4_000, .period_us = 10_000 },
@@ -358,6 +385,9 @@ test "agent grants and device claims are checked" {
     const con_a: Domain = .{ .name = "con_a", .program = "virtio_console", .devices = &.{.{ .name = "port", .virtio = 3 }} };
     const con_b: Domain = .{ .name = "con_b", .program = "virtio_console", .devices = &.{.{ .name = "port", .virtio = 3 }} };
     try expectError(.{ .name = "t", .domains = &.{ con_a, con_b } }, "domains 'con_a' and 'con_b' both claim virtio device 3 instance 0");
+    const disk_a: Domain = .{ .name = "disk_a", .program = "x", .devices = &.{.{ .name = "disk", .virtio = 2, .pci = "nvme" }} };
+    const disk_b: Domain = .{ .name = "disk_b", .program = "x", .devices = &.{.{ .name = "disk", .pci = "nvme" }} };
+    try expectError(.{ .name = "t", .domains = &.{ disk_a, disk_b } }, "domains 'disk_a' and 'disk_b' both claim PCI nvme instance 0");
 }
 
 test "call cycles are found and spelled out" {

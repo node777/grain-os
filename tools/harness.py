@@ -268,6 +268,8 @@ def main():
                     help="a line to type on the console (e.g. the disk passphrase); repeatable")
     ap.add_argument("--disk", default=None,
                     help="attach this raw disk image (virtio-blk); a fresh copy unless --disk-inplace")
+    ap.add_argument("--disk-bus", choices=["virtio", "nvme"], default="virtio",
+                    help="attach the --disk as virtio-blk (default) or as an NVMe drive on PCI")
     ap.add_argument("--disk-inplace", action="store_true",
                     help="use the --disk image itself, so a later run sees what this one wrote")
     ap.add_argument("--disk-seed", default=None,
@@ -343,7 +345,7 @@ def run_boot(args, boot, tmpdir, disk):
         devices += ["-object", f"rng-random,id=rng0,filename={args.virtio_rng}", "-device", "virtio-rng-device,rng=rng0"]
     if disk:
         devices += ["-drive", f"file={disk},format=raw,if=none,id=disk0,cache=writeback",
-                    "-device", "virtio-blk-device,drive=disk0"]
+                    "-device", "nvme,drive=disk0,serial=grain0" if args.disk_bus == "nvme" else "virtio-blk-device,drive=disk0"]
     expect = for_boot(args.expect, boot)
     expect_console = for_boot(args.expect_console, boot)
     console_input = for_boot(args.console_input, boot)

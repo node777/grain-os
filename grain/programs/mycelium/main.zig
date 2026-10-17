@@ -20,7 +20,35 @@ comptime {
     g.exportStart();
 }
 
-var nic: g.virtio_net.Net = undefined;
+/// Whatever network device Steward handed over: virtio-net or an Intel
+/// 8254x, one interface.
+const Nic = union(enum) {
+    virtio: g.virtio_net.Net,
+    e1000: g.e1000.E1000,
+
+    fn send(n: *Nic, f: []const u8) !void {
+        return switch (n.*) {
+            inline else => |*x| x.send(f),
+        };
+    }
+    fn recv(n: *Nic, out: []u8) ?[]u8 {
+        return switch (n.*) {
+            inline else => |*x| x.recv(out),
+        };
+    }
+    fn ack(n: *Nic) void {
+        switch (n.*) {
+            .virtio => |*x| _ = x.dev.ackInterrupt(),
+            .e1000 => |*x| x.ack(),
+        }
+    }
+    fn hwAddress(n: *const Nic) net.Mac {
+        return switch (n.*) {
+            inline else => |x| x.mac,
+        };
+    }
+};
+var nic: Nic = undefined;
 var nic_irq: g.CPtr = 0;
 var mac: net.Mac = undefined;
 var address: net.Ip = 0;
@@ -152,7 +180,7 @@ var space: g.Space = undefined;
 const Server = struct {
     pub fn onSignal(_: *Server, _: u64) void {
         drain();
-        _ = nic.dev.ackInterrupt();
+        nic.ack();
         _ = g.invoke(nic_irq, g.abi.IrqMethod.ack, .{});
         drain();
     }
@@ -217,12 +245,23 @@ pub fn main() !u16 {
     const sig = try space.retype(.signal, 0);
     if (!g.invoke(dev.irq_slot, g.abi.IrqMethod.set_signal, .{sig}).ok()) return error.IrqSetup;
     nic_irq = dev.irq_slot;
-    nic = try g.virtio_net.Net.init(dev.mmio, try page(base), try page(base + 0x1000), rx_pages, tx_pages);
-    mac = nic.mac;
+    nic = switch (dev.bus) {
+        .virtio => .{ .virtio = try g.virtio_net.Net.init(dev.mmio, try page(base), try page(base + 0x1000), rx_pages, tx_pages) },
+        .pci => blk: {
+            if (!g.e1000.supports(dev.vendor, dev.device_id)) return error.UnsupportedNic;
+            var rx_bufs: [8]g.e1000.Page = undefined;
+            var tx_bufs: [4]g.e1000.Page = undefined;
+            for (rx_pages, 0..) |p, i| rx_bufs[i] = .{ .va = p.va, .pa = p.pa };
+            for (tx_pages, 0..) |p, i| tx_bufs[i] = .{ .va = p.va, .pa = p.pa };
+            const rings = try page(base);
+            break :blk .{ .e1000 = try g.e1000.E1000.init(dev.mmio, .{ .va = rings.va, .pa = rings.pa }, rx_bufs, tx_bufs) };
+        },
+    };
+    mac = nic.hwAddress();
     address = net.linkLocal(mac);
     if (g.bindSignal(sig) != .ok) return error.BindFailed;
     var ip_text: [15]u8 = undefined;
-    g.log("mycelium_ready", .{ .address = net.formatIp(address, &ip_text), .mac = g.klog.hex(std.mem.readInt(u48, &mac, .big)) });
+    g.log("mycelium_ready", .{ .address = net.formatIp(address, &ip_text), .mac = g.klog.hex(std.mem.readInt(u48, &mac, .big)), .nic = @tagName(nic) });
     idl.recv_slot = try space.slot();
     var s: Server = .{};
     idl.serve(P, g.provided("mycelium") orelse return error.NoService, &s);

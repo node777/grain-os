@@ -34,8 +34,10 @@ pub const cnode_bits = 8;
 /// Fixed user addresses in every domain.
 pub const Layout = struct {
     pub const program_base: usize = 0x10000;
-    /// Device MMIO pages, one 4 KiB page per device.
+    /// Device registers: each device has a `device_span` of address space
+    /// from here (a virtio page, or a PCI function's BARs).
     pub const devices: usize = 0x7000_0000;
+    pub const device_span: usize = 32 << 20;
     pub const info: usize = 0x7ff0_0000;
     pub const ipc_buffer: usize = 0x7ff1_0000;
     /// The stack grows down from here; its size is the manifest's `stack_kib`.
@@ -120,16 +122,42 @@ pub const Client = extern struct {
 
 pub const max_clients = 16;
 
+/// A PCI function's memory BAR, mapped in this domain.
+pub const Bar = extern struct {
+    /// Which BAR register (0..5).
+    index: u32,
+    _pad: u32 = 0,
+    va: u64,
+    size: u64,
+    phys: u64,
+};
+
+pub const Bus = enum(u32) { virtio = 0, pci = 1 };
+
 pub const Device = extern struct {
     name: Name,
+    bus: Bus,
     virtio_id: u32,
     irq_line: u32,
+    /// virtio: the MMIO frame (0 for PCI, whose BARs are only mapped).
     frame_slot: u32,
     irq_slot: u32,
-    /// Where the MMIO page is mapped in this domain.
+    /// PCI: the function's identity and class (class, subclass, interface).
+    vendor: u16 = 0,
+    device_id: u16 = 0,
+    class: u32 = 0,
+    bar_count: u32 = 0,
+    /// Where the registers are mapped: the virtio page, or the first BAR.
     mmio: u64,
     /// The device's physical address (for logs).
     phys: u64,
+    bars: [3]Bar = std.mem.zeroes([3]Bar),
+
+    /// The mapped BAR with register index `index`.
+    pub fn bar(d: *const Device, index: u32) ?*const Bar {
+        for (d.bars[0..d.bar_count]) |*b| if (b.index == index) return b;
+        return null;
+    }
 };
 
 pub const info_magic: u64 = 0x6772_6169_6e5f_646f; // "grain_do"

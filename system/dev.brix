@@ -95,7 +95,8 @@ domain tablecloth like dev {
     memory = 4MiB
     stack = 128KiB
     await_ready
-    device disk { virtio = 2, optional }
+    # virtio-blk, or an NVMe drive: a disk is a disk.
+    device disk { virtio = 2, pci = nvme, optional }
     uses console { from = console.console, protocol = console.v1 }
     uses input { from = console.input, protocol = input.v1 }
     uses entropy { from = rng.entropy, protocol = entropy.v1 }
@@ -160,7 +161,8 @@ domain mycelium like driver {
     hart = 1
     memory = 512KiB
     stack = 32KiB
-    device nic { virtio = 1, optional }
+    # virtio-net, or an Intel 8254x Ethernet card.
+    device nic { virtio = 1, pci = ethernet, optional }
     provides mycelium { protocol = mycelium.v1 }
 }
 
