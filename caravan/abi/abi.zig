@@ -378,8 +378,36 @@ pub const BootInfo = extern struct {
     /// Where the device-tree copy is mapped, and its size (0 if none).
     dtb_addr: u64,
     dtb_size: u64,
+    /// What booted, as the loader measured it (all zero if nothing did).
+    measurement: Measurement = .{},
     untyped: [max_boot_untyped]UntypedDesc,
 };
+
+/// Measured boot: hashes of what ran before the kernel, chained (see
+/// grain/lib/measure.zig). The chain is what attestations sign.
+pub const Measurement = extern struct {
+    /// extend(extend(0, "loader", loader), "generation", generation).
+    chain: [32]u8 = @splat(0),
+    /// BLAKE3 of the loader's code (Aurora's text and read-only data).
+    loader: [32]u8 = @splat(0),
+    /// The generation booted: the hash of its descriptor, which names every
+    /// byte of the kernel, Steward, the manifest and the programs.
+    generation: [32]u8 = @splat(0),
+
+    pub fn measured(m: *const Measurement) bool {
+        for (m.chain) |b| if (b != 0) return true;
+        return false;
+    }
+};
+
+/// The boot protocol's third register (a2 on RISC-V, x2 on Arm): the
+/// physical address of this, when the loader measured what it booted.
+/// The kernel accepts it only inside RAM and with the magic.
+pub const BootMeasurement = extern struct {
+    magic: u64 = boot_measurement_magic,
+    m: Measurement,
+};
+pub const boot_measurement_magic: u64 = 0x6772_6d65_6173_7572; // "grmeasur"
 pub const boot_info_magic: u64 = 0x6772_6169_6e5f_6269; // "grain_bi"
 
 comptime {

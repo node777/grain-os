@@ -49,6 +49,8 @@ pub const bytes_per_object: u64 = 4096;
 pub const max_period: u64 = 1 << 48;
 /// Leases can point at leases; resolution stops after this many hops.
 pub const max_lease_depth = 4;
+/// A table entry's last generation: it is retired there (never reused).
+pub const max_gen: u32 = std.math.maxInt(u32);
 
 /// Registers the core reads and writes in a thread's saved context.
 pub const Reg = enum { pc, sp, a0, a1, a2, a3, a4, a5, a6, a7 };
@@ -170,6 +172,8 @@ pub const BootConfig = struct {
     root_elf: []const u8,
     /// The device tree, copied read-only into the root task (may be empty).
     dtb: []const u8 = &.{},
+    /// What the loader measured (zero if nothing did); passed on in BootInfo.
+    measurement: abi.Measurement = .{},
     now: u64,
     root_budget_ticks: u64,
 };
@@ -315,6 +319,12 @@ pub fn Kernel(comptime A: type) type {
             /// The running thread used up a full-bandwidth budget: it goes
             /// to the back of its queue at the next reschedule.
             rotate: bool = false,
+            /// A thread this kernel entry made runnable on this hart, held
+            /// out of the run queue: the entry's reschedule runs it at once
+            /// if nothing as urgent is queued (an IPC handoff then never
+            /// touches the queue), else queues it as if it always had been.
+            /// Zero between kernel entries.
+            direct: ObjId = 0,
         };
 
         pub const Stats = struct {
@@ -401,13 +411,19 @@ pub fn Kernel(comptime A: type) type {
 
         fn freeEntry(k: *Self, id: ObjId) void {
             const e = &k.table[id];
-            e.gen +%= 1;
+            e.gen += 1;
             e.kind = .free;
             e.parent = 0;
             e.first_child = 0;
             e.next_sibling = 0;
             e.addr = 0;
             e.flags = 0;
+            // An entry whose generations are used up is retired, never handed
+            // out again: one more would come round to old capabilities' values.
+            if (e.gen == max_gen) {
+                e.link = 0;
+                return;
+            }
             e.link = k.free_head;
             k.free_head = id;
             k.free_count += 1;
@@ -662,6 +678,7 @@ pub fn Kernel(comptime A: type) type {
 
             const bi = at(abi.BootInfo, k.table[bi_frame].addr);
             bi.* = .{
+                .measurement = cfg.measurement,
                 .timebase_hz = k.timebase_hz,
                 .boot_time = cfg.now,
                 .hart_count = k.hart_count,
@@ -942,8 +959,13 @@ pub fn Kernel(comptime A: type) type {
                 .frame => k.unmapFrame(id),
                 else => {},
             }
-            e.gen +%= 1;
-            if (e.gen == 0) e.gen = 1;
+            // The caller made sure a generation is left (see revokable).
+            e.gen += 1;
+        }
+
+        /// Whether revoking leaves a generation for freeing the entry later.
+        fn revokable(k: *Self, id: ObjId) bool {
+            return k.table[id].gen < max_gen - 1;
         }
 
         // -------------------------------------------------------------------
@@ -1076,12 +1098,39 @@ pub fn Kernel(comptime A: type) type {
                 t.state = .stalled;
                 return;
             }
+            k.enqueueTail(t);
+        }
+
+        /// `enqueue(t, false)`, except that a thread for the hart handling
+        /// this entry is held aside instead (see `Hart.direct`).
+        fn enqueueTail(k: *Self, t: *Thread) void {
+            const hi = k.hartOf(t);
+            const h = &k.harts[hi];
+            if (hi == k.handling_hart and h.direct == 0) {
+                t.hart = hi;
+                t.state = .ready;
+                t.queue = 0;
+                t.next = 0;
+                t.prev = 0;
+                h.direct = t.id;
+                return;
+            }
             k.enqueue(t, false);
+        }
+
+        /// Queue the held-aside thread (see `Hart.direct`), so the queue's
+        /// order is the one it would have had.
+        fn flushDirect(k: *Self, h: *Hart) void {
+            if (h.direct == 0) return;
+            const d = k.thread(h.direct);
+            h.direct = 0;
+            k.enqueue(d, false);
         }
 
         fn enqueue(k: *Self, t: *Thread, at_head: bool) void {
             const hi = k.hartOf(t);
             const h = &k.harts[hi];
+            if (h.direct == t.id) h.direct = 0 else k.flushDirect(h);
             t.hart = hi;
             t.state = .ready;
             t.queue = 0;
@@ -1109,6 +1158,10 @@ pub fn Kernel(comptime A: type) type {
 
         fn dequeue(k: *Self, t: *Thread) void {
             const h = &k.harts[t.hart];
+            if (h.direct == t.id) {
+                h.direct = 0;
+                return;
+            }
             const p = t.prio;
             if (t.prev != 0) k.thread(t.prev).next = t.next else h.run_head[p] = t.next;
             if (t.next != 0) k.thread(t.next).prev = t.prev else h.run_tail[p] = t.prev;
@@ -1351,6 +1404,16 @@ pub fn Kernel(comptime A: type) type {
 
         fn reschedule(k: *Self, hi: u32) void {
             const h = &k.harts[hi];
+            // A thread held aside: if the current thread keeps running, it
+            // waits in the queue as usual; else it may run straight away.
+            var candidate: ?*Thread = null;
+            if (h.direct != 0) {
+                const d = k.thread(h.direct);
+                if (h.current != 0 and k.thread(h.current).state == .running) k.flushDirect(h) else {
+                    h.direct = 0;
+                    candidate = d;
+                }
+            }
             if (h.current != 0) {
                 const cur = k.thread(h.current);
                 if (cur.state != .running) {
@@ -1378,6 +1441,21 @@ pub fn Kernel(comptime A: type) type {
                 }
             }
             h.rotate = false;
+            if (candidate) |c| if (h.current == 0) {
+                // Strictly more urgent than anything queued: the queue would
+                // have put it first too. Otherwise it joins the queue's tail.
+                if (if (highestReady(h)) |p| p < c.prio else true) {
+                    if (k.vspaceRoot(c) != null) {
+                        c.state = .running;
+                        h.current = c.id;
+                        h.started_at = k.now;
+                        k.stats.context_switches += 1;
+                    } else {
+                        k.log("thread_stopped", .{ .thread = c.id, .reason = "invalid_vspace" });
+                        c.state = .inactive;
+                    }
+                } else k.enqueue(c, false);
+            } else k.enqueue(c, false);
             while (h.current == 0) {
                 const p = highestReady(h) orelse break;
                 const t = k.thread(h.run_head[p]);
@@ -1511,7 +1589,7 @@ pub fn Kernel(comptime A: type) type {
             setResult(t, .ok, &.{});
             const h = &k.harts[t.hart];
             if (h.current == t.id) h.current = 0;
-            k.enqueue(t, false);
+            k.enqueueTail(t);
         }
 
         // --- IPC -------------------------------------------------------------
@@ -1953,6 +2031,9 @@ pub fn Kernel(comptime A: type) type {
                     const s = try k.slotIn(c, arg(t, .a2));
                     if (k.validate(s.*) == null) return error.InvalidCap;
                     if (!s.r().revoke) return error.NoRights;
+                    // Out of generations (2^32 revokes): refused, rather than
+                    // let a stale capability's generation come round again.
+                    if (!k.revokable(s.object)) return error.InvalidState;
                     const kind = k.table[s.object].kind;
                     if (kind == .untyped or kind == .irq_control or kind == .sched_control or kind == .debug_console) return error.WrongKind;
                     k.revokeObject(s.object);
@@ -2352,6 +2433,7 @@ pub fn Kernel(comptime A: type) type {
             var cur = k.free_head;
             while (cur != 0) : (cur = k.table[cur].link) {
                 if (k.table[cur].kind != .free) return "free list holds a live entry";
+                if (k.table[cur].gen == max_gen) return "free list holds a retired entry";
                 free += 1;
                 if (free > k.table.len) return "free list cycles";
             }
@@ -2360,6 +2442,7 @@ pub fn Kernel(comptime A: type) type {
                 if (e.kind == .irq and (e.addr < k.irq_first or e.addr >= k.irq_count)) return "an Irq object holds one of the kernel's own lines";
             }
 
+            for (k.harts[0..k.hart_count]) |h| if (h.direct != 0) return "a held-aside thread outlived its kernel entry";
             var running: [max_harts]u32 = @splat(0);
             for (k.table, 0..) |e, i| {
                 const id: ObjId = @intCast(i);

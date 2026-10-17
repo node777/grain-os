@@ -8,6 +8,10 @@
 //! a0 = hart id, a1 = device tree, paging off.
 //!
 //! It reads the store's public side only: no passphrase is needed to boot.
+//!
+//! Measured boot: before jumping, Aurora hashes its own code and the
+//! generation it chose into a chain (grain/lib/measure.zig) and hands the
+//! kernel a record of it in a2.
 const std = @import("std");
 const fdt = @import("fdt");
 const sbi = @import("sbi");
@@ -29,7 +33,11 @@ var descriptor: [tc.max_object]u8 = undefined;
 var chunk: [tc.max_object]u8 = undefined;
 
 extern var __aurora_start: u8;
+extern var __aurora_code_end: u8;
 extern var __aurora_end: u8;
+
+/// What Aurora measured, for the kernel (its address goes in a2).
+var boot_record: grain.abi.BootMeasurement align(8) = .{ .m = .{} };
 extern var __bss_start: u8;
 extern var __bss_end: u8;
 
@@ -93,7 +101,7 @@ export fn auroraMain(hart: usize, dtb: usize) callconv(.c) noreturn {
     const me0 = @intFromPtr(&__aurora_start);
     const me1 = @intFromPtr(&__aurora_end);
     for (v.segments) |s| {
-        if (overlaps(s.paddr, s.paddr + s.memsz, me0, me1) or overlaps(s.paddr, s.paddr + s.memsz, dtb, dtb + tree.totalSize()))
+        if (overlaps(s.paddr, s.paddr +| s.memsz, me0, me1) or overlaps(s.paddr, s.paddr +| s.memsz, dtb, dtb + tree.totalSize()) or s.paddr +| s.memsz == std.math.maxInt(u64))
             fail("generation_overlaps_aurora");
     }
     var bytes: u64 = 0;
@@ -118,9 +126,12 @@ export fn auroraMain(hart: usize, dtb: usize) callconv(.c) noreturn {
         .bytes = bytes,
         .entry = klog.hex(v.header.entry),
     });
+    const code = @as([*]const u8, @ptrCast(&__aurora_start))[0 .. @intFromPtr(&__aurora_code_end) - @intFromPtr(&__aurora_start)];
+    boot_record.m = grain.measure.measurement(code, choice);
+    say("measured", .{ .chain = short(boot_record.m.chain), .loader = short(boot_record.m.loader), .generation = short(choice) });
     asm volatile ("fence.i" ::: .{ .memory = true });
-    const entry: *const fn (usize, usize) callconv(.c) noreturn = @ptrFromInt(v.header.entry);
-    entry(hart, dtb);
+    const entry: *const fn (usize, usize, usize) callconv(.c) noreturn = @ptrFromInt(v.header.entry);
+    entry(hart, dtb, @intFromPtr(&boot_record));
 }
 
 pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {

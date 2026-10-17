@@ -108,11 +108,18 @@ badge        : u32   delivered to the receiver with every message or signal
 ### 2.3 Revocation: generations and leases, no derivation tree
 
 seL4 tracks every derived capability in a derivation tree. Caravan does not.
+(The whole model, its claims and what checks each, written for an external
+reviewer: docs/CAPABILITY_MODEL.md.)
 
 - **`CNode.revoke(slot)` bumps the object's generation.** Every other
   capability to it, anywhere, becomes invalid at once; the revoking slot gets
   a fresh one. Threads queued on a revoked endpoint or signal are woken with
   `aborted`; a revoked frame is unmapped. **O(1) apart from that cleanup.**
+- **Generations never come round** (Phase 9). They are 32 bits. A table
+  entry whose last generation is reached when its object is destroyed is
+  retired (never handed out again), and a revoke that would leave it no
+  generation is refused (`invalid_state`), so a stale capability can never
+  match again. The cost: one table entry per 2^32 lifetimes.
 - **Selective revocation uses leases.** `Lease.arm(target, rights,
   duration, uses)` makes a lease forward to a capability. Copies of the lease
   capability act as the target, with at most the lease's rights, until the
@@ -230,11 +237,26 @@ seL4 tracks every derived capability in a derivation tree. Caravan does not.
   With a bound signal, a server's receive ends on a message, an interrupt or
   a timeout (Comlink's retransmits, §3.7). The invariants check that every
   armed alarm is on its hart's list, in order.
+- **Direct hand-off** (Phase 9). A thread made runnable on the hart that
+  is handling the kernel entry (the server a call wakes, the caller a reply
+  wakes, a thread that yields) is held aside instead of queued; the entry's
+  reschedule runs it at once if nothing as urgent is queued, and otherwise
+  queues it exactly where it would have gone, and any other enqueue on that
+  hart first puts it in its place. So the queue's order and every
+  scheduling decision are what they were (the simulator makes the same
+  decisions on every seed), and an IPC round trip no longer touches the run
+  queue. The invariants check nothing is held aside between entries.
 - **Measured** (QEMU, one hart, ReleaseFast, instructions retired including
-  user code): null system call about 690, minimal object method about 740,
-  call/reply round trip to a passive server about 2,100. A register-only fastpath that
-  skips the general scheduler (like seL4's) is *planned*. The target is
-  still a few hundred cycles per round trip on real RVA23 cores.
+  user code; `zig build bench`): `yield` about 660 (747 before the direct
+  hand-off), a minimal object method about 810, a call/reply round trip to
+  a passive server about 2,070 (2,261 before). Inside the kernel core:
+  `call` 713 and `reply_recv` 704 instructions (802 and 808 before). The
+  per-function profile of the round trip comes from `caravan-profile` under
+  callgrind (`sim/profile.zig`): what remains is spread over capability
+  resolution, message copy, scheduling-context accounting and the timer,
+  none dominant. A register-only fastpath that skips the general scheduler
+  (like seL4's) is *planned*; the target is still a few hundred cycles per
+  round trip on real RVA23 cores, which are not at hand.
 
 ### 2.7 The event door (determinism)
 
@@ -901,10 +923,38 @@ Envoy's `upload` verb moves bulk bytes into a store the agent holds (base64,
 2 KiB per line, one audited action per object), and `tools/envoy.py`'s
 `upload_generation` sends only the chunks the store lacks.
 
+**Measured boot** (Phase 9, `grain/lib/measure.zig`). Before jumping,
+Aurora hashes its own code (text and read-only data) and the generation it
+chose into a chain, as a TPM extends a register:
+`chain = extend(extend(0, "loader", BLAKE3(aurora code)), "generation",
+generation hash)`, where `extend` is a BLAKE3 key derivation over the
+previous value, a length-prefixed label and the hash. The generation hash
+already names every byte of the kernel, Steward, the manifest and every
+program. Aurora hands the kernel a record of it (`abi.BootMeasurement`) in
+the boot protocol's third register (a2; x2 on Arm, where it is always 0);
+the kernel believes it only inside RAM and with its magic, copies it before
+allocating anything, and passes it to Steward in `BootInfo.measurement`.
+Steward checks it is consistent, records `boot_measured`, and gives it to
+every domain in `DomainInfo.measurement`. The Ledger records every measured
+boot (`by=aurora kind=boot`). Kumara serves **`attest.v1`**: `quote(nonce)`
+signs the chain, its parts and a verifier's nonce with the identity key,
+under the context `@attest` (domain names are `[a-z0-9_]`, so no domain
+can obtain such a signature through `kumara.sign`). `attest.v1` is a
+protocol of its own so it can be granted alone: the dev manifest gives it
+to the agent, who cannot sign anything else as the instance.
+
+*What it proves, and what not.* An attestation proves that the holder of
+this identity key reports this chain, now (the nonce). It proves what
+booted only as far as Aurora is honest: on QEMU nothing measures Aurora, so
+a modified Aurora could report anything. On hardware, the chain should
+start below Aurora (a boot ROM that measures it, DICE, or a TPM), and the
+identity key should be sealed to the measurement so that a different
+system cannot use it. Both are *planned*, with real boards.
+
 - *Planned:* a generation list and rollback in grainsh; Aurora on real
   boards (it needs only SBI, a device tree and a virtio or NVMe disk
-  driver); measured boot
-  (Aurora reports what it loaded, so remote parties can check it).
+  driver); a hardware root for the measurement chain; sealing secrets to
+  measurements; Comlink peers exchanging attestations.
 
 ### 3.9 Surf and the desktop
 

@@ -7,11 +7,15 @@
 //! ask it to sign, and the signature binds who asked. Comlink, and only
 //! Comlink, may ask for a Diffie-Hellman with the key's X25519 form: that is
 //! how a network session proves this identity (Noise XX, lib/noise.zig).
+//! It also serves attest.v1: the measured-boot chain signed with a
+//! verifier's nonce (lib/measure.zig), and nothing else, for whoever is
+//! granted it.
 const std = @import("std");
 const g = @import("grain");
 const proto = @import("proto");
 const K = g.kumara;
 const P = proto.kumara;
+const A = proto.attest;
 const TC = proto.tablecloth;
 const idl = g.idl;
 
@@ -36,6 +40,24 @@ const Server = struct {
         const context = if (c.badge == 0) "steward" else g.env().clientName(c.badge) orelse return error.Unavailable;
         const sig = K.sign(kp, context, p.message.slice()) catch return error.Failed;
         return .{ .signature = idl.Bytes(64).from(&sig), .context = idl.Text(23).from(context) };
+    }
+
+    /// attest.v1: the measurement Steward handed this domain, signed under
+    /// a context no domain can ask `sign` for.
+    pub fn quote(_: *Server, p: A.quote.Params, _: idl.Caller) !A.quote.Results {
+        const kp = key orelse return error.Unavailable;
+        if (p.nonce.len != 32) return error.InvalidArgs;
+        const m = g.env().measurement;
+        const msg = g.measure.attestMessage(m, p.nonce.data[0..32].*);
+        const sig = K.sign(kp, g.measure.attest_context, &msg) catch return error.Failed;
+        g.log("kumara_attested", .{ .measured = m.measured() });
+        return .{
+            .signature = idl.Bytes(64).from(&sig),
+            .public_key = idl.Bytes(32).from(&kp.public_key.toBytes()),
+            .chain = idl.Bytes(32).from(&m.chain),
+            .loader = idl.Bytes(32).from(&m.loader),
+            .generation = idl.Bytes(32).from(&m.generation),
+        };
     }
 
     pub fn agree(_: *Server, p: P.agree.Params, c: idl.Caller) !P.agree.Results {
@@ -84,5 +106,5 @@ pub fn main() !u16 {
     } else |e| g.log("kumara_unavailable", .{ .err = @errorName(e) });
     _ = g.call(g.domain.Slot.steward, .{ .label = @backingInt(g.domain.Lifecycle.ready), .length = 1 }, .{1});
     var s: Server = .{};
-    idl.serve(P, g.provided("kumara") orelse return error.NoService, &s);
+    idl.serveAll(.{ P, A }, g.provided("kumara") orelse return error.NoService, &s);
 }

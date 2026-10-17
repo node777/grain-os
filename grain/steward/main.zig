@@ -578,6 +578,7 @@ fn build(comptime i: usize) !void {
     info.memory_bytes = memory_bytes;
     info.program_hash = entry.hash;
     info.closure = img.header.closure;
+    info.measurement = boot.measurement;
     const hart: u32 = if (md.hart < boot.hart_count) md.hart else 0;
     info.hart = hart;
 
@@ -817,6 +818,16 @@ export fn stewardMain(bi: *const abi.BootInfo) callconv(.c) noreturn {
         .verified = true,
         .tag = build_tag,
     });
+    if (bi.measurement.measured()) {
+        const m = bi.measurement;
+        const consistent = g.measure.consistent(m);
+        g.record("boot_measured", .{
+            .chain = @as([]const u8, &image.hexHash(m.chain)),
+            .loader = @as([]const u8, image.hexHash(m.loader)[0..16]),
+            .generation = @as([]const u8, image.hexHash(m.generation)[0..16]),
+            .consistent = consistent,
+        });
+    }
 
     lifecycle = retypeFrom(pool, .endpoint, 0) catch @panic("no lifecycle endpoint");
     probeDevices() catch |e| g.record("device_probe_failed", .{ .err = @errorName(e) });

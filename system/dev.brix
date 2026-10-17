@@ -112,6 +112,8 @@ domain kumara like light {
     uses tablecloth { from = tablecloth.tablecloth, protocol = tablecloth.v1 }
     uses entropy { from = rng.entropy, protocol = entropy.v1 }
     provides kumara { protocol = kumara.v1 }
+    # What booted, signed: an agent or a peer can check it.
+    provides attest { protocol = attest.v1 }
 }
 
 # The signed, append-only record of authority events.
@@ -215,6 +217,8 @@ agent {
     askable tablecloth { from = tablecloth.tablecloth, protocol = tablecloth.v1 }
     # The agent sees the screen as the owner does, as data.
     grant scene { from = surf.scene, protocol = scene.v1 }
+    # What booted, signed by this instance (measured boot).
+    grant attest { from = kumara.attest, protocol = attest.v1 }
     # Meeting other instances and lending them things is the owner's call.
     askable comlink { from = comlink.comlink, protocol = comlink.v1 }
 }

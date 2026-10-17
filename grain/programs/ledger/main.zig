@@ -52,26 +52,31 @@ fn readEntry(h: [32]u8) !Entry {
     return e;
 }
 
+/// Append an entry: chained to the head, signed by Kumara, committed.
+fn appendEntry(by: []const u8, kind: []const u8, text: []const u8) !P.append.Results {
+    var e: Entry = .{ .seq = head_seq + 1, .prev = head_hash, .by = undefined, .kind = undefined, .text_len = @intCast(@min(text.len, 200)), .text = undefined, .signature = @splat(0) };
+    setText(&e.by, by);
+    setText(&e.kind, kind);
+    setText(&e.text, text);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.Blake3.hash(e.body(), &digest, .{});
+    const s = try idl.call(proto.kumara.sign, kumara, .{ .message = idl.Bytes(256).from(&digest) });
+    e.signature = s.signature.data[0..64].*;
+    // Each entry keeps the one before it, so only the head needs a name.
+    const h = try TC.storeLinked(store, std.mem.asBytes(&e), true, if (head_seq == 0) null else head_hash);
+    _ = try idl.call(TC.bind, store, .{ .name = TC.NameText.from("head"), .hash = TC.Hash.from(&h), .secret = true, .tip = true });
+    _ = try idl.call(TC.commit, store, .{});
+    head_hash = h;
+    head_seq = e.seq;
+    g.log("ledger_appended", .{ .seq = e.seq, .by = by, .kind = kind });
+    return .{ .seq = e.seq, .hash = idl.Bytes(32).from(&h) };
+}
+
 const Server = struct {
     pub fn append(_: *Server, p: P.append.Params, c: idl.Caller) !P.append.Results {
         if (!available) return error.Unavailable;
         const by = if (c.badge == 0) "steward" else g.env().clientName(c.badge) orelse return error.Unavailable;
-        var e: Entry = .{ .seq = head_seq + 1, .prev = head_hash, .by = undefined, .kind = undefined, .text_len = @intCast(p.text.slice().len), .text = undefined, .signature = @splat(0) };
-        setText(&e.by, by);
-        setText(&e.kind, p.kind.slice());
-        setText(&e.text, p.text.slice());
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.Blake3.hash(e.body(), &digest, .{});
-        const s = try idl.call(proto.kumara.sign, kumara, .{ .message = idl.Bytes(256).from(&digest) });
-        e.signature = s.signature.data[0..64].*;
-        // Each entry keeps the one before it, so only the head needs a name.
-        const h = try TC.storeLinked(store, std.mem.asBytes(&e), true, if (head_seq == 0) null else head_hash);
-        _ = try idl.call(TC.bind, store, .{ .name = TC.NameText.from("head"), .hash = TC.Hash.from(&h), .secret = true, .tip = true });
-        _ = try idl.call(TC.commit, store, .{});
-        head_hash = h;
-        head_seq = e.seq;
-        g.log("ledger_appended", .{ .seq = e.seq, .by = by, .kind = p.kind.slice() });
-        return .{ .seq = e.seq, .hash = idl.Bytes(32).from(&h) };
+        return appendEntry(by, p.kind.slice(), p.text.slice());
     }
 
     pub fn head(_: *Server, _: P.head.Params, _: idl.Caller) !P.head.Results {
@@ -94,6 +99,15 @@ const Server = struct {
     }
 };
 
+/// A measured boot is an authority event too: what ran, from Aurora on.
+fn recordBoot() !void {
+    const m = g.env().measurement;
+    if (!m.measured()) return;
+    var buf: [200]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buf, "chain={s} generation={s}", .{ std.fmt.bytesToHex(m.chain, .lower), std.fmt.bytesToHex(m.generation, .lower) });
+    _ = try appendEntry("aurora", "boot", text);
+}
+
 pub fn main() !u16 {
     store = g.use("tablecloth") orelse return error.NoService;
     kumara = g.use("kumara") orelse return error.NoService;
@@ -104,6 +118,7 @@ pub fn main() !u16 {
         }
         available = true;
         g.log("ledger_ready", .{ .entries = head_seq });
+        recordBoot() catch |e| g.log("ledger_boot_unrecorded", .{ .err = @errorName(e) });
     } else |e| g.log("ledger_unavailable", .{ .err = @errorName(e) });
     _ = g.call(g.domain.Slot.steward, .{ .label = @backingInt(g.domain.Lifecycle.ready), .length = 1 }, .{1});
     var s: Server = .{};

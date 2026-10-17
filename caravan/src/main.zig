@@ -232,7 +232,21 @@ export fn caravanKernelTrap(frame: *arch.Frame, kind: usize) callconv(.c) void {
 extern const __kernel_start: u8;
 extern const __kernel_end: u8;
 
-export fn kmain(hart_id: usize, dtb_pa: usize) callconv(.c) noreturn {
+/// The loader's measurement, if the third boot register points at one in
+/// RAM (firmware leaves anything there; only the magic is believed).
+fn readMeasurement(pa: usize) abi.Measurement {
+    if (pa == 0 or pa % 8 != 0) return .{};
+    const size = @sizeOf(abi.BootMeasurement);
+    for (platform.memoryRanges()) |r| {
+        if (pa >= r.base and pa <= r.end() -| size) {
+            const rec: *const abi.BootMeasurement = @ptrFromInt(arch.physToVirt(pa));
+            return if (rec.magic == abi.boot_measurement_magic) rec.m else .{};
+        }
+    }
+    return .{};
+}
+
+export fn kmain(hart_id: usize, dtb_pa: usize, measure_pa: usize) callconv(.c) noreturn {
     // Hart-local block 0 is the boot hart until the device tree says more.
     const h0 = &arch.harts[0];
     h0.* = .{ .hart_id = @intCast(hart_id), .stack_top = arch.stackTop(0) };
@@ -247,6 +261,8 @@ export fn kmain(hart_id: usize, dtb_pa: usize) callconv(.c) noreturn {
         @panic("unsupported platform");
     };
     arch.setupHart(h0);
+    // Read before anything is allocated: the record lives in the loader's memory.
+    const measurement = readMeasurement(measure_pa);
 
     log("boot", .{
         .kernel = "caravan",
@@ -256,6 +272,7 @@ export fn kmain(hart_id: usize, dtb_pa: usize) callconv(.c) noreturn {
         .timebase_hz = platform.timebase_hz,
         .dtb = klog.hex(dtb_pa),
         .image = klog.hex(@intFromPtr(&__kernel_start) - arch.kernel_offset),
+        .measured = measurement.measured(),
     });
     log("platform", arch.platformRecord(&platform));
 
@@ -270,6 +287,7 @@ export fn kmain(hart_id: usize, dtb_pa: usize) callconv(.c) noreturn {
         .reserved = &reserved,
         .root_elf = root_elf,
         .dtb = @as([*]const u8, @ptrFromInt(arch.physToVirt(dtb_pa)))[0..fdt.usedSize()],
+        .measurement = measurement,
         .now = arch.now(),
         .root_budget_ticks = platform.timebase_hz / 1000 * root_slice_ms,
     }) catch |e| {

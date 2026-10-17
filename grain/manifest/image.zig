@@ -70,6 +70,11 @@ pub fn hash(bytes: []const u8) Hash {
     return out;
 }
 
+/// Whether [offset, offset + size) lies in `len` bytes (without overflowing).
+fn within(offset: u64, size: u64, len: usize) bool {
+    return size <= len and offset <= len - size;
+}
+
 pub const Image = struct {
     bytes: []const u8,
     header: Header,
@@ -83,9 +88,9 @@ pub const Image = struct {
         if (h.count > max_entries) return error.TooManyEntries;
         const table_end = @sizeOf(Header) + @as(usize, h.count) * @sizeOf(Entry);
         if (table_end > bytes.len) return error.Truncated;
-        if (h.manifest_offset + h.manifest_size > bytes.len) return error.Truncated;
+        if (!within(h.manifest_offset, h.manifest_size, bytes.len)) return error.Truncated;
         const entries = std.mem.bytesAsSlice(Entry, bytes[@sizeOf(Header)..table_end]);
-        for (entries) |e| if (e.offset + e.size > bytes.len) return error.Truncated;
+        for (entries) |e| if (!within(e.offset, e.size, bytes.len)) return error.Truncated;
         return .{ .bytes = bytes, .header = h, .entries = entries };
     }
 

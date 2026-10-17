@@ -396,7 +396,7 @@ pub fn build(b: *std.Build) void {
         "--console-input",  "open sesame",
         "--expect",         "kumara_ready domain=kumara created=true",
         "--expect",         "ledger_ready domain=ledger entries=0",
-        "--expect",         "envoy_ready domain=envoy capabilities=7",
+        "--expect",         "envoy_ready domain=envoy capabilities=8",
         "--expect",         "envoy_bye domain=envoy",
         "--expect",         "domain_exit domain=envoy code=0",
         "--expect",         "summary failed=0",
@@ -649,6 +649,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(brix_tests).step);
     const idl_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/idl.zig"), .target = host, .optimize = optimize, .imports = &.{ .{ .name = "abi", .module = abi_mod }, .{ .name = "klog", .module = klog_mod } } }) });
     test_step.dependOn(&b.addRunArtifact(idl_tests).step);
+    const measure_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/measure.zig"), .target = host, .optimize = optimize, .imports = &.{.{ .name = "abi", .module = abi_mod }} }) });
+    test_step.dependOn(&b.addRunArtifact(measure_tests).step);
     const image_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/manifest/image.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(image_tests).step);
 
@@ -664,6 +666,10 @@ pub fn build(b: *std.Build) void {
     // with ReleaseSafe: optimised, with all safety checks still on.
     const core_sim = b.createModule(.{ .root_source_file = b.path("caravan/src/core/core.zig"), .target = host, .optimize = .ReleaseSafe });
     core_sim.addImport("abi", abi_mod);
+    // Baseline x86-64: valgrind does not decode every instruction a newer host has.
+    const host_baseline = b.resolveTargetQuery(.{ .cpu_model = .baseline });
+    const core_fast = b.createModule(.{ .root_source_file = b.path("caravan/src/core/core.zig"), .target = host_baseline, .optimize = .ReleaseFast });
+    core_fast.addImport("abi", abi_mod);
     const sim_exe = b.addExecutable(.{ .name = "caravan-sim", .root_module = b.createModule(.{ .root_source_file = b.path("sim/main.zig"), .target = host, .optimize = .ReleaseSafe, .imports = &.{
         .{ .name = "core", .module = core_sim },
         .{ .name = "abi", .module = abi_mod },
@@ -675,6 +681,72 @@ pub fn build(b: *std.Build) void {
     if (b.option([]const u8, "steps", "Simulator steps per seed")) |steps| sim_run.addArgs(&.{ "--steps", steps });
     sim_run.has_side_effects = true;
     b.step("sim", "Run the deterministic simulator").dependOn(&sim_run.step);
+    // Fuzz targets (fuzz/main.zig): a seeded sweep of each in `zig build
+    // test`; `zig build fuzz` sweeps longer, and `zig build fuzz --fuzz`
+    // runs Zig's coverage-guided fuzzer on them (it needs the LLVM backend).
+    const sim_lib = b.createModule(.{ .root_source_file = b.path("sim/lib.zig"), .imports = &.{
+        .{ .name = "core", .module = core_sim },
+        .{ .name = "abi", .module = abi_mod },
+        .{ .name = "sv39", .module = sv39_mod },
+    } });
+    const Fuzz = struct {
+        fn tests(bb: *std.Build, root: []const u8, sweep: u32, target: std.Build.ResolvedTarget, imports: []const std.Build.Module.Import) *std.Build.Step.Compile {
+            const opts = bb.addOptions();
+            opts.addOption(u32, "sweep", sweep);
+            const t = bb.addTest(.{ .name = bb.fmt("fuzz-{s}", .{std.fs.path.stem(root)}), .use_llvm = true, .root_module = bb.createModule(.{
+                .root_source_file = bb.path(root),
+                .target = target,
+                .optimize = .ReleaseSafe,
+                .imports = imports,
+            }) });
+            t.root_module.addOptions("fuzz_options", opts);
+            t.root_module.addAnonymousImport("arm.dtb", .{ .root_source_file = bb.path("caravan/src/core/testdata/qemu-virt-arm64-smp2.dtb") });
+            t.root_module.addAnonymousImport("riscv.dtb", .{ .root_source_file = bb.path("caravan/src/core/testdata/qemu-virt-smp2.dtb") });
+            t.root_module.addAnonymousImport("dev.brix", .{ .root_source_file = bb.path("system/dev.brix") });
+            return t;
+        }
+    };
+    // Two binaries: the kernel core and libgrain share klog.zig, and a file
+    // belongs to one module per compilation.
+    const fuzz_kernel: []const std.Build.Module.Import = &.{
+        .{ .name = "sim", .module = sim_lib },
+        .{ .name = "core", .module = core_sim },
+    };
+    const fuzz_user: []const std.Build.Module.Import = &.{
+        .{ .name = "grain", .module = grain_lib },
+        .{ .name = "image", .module = image_mod },
+        .{ .name = "brix", .module = brix_mod },
+        .{ .name = "schema", .module = schema_mod },
+        .{ .name = "proto", .module = proto_mod },
+    };
+    const fuzz_sweep = b.option(u32, "fuzz-sweep", "zig build fuzz: sweep size, percent of the test sweep (default 1000)") orelse 1000;
+    const fuzz_step = b.step("fuzz", "Fuzz the kernel and every untrusted-input parser (add --fuzz for coverage-guided)");
+    for ([_][]const u8{ "fuzz/kernel.zig", "fuzz/user.zig" }, [_][]const std.Build.Module.Import{ fuzz_kernel, fuzz_user }) |root, imports| {
+        test_step.dependOn(&b.addRunArtifact(Fuzz.tests(b, root, 100, host, imports)).step);
+        fuzz_step.dependOn(&b.addRunArtifact(Fuzz.tests(b, root, fuzz_sweep, host, imports)).step);
+    }
+
+    // The model checker: every order of a few threads' system calls in
+    // small IPC and revocation scenarios (sim/model.zig).
+    const model_exe = b.addExecutable(.{ .name = "caravan-model", .root_module = b.createModule(.{ .root_source_file = b.path("sim/model.zig"), .target = host, .optimize = .ReleaseSafe, .imports = &.{
+        .{ .name = "core", .module = core_sim },
+        .{ .name = "abi", .module = abi_mod },
+        .{ .name = "sv39", .module = sv39_mod },
+    } }) });
+    b.installArtifact(model_exe);
+    const model_run = b.addRunArtifact(model_exe);
+    model_run.has_side_effects = true;
+    if (b.option([]const u8, "scenario", "Model checker: one scenario")) |name| model_run.addArgs(&.{ "--scenario", name });
+    b.step("model", "Model-check IPC and revocation (every order of every scenario)").dependOn(&model_run.step);
+    test_step.dependOn(&model_run.step);
+
+    // For a profiler: the IPC round trip on the core, in a loop (sim/profile.zig).
+    b.installArtifact(b.addExecutable(.{ .name = "caravan-profile", .root_module = b.createModule(.{ .root_source_file = b.path("sim/profile.zig"), .target = host_baseline, .optimize = .ReleaseFast, .strip = false, .imports = &.{
+        .{ .name = "core", .module = core_fast },
+        .{ .name = "abi", .module = abi_mod },
+        .{ .name = "sv39", .module = sv39_mod },
+    } }) }));
+
     // A short simulator run is part of `zig build test`.
     const sim_smoke = b.addRunArtifact(sim_exe);
     sim_smoke.addArgs(&.{ "--seeds", "4", "--steps", "20000" });

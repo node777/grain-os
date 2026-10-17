@@ -46,6 +46,7 @@ pub const Fdt = struct {
         const size_strings = try be32(b, 32);
         const size_struct = try be32(b, 36);
         if (version < 17) return error.BadVersion;
+        if (off_rsvmap > total) return error.Truncated;
         if (@as(u64, off_struct) + size_struct > total or @as(u64, off_strings) + size_strings > total)
             return error.Truncated;
         return .{
@@ -105,8 +106,10 @@ pub const Range = struct {
     base: u64,
     size: u64,
 
+    /// Saturating: a range from a damaged tree may claim to run past the
+    /// end of the address space.
     pub fn end(self: Range) u64 {
-        return self.base + self.size;
+        return self.base +| self.size;
     }
 };
 
@@ -115,14 +118,14 @@ pub const Prop = struct {
     value: []const u8,
 
     pub fn u32At(self: Prop, index: usize) ?u32 {
-        if ((index + 1) * 4 > self.value.len) return null;
+        if (index >= self.value.len / 4) return null;
         return std.mem.readInt(u32, self.value[index * 4 ..][0..4], .big);
     }
 
     /// Read a big-endian number spanning `cells` 32-bit cells at cell `index`.
     pub fn cellsAt(self: Prop, index: usize, cells: u32) ?u64 {
         var v: u64 = 0;
-        for (0..cells) |i| v = (v << 32) | (self.u32At(index + i) orelse return null);
+        for (0..cells) |i| v = (v << 32) | (self.u32At(std.math.add(usize, index, i) catch return null) orelse return null);
         return v;
     }
 
@@ -261,6 +264,13 @@ pub const Platform = struct {
 };
 
 const max_depth = 16;
+const max_cells = 4;
+
+/// `#address-cells` or `#size-cells`. More than 4 means nothing (addresses
+/// are 64-bit, PCI's 96); capping keeps every stride computed from them small.
+fn cellCount(prop: Prop, default: u32) u32 {
+    return @min(prop.u32At(0) orelse default, max_cells);
+}
 
 /// Per-node facts gathered while walking, resolved when the node ends.
 const NodeInfo = struct {
@@ -309,8 +319,8 @@ pub fn parsePlatform(fdt: Fdt) Error!Platform {
             if (depth == 0) return error.BadStructure;
             const n = &stack[depth - 1];
             const eql = std.mem.eql;
-            if (eql(u8, prop.name, "#address-cells")) n.child_cells[0] = prop.u32At(0) orelse 2;
-            if (eql(u8, prop.name, "#size-cells")) n.child_cells[1] = prop.u32At(0) orelse 1;
+            if (eql(u8, prop.name, "#address-cells")) n.child_cells[0] = cellCount(prop, 2);
+            if (eql(u8, prop.name, "#size-cells")) n.child_cells[1] = cellCount(prop, 1);
             if (eql(u8, prop.name, "reg")) n.reg = prop;
             if (eql(u8, prop.name, "ranges")) n.ranges = prop;
             if (eql(u8, prop.name, "compatible")) n.compatible = prop;
@@ -508,8 +518,8 @@ pub fn findPciHost(fdt: Fdt) Error!?PciHost {
             if (depth == 0) return error.BadStructure;
             const nd = &stack[depth - 1];
             const eql = std.mem.eql;
-            if (eql(u8, prop.name, "#address-cells")) nd.child_cells[0] = prop.u32At(0) orelse 2;
-            if (eql(u8, prop.name, "#size-cells")) nd.child_cells[1] = prop.u32At(0) orelse 1;
+            if (eql(u8, prop.name, "#address-cells")) nd.child_cells[0] = cellCount(prop, 2);
+            if (eql(u8, prop.name, "#size-cells")) nd.child_cells[1] = cellCount(prop, 1);
             if (eql(u8, prop.name, "reg")) nd.reg = prop;
             if (eql(u8, prop.name, "ranges")) nd.ranges = prop;
             if (eql(u8, prop.name, "compatible")) nd.compatible = prop;
@@ -691,8 +701,8 @@ pub fn findCompatible(fdt: Fdt, compat: []const u8, out: []DeviceNode) Error![]D
         .prop => |prop| {
             if (depth == 0) return error.BadStructure;
             const nd = &stack[depth - 1];
-            if (std.mem.eql(u8, prop.name, "#address-cells")) nd.child_cells[0] = prop.u32At(0) orelse 2;
-            if (std.mem.eql(u8, prop.name, "#size-cells")) nd.child_cells[1] = prop.u32At(0) orelse 1;
+            if (std.mem.eql(u8, prop.name, "#address-cells")) nd.child_cells[0] = cellCount(prop, 2);
+            if (std.mem.eql(u8, prop.name, "#size-cells")) nd.child_cells[1] = cellCount(prop, 1);
             if (std.mem.eql(u8, prop.name, "reg")) nd.reg = prop;
             if (std.mem.eql(u8, prop.name, "compatible")) nd.compatible = prop;
             if (std.mem.eql(u8, prop.name, "interrupts")) nd.interrupts = prop.u32At(0);

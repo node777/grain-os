@@ -62,18 +62,65 @@ def _compress(cv, m, block_len, flags):
     return [s[i] ^ s[i + 8] for i in range(8)]
 
 
-def blake3_small(data: bytes) -> bytes:
-    """BLAKE3 of at most 1024 bytes (one chunk, so no tree)."""
+def _one_chunk(data: bytes, key, mode_flags: int) -> bytes:
     if len(data) > 1024:
-        raise ValueError("blake3_small handles one chunk only")
+        raise ValueError("this BLAKE3 handles one chunk only")
     blocks = [data[i:i + 64] for i in range(0, len(data), 64)] or [b""]
-    cv = _IV
+    cv = key
     for i, blk in enumerate(blocks):
-        flags = (1 if i == 0 else 0) | ((2 | 8) if i == len(blocks) - 1 else 0)
+        flags = mode_flags | (1 if i == 0 else 0) | ((2 | 8) if i == len(blocks) - 1 else 0)
         padded = blk + b"\0" * (64 - len(blk))
         words = [int.from_bytes(padded[j:j + 4], "little") for j in range(0, 64, 4)]
         cv = _compress(cv, words, len(blk), flags)
     return b"".join(w.to_bytes(4, "little") for w in cv)
+
+
+def blake3_small(data: bytes) -> bytes:
+    """BLAKE3 of at most 1024 bytes (one chunk, so no tree)."""
+    return _one_chunk(data, _IV, 0)
+
+
+def blake3_derive_key(context: str, material: bytes) -> bytes:
+    """BLAKE3's key derivation mode, for material of at most 1024 bytes."""
+    ctx = _one_chunk(context.encode(), _IV, 32)
+    key = [int.from_bytes(ctx[j:j + 4], "little") for j in range(0, 32, 4)]
+    return _one_chunk(material, key, 64)
+
+
+# ---------------------------------------------------------------------------
+# Measured boot (grain/lib/measure.zig) and Kumara's signatures
+# (grain/lib/kumara.zig), checked independently of Grain's own code.
+
+def _len8(b: bytes) -> bytes:
+    return len(b).to_bytes(8, "little")
+
+
+def measure_extend(prev: bytes, label: str, h: bytes) -> bytes:
+    return blake3_derive_key("grain measure v1", prev + _len8(label.encode()) + label.encode() + h)
+
+
+def measure_chain(loader: bytes, generation: bytes) -> bytes:
+    return measure_extend(measure_extend(bytes(32), "loader", loader), "generation", generation)
+
+
+def kumara_digest(context: str, message: bytes) -> bytes:
+    return blake3_derive_key("grain kumara v1 sign", _len8(context.encode()) + context.encode() + _len8(message) + message)
+
+
+def verify_attestation(quote, nonce: bytes):
+    """Check an attest.v1 quote: the chain is the one its parts make, and the
+    identity signed it with this nonce. Returns (ok, reason)."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    chain, loader, gen = (bytes.fromhex(quote[k]) for k in ("chain", "loader", "generation"))
+    if chain != measure_chain(loader, gen):
+        return False, "the chain is not the one its parts make"
+    digest = kumara_digest("@attest", chain + loader + gen + nonce)
+    try:
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(quote["public_key"])).verify(bytes.fromhex(quote["signature"]), digest)
+    except InvalidSignature:
+        return False, "the signature does not verify"
+    return True, "ok"
 
 
 def verify_chain(actions):

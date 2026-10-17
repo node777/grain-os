@@ -15,7 +15,11 @@
   the simulator hashes kernel memory to prove determinism.
 - New kernel behaviour needs: a scenario test in `sim/kernel_test.zig`, an
   invariant in `checkInvariants` if it adds state, and (for user-visible
-  behaviour) a test in the root task (`grain/ktest/main.zig`).
+  behaviour) a test in the root task (`grain/ktest/main.zig`). IPC or
+  revocation changes: a scenario in `sim/model.zig` (`zig build model`).
+- A parser of input someone else controls (a device, the network, a disk,
+  a client) needs a fuzz target in `fuzz/user.zig` (kernel-side ones in
+  `fuzz/kernel.zig`); `zig build fuzz --fuzz=100K` for a coverage-guided run.
 - Machine-readable output goes through `klog` (`@caravan` from the kernel,
   `@grain` from user space): `<event> k=v`, names `[a-z0-9_]`.
 - Benchmarks: run `zig build bench -Doptimize=ReleaseFast` (one hart). Under

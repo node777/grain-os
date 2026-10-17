@@ -89,6 +89,46 @@ pub const pointer_max: u16 = 0x7fff;
 
 const Kind = enum { keyboard, tablet };
 
+/// What Grain needs of a USB configuration: its first HID interface and
+/// that interface's interrupt-IN endpoint.
+pub const Hid = struct {
+    config_value: u8,
+    interface: u8,
+    kind: Kind,
+    endpoint: u8,
+    max_packet: u16,
+    interval: u8,
+};
+
+/// Walk a configuration descriptor (and the interface and endpoint
+/// descriptors after it) as the device sent it: nothing in it is trusted,
+/// every field is read only inside its own descriptor's length.
+pub fn parseConfiguration(cfg: []const u8) ?Hid {
+    if (cfg.len < 9 or cfg[1] != 2) return null;
+    var hid: ?Hid = null;
+    var i: usize = 0;
+    while (i + 2 <= cfg.len) {
+        const len = cfg[i];
+        if (len < 2 or i + len > cfg.len) break;
+        const d = cfg[i..][0..len];
+        switch (d[1]) {
+            4 => if (hid == null and len >= 9 and d[5] == 3) { // a HID interface
+                hid = .{ .config_value = cfg[5], .interface = d[2], .kind = if (d[7] == 1) .keyboard else .tablet, .endpoint = 0, .max_packet = 8, .interval = 10 };
+            },
+            5 => if (hid) |*h| if (h.endpoint == 0 and len >= 7 and d[2] & 0x80 != 0 and d[3] & 3 == 3) {
+                h.endpoint = d[2];
+                h.max_packet = std.mem.readInt(u16, d[4..6], .little) & 0x7ff;
+                h.interval = d[6];
+            },
+            else => {},
+        }
+        i += len;
+    }
+    const h = hid orelse return null;
+    if (h.endpoint == 0 or h.max_packet == 0) return null;
+    return h;
+}
+
 const Device = struct {
     slot: u8,
     kind: Kind,
@@ -316,32 +356,13 @@ pub const Xhci = struct {
         try x.control(slot, &ep0, 0x80, 6, 0x0200, 0, 9, buf.pa);
         const total = @min(std.mem.readInt(u16, cfg[2..4], .little), 256);
         try x.control(slot, &ep0, 0x80, 6, 0x0200, 0, total, buf.pa);
-        const config_value = cfg[5];
-        var kind: ?Kind = null;
-        var interface: u8 = 0;
-        var ep_addr: u8 = 0;
-        var ep_mps: u16 = 8;
-        var ep_interval: u8 = 10;
-        var i: usize = 0;
-        while (i + 2 <= total) {
-            const len = cfg[i];
-            if (len < 2) break;
-            switch (cfg[i + 1]) {
-                4 => if (cfg[i + 5] == 3) { // a HID interface
-                    interface = cfg[i + 2];
-                    kind = if (cfg[i + 7] == 1) .keyboard else .tablet;
-                },
-                5 => if (kind != null and ep_addr == 0 and cfg[i + 2] & 0x80 != 0 and cfg[i + 3] & 3 == 3) {
-                    ep_addr = cfg[i + 2];
-                    ep_mps = std.mem.readInt(u16, cfg[i + 4 ..][0..2], .little) & 0x7ff;
-                    ep_interval = cfg[i + 6];
-                },
-                else => {},
-            }
-            i += len;
-        }
-        const k = kind orelse return error.Unsupported;
-        if (ep_addr == 0) return error.Unsupported;
+        const hid = parseConfiguration(cfg[0..total]) orelse return error.Unsupported;
+        const k = hid.kind;
+        const config_value = hid.config_value;
+        const interface = hid.interface;
+        const ep_addr = hid.endpoint;
+        const ep_mps = hid.max_packet;
+        const ep_interval = hid.interval;
         try x.control(slot, &ep0, 0x00, 9, config_value, 0, 0, 0); // SET_CONFIGURATION
         if (k == .keyboard) try x.control(slot, &ep0, 0x21, 0x0b, 0, interface, 0, 0); // SET_PROTOCOL: boot
 
@@ -468,6 +489,22 @@ pub fn linuxCode(usage: u8) ?u16 {
         0x38 => 53, // /
         else => null,
     };
+}
+
+test "a keyboard's configuration, and damaged ones" {
+    // QEMU's usb-kbd: configuration, interface (HID, boot, keyboard), HID
+    // class descriptor, interrupt-IN endpoint 1.
+    const kbd = [_]u8{ 9, 2, 34, 0, 1, 1, 0, 0xa0, 50, 9, 4, 0, 0, 1, 3, 1, 1, 0, 9, 0x21, 0x11, 1, 0, 1, 0x22, 63, 0, 7, 5, 0x81, 3, 8, 0, 7 };
+    const h = parseConfiguration(&kbd).?;
+    try std.testing.expectEqual(Kind.keyboard, h.kind);
+    try std.testing.expectEqual(@as(u8, 0x81), h.endpoint);
+    try std.testing.expectEqual(@as(u16, 8), h.max_packet);
+    try std.testing.expectEqual(@as(u8, 1), h.config_value);
+    // The endpoint descriptor cut short, or claiming to run past the end.
+    try std.testing.expect(parseConfiguration(kbd[0..30]) == null);
+    var long = kbd;
+    long[27] = 40;
+    try std.testing.expect(parseConfiguration(&long) == null);
 }
 
 test "HID usages map to the Linux codes the virtio keyboard sends" {

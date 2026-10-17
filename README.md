@@ -11,7 +11,16 @@ an audit ledger), and **loyal** (it answers to its owner only).
 
 RISC-V is the primary target; aarch64 runs the kernel; x86_64 follows.
 
-> Status: **Phase 8: reach.** Grain drives the hardware a PC has as well
+> Status: **Phase 9: hardening.** Every way into the kernel and every
+> parser of untrusted input is fuzzed (Zig's coverage-guided fuzzer, and a
+> seeded sweep in every test run); a model checker tries every order of
+> every call in small IPC and revocation scenarios on the real kernel core;
+> boots through Aurora are measured, recorded in the Ledger and attested by
+> the instance's identity; IPC hands off without the run queue. The
+> capability model is written up for an external reviewer
+> (docs/CAPABILITY_MODEL.md).
+>
+> Phase 8: reach. Grain drives the hardware a PC has as well
 > as virtio: Steward owns the PCI Express bus and hands each function to
 > the domain the manifest names; NVMe storage, Intel Ethernet, a linear
 > framebuffer, and USB keyboards and tablets over xHCI each have a native

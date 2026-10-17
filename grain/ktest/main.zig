@@ -153,7 +153,10 @@ fn testBootInfo() !void {
     try check(boot_info.untyped_count > 0);
     try check(boot_info.timebase_hz > 0);
     try check(boot_info.hart_count >= 1);
-    g.record("boot_info", .{ .harts = boot_info.hart_count, .untyped = boot_info.untyped_count, .timebase_hz = boot_info.timebase_hz });
+    // Booted straight from firmware (no Aurora): nothing was measured, and
+    // whatever firmware left in a2 was not taken for a measurement.
+    try check(!boot_info.measurement.measured());
+    g.record("boot_info", .{ .harts = boot_info.hart_count, .untyped = boot_info.untyped_count, .timebase_hz = boot_info.timebase_hz, .measured = boot_info.measurement.measured() });
 }
 
 fn testDeviceTree() !void {

@@ -9,6 +9,8 @@
 //!
 //! then turn on Sv39 and jump to the kernel's linked (virtual) address.
 //! Everything here uses pc-relative addressing, which works at either address.
+//! a0, a1 and a2 (hart id, device tree, measured-boot record) pass through
+//! untouched to kmain.
 
 pub const kernel_offset: u64 = 0xffff_ffff_0000_0000; // virtual - physical
 pub const physmap_base: u64 = 0xffff_ffc0_0000_0000;

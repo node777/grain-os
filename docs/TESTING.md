@@ -15,11 +15,12 @@ terminal, by a human or an AI, with a pass or fail answer in seconds.**
 
 `tools/setup.sh` installs all of these on Debian/Ubuntu.
 
-## The loop today (Phase 5)
+## The loop today (Phase 9)
 
 ```sh
 zig build test        # host: unit tests, kernel scenarios, manifest, image, IDL, Brix, Kumara,
-                      # generation format, and Tablecloth with its crash simulator; a short simulator run
+                      # generation format, and Tablecloth with its crash simulator; a short simulator run;
+                      # a seeded sweep of every fuzz target; the model checker
 zig build qemu-test   # QEMU riscv64, 2 harts: kernel suite (and again on aarch64); the dev system; the dev system on a disk,
                       # booted twice; an agent driving Envoy; the desktop through QMP; two instances
                       # meeting and sharing (tools/pair.py); the faults system;
@@ -28,6 +29,10 @@ zig build qemu-test   # QEMU riscv64, 2 harts: kernel suite (and again on aarch6
 zig build check-manifest -Dsystem=system/my.brix  # check a manifest (Brix or ZON)
 zig-out/bin/brix --print system/my.brix           # what a .brix evaluates to
 zig build sim         # the deterministic simulator (16 seeds × 50k steps); -Dseed=N replays one
+zig build fuzz        # every fuzz target, a longer seeded sweep (-Dfuzz-sweep=percent, default 1000)
+zig build fuzz --fuzz=100K  # Zig's coverage-guided fuzzer on them (crashing inputs: .zig-cache/f/)
+zig build model       # the model checker: every order of every IPC and revocation scenario
+valgrind --tool=callgrind zig-out/bin/caravan-profile   # where the core spends an IPC round trip
 zig build bench -Doptimize=ReleaseFast   # one hart: benchmark and kernel-profile records
 zig build run         # boot through Aurora in real time with an Envoy socket; each build becomes the
                       # current generation of a disk that persists between runs (zig-out/run-disk.img);
@@ -59,6 +64,50 @@ The four layers, from fastest to most real:
    more, the machine reboots within the same seed. Every seed runs twice, and
    the final kernel memory must hash identically. A failure prints the seed
    and step; `--seed N --trace` replays it.
+3b. **Fuzzing** (`fuzz/kernel.zig`, `fuzz/user.zig`): every way into the
+   kernel (system calls with any registers, faults, interrupts on any line,
+   time, and boot itself with a damaged root image, device tree and odd
+   platform numbers), with the invariants after every kernel entry; and
+   every parser that reads what someone else controls: the device tree and
+   ELF images, network frames, Noise handshake and transport messages, a
+   damaged Tablecloth disk, boot images, generation descriptors, client
+   messages for every method of every protocol, Brix manifests, USB
+   configuration descriptors, PCI BAR sizes. Each target also checks a
+   property where there is one: a damaged Noise message is never accepted
+   as authentic, an object read from a damaged disk still matches its hash,
+   a decoded message encodes back to itself, placed BARs are aligned and
+   inside the window. A target draws its choices from `fuzz/source.zig`:
+   Zig's coverage-guided fuzzer under `--fuzz`, a seeded PRNG otherwise
+   (`zig build test` sweeps each target; valid samples are damaged the
+   way a bad sector or an attacker would, which reaches far deeper than
+   random bytes). The kernel targets share the simulator's step generator
+   (`sim/driver.zig`). Found and fixed on the way: integer overflows in the
+   device-tree parser (cell counts from the tree itself; the kernel runs it
+   at boot) and the boot-image parser, a device-tree offset past the end,
+   PCI BAR sizes from a device that answers a mask with holes (an
+   assertion in placement; Steward would have crashed), and the xHCI
+   descriptor walk reading past a descriptor's length (now a pure,
+   bounds-checked `parseConfiguration`). A coverage-guided run of 30,000 inputs per
+   target (`zig build fuzz --fuzz=30K`, about five minutes) found nothing
+   further.
+3c. **Model checking** (`caravan-model`, `sim/model.zig`): small
+   scenarios of a few threads, one per hart, each running a short script
+   of system calls; every order of those calls is tried on the real kernel
+   core (each is atomic under the kernel lock), snapshotting the machine at
+   each branch and skipping states already seen. In every state: the
+   kernel's invariants and the scenario's safety property (a call issued
+   after a revoke never succeeds; a lease good for two uses lets at most two
+   calls through). In every final state: liveness (every thread finished,
+   except servers waiting in a receive and threads that were destroyed).
+   Scenarios: call and reply while the endpoint is revoked; a server and its
+   endpoint destroyed mid-call; clients queued on an endpoint that is
+   destroyed; two clients racing for a lease's uses; a lease revoked while
+   used; a revoke then a reset while two clients call (894 states); a bound
+   signal and a message to one server. A violation prints the order of
+   calls that led to it. Checked against planted bugs: a lease that never
+   uses up, and destroyed endpoints that keep their waiters, are both
+   caught.
+
 4. **QEMU, kernel suite** (`caravan-ktest`): the kernel test program runs as
    root task, on 2 harts. That covers boot info, capability identity, mint and revoke, thread
    signalling, a passive server, fault handling with retry, leases, CPU
@@ -102,7 +151,12 @@ The four layers, from fastest to most real:
    an NVMe drive. Steward finds it on the PCI bus, places its BAR and
    routes its interrupt; Tablecloth drives it natively; the identity made
    on boot 1 comes back on boot 2.
-8. **QEMU, generations through Aurora** (eight boots on one disk): an agent
+8. **QEMU, generations through Aurora** (eight boots on one disk). Aurora
+   measures what it boots; on the first boot the agent asks for an
+   attestation (`attest.v1`) with a fresh nonce and checks it with an
+   independent implementation (`tools/envoy.py`: BLAKE3 in Python, Ed25519
+   from `cryptography`): the chain is the one its parts make, the identity
+   signed it with that nonce, and it names the current generation. Then an agent
    uploads and switches to the next generation; the power is cut right
    after Aurora records the trial boot; the trial comes up and is confirmed;
    the agent rolls back; the power is cut mid-confirm; the rollback

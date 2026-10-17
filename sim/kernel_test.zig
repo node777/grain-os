@@ -42,6 +42,50 @@ test "boot builds the root task" {
     try expectEqual(abi.Status.invalid_cap, empty.status);
 }
 
+test "the loader's measurement reaches the root task in BootInfo" {
+    var mm: abi.Measurement = .{};
+    @memset(&mm.chain, 0xc1);
+    @memset(&mm.loader, 0x10);
+    @memset(&mm.generation, 0x6e);
+    const elf = machine.arch.fakeRootElf();
+    var m = try Machine.bootWith(1, ram_size, machine.arch.platform(1, ram_size), &elf, &.{}, mm);
+    defer m.deinit();
+    try m.check();
+    var bi: abi.BootInfo = undefined;
+    try m.readUser(abi.RootLayout.boot_info, std.mem.asBytes(&bi));
+    try expectEqual(abi.boot_info_magic, bi.magic);
+    try std.testing.expect(bi.measurement.measured());
+    try std.testing.expectEqualSlices(u8, &mm.chain, &bi.measurement.chain);
+    try std.testing.expectEqualSlices(u8, &mm.generation, &bi.measurement.generation);
+    // Booted without one: all zero.
+    var plain = try bootMachine();
+    defer plain.deinit();
+    try plain.readUser(abi.RootLayout.boot_info, std.mem.asBytes(&bi));
+    try std.testing.expect(!bi.measurement.measured());
+}
+
+test "generations never come round: a wrapping revoke is refused, a used-up entry retired" {
+    var m = try bootMachine();
+    defer m.deinit();
+    try retype(&m, .untyped, 16, 105);
+    // Age the next entry handed out, as if it had lived 2^32 - 2 times.
+    const id = m.k.free_head;
+    m.k.table[id].gen = core.kernel.max_gen - 2;
+    _ = try m.invoke(0, 105, abi.UntypedMethod.retype, &.{ @backingInt(abi.Kind.endpoint), 0, 100 });
+    try expectEqual(@as(u64, id), (try identify(&m, 100)).words[4]);
+    try expectEqual(abi.Status.ok, (try m.invoke(0, S.cnode, abi.CNodeMethod.revoke, &.{100})).status);
+    try expectEqual(abi.Status.invalid_state, (try m.invoke(0, S.cnode, abi.CNodeMethod.revoke, &.{100})).status);
+    try expectEqual(abi.Status.ok, (try identify(&m, 100)).status);
+    // Destroyed at its last generation: retired, never handed out again.
+    try expectEqual(abi.Status.ok, (try m.invoke(0, 105, abi.UntypedMethod.reset, &.{})).status);
+    try m.check();
+    try expectEqual(core.kernel.max_gen, m.k.table[id].gen);
+    var cur = m.k.free_head;
+    while (cur != 0) : (cur = m.k.table[cur].link) try std.testing.expect(cur != id);
+    _ = try m.invoke(0, 105, abi.UntypedMethod.retype, &.{ @backingInt(abi.Kind.endpoint), 0, 101 });
+    try std.testing.expect((try identify(&m, 101)).words[4] != id);
+}
+
 test "retype, mint with fewer rights, revoke" {
     var m = try bootMachine();
     defer m.deinit();

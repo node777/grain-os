@@ -6,6 +6,7 @@
 //! protocols and slots), and its devices. Programs look things up by name;
 //! nothing is wired by convention alone.
 const std = @import("std");
+const abi = @import("abi");
 
 /// Slots in a domain's CSpace (a CNode of 2^cnode_bits slots).
 pub const Slot = struct {
@@ -183,6 +184,8 @@ pub const DomainInfo = extern struct {
     program_hash: [32]u8,
     /// The closure hash of the whole system image.
     closure: [32]u8,
+    /// What booted, as measured before the kernel ran (zero if not measured).
+    measurement: abi.Measurement,
     uses: [max_services]Service,
     provides: [max_services]Service,
     devices: [max_devices]Device,

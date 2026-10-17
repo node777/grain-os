@@ -101,7 +101,7 @@ pub const Config = struct {
                 c.write32(off + 4, hi_orig);
             } else if (mask != 0) mask |= 0xffff_ffff_0000_0000;
             if (mask != 0) {
-                out[n] = .{ .index = i, .size = ~mask +% 1, .wide = wide, .prefetchable = orig & 8 != 0 };
+                out[n] = .{ .index = i, .size = barSize(mask), .wide = wide, .prefetchable = orig & 8 != 0 };
                 n += 1;
             }
             if (wide) i += 1;
@@ -115,6 +115,13 @@ pub const Config = struct {
         if (b.wide) c.write32(off + 4, @truncate(addr >> 32));
     }
 };
+
+/// A BAR's size from the mask its device answered when sized: its lowest
+/// writable address bit. (A device that answers a mask with holes in it
+/// still gets a power of two, so placement stays aligned.)
+pub fn barSize(mask: u64) u64 {
+    return mask & (~mask +% 1);
+}
 
 pub const Bar = struct {
     index: u8,
@@ -139,16 +146,28 @@ pub fn place(bars: []*Bar, window_base: u64, window_size: u64) error{NoSpace}!vo
         }
     }.larger);
     var cursor = window_base;
+    const end = window_base + window_size;
     for (bars) |b| {
         const size = @max(b.size, min_bar);
+        if (size > window_size or !std.math.isPowerOfTwo(size)) return error.NoSpace;
         cursor = std.mem.alignForward(u64, cursor, size);
-        if (cursor + size > window_base + window_size) return error.NoSpace;
+        if (cursor > end or size > end - cursor) return error.NoSpace;
         b.addr = cursor;
         cursor += size;
     }
 }
 
 const testing = std.testing;
+
+test "BAR sizes from any mask a device answers" {
+    try testing.expectEqual(@as(u64, 0x4000), barSize(0xffff_ffff_ffff_c000));
+    try testing.expectEqual(@as(u64, 16 << 20), barSize(0xffff_ffff_ff00_0000));
+    try testing.expectEqual(@as(u64, 0x1000), barSize(0x0000_f0f0_1234_1000)); // holes
+    try testing.expectEqual(@as(u64, 1 << 63), barSize(1 << 63));
+    var huge: [1]Bar = .{.{ .index = 0, .size = 1 << 63, .wide = true, .prefetchable = false }};
+    var hp = [_]*Bar{&huge[0]};
+    try testing.expectError(error.NoSpace, place(&hp, 0x4000_0000, 0x4000_0000));
+}
 
 test "classes match by code and mask" {
     try testing.expect(matches(classByName("nvme").?, 0x010802));

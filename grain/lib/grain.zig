@@ -21,6 +21,7 @@ pub const e1000 = @import("e1000.zig");
 pub const bochs = @import("bochs.zig");
 pub const xhci = @import("xhci.zig");
 pub const cpu = @import("cpu.zig");
+pub const measure = @import("measure.zig");
 
 /// Options for a program's root (`pub const std_options = grain.std_options;`):
 /// Caravan's pages are 4 KiB, which std cannot know for a freestanding target.

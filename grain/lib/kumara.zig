@@ -167,4 +167,6 @@ test "names, signing contexts" {
     try std.testing.expect(verify(pk, "ledger", "entry 1", sig));
     try std.testing.expect(!verify(pk, "agent", "entry 1", sig));
     try std.testing.expect(!verify(pk, "ledger", "entry 2", sig));
+    // Known answer, from the independent Python check (tools/envoy.py).
+    try std.testing.expectEqualStrings("a0736ba152093cb90912daefb649f49e5b904d1b9ab21b9808a7b15b01de1c74", &std.fmt.bytesToHex(digest("ledger", "entry 1"), .lower));
 }

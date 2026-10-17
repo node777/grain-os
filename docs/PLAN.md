@@ -220,10 +220,30 @@ Built:
   full system on Arm (they are portable; the Arm system needs PCI interrupt
   routing for GIC specifiers and a pass of the system tests).
 
-## Phase 9: hardening
+## Phase 9: hardening (done, except what needs people or hardware)
 - Fuzzing of every kernel entry point; model checks of IPC and revocation;
   measured boot; performance work on RVA23 hardware; an external review of
   the capability model.
+- Built: fuzz targets for every kernel entry (system calls with any
+  registers, faults, interrupts, time, boot data) and every parser of input
+  someone else controls, run by Zig's coverage-guided fuzzer or as seeded
+  sweeps in `zig build test` (fuzz/); a model checker that tries every order
+  of every call in seven IPC and revocation scenarios on the real core
+  (`zig build model`); measured boot from Aurora through the kernel, Steward,
+  every domain and the Ledger, with attestations signed by the identity
+  (`attest.v1`) and checked by an independent implementation; a direct
+  hand-off for IPC and yield (−8% on the round trip, −11% on yield);
+  generations that never come round; docs/CAPABILITY_MODEL.md, the brief for
+  a reviewer.
+- Found and fixed: integer overflows in the device-tree parser (the kernel
+  runs it at boot) and the boot-image parser; a device-tree offset past the
+  end; BAR sizes from a device that answers a mask with holes (Steward
+  would have hit an assertion); the xHCI descriptor walk reading past a
+  descriptor; Aurora's overlap check overflowing on a hostile descriptor.
+- Not done, and why: the external review itself (it needs reviewers; the
+  brief is ready); performance work on RVA23 hardware (none at hand: the
+  work was done in instructions retired under QEMU and in a callgrind
+  profile of the core); a hardware root for measured boot.
 
 ## Owner decisions
 - **Milestone:** build through Phase 2 before the next review (done); then

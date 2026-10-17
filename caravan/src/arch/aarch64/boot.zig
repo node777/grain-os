@@ -133,6 +133,7 @@ comptime {
         \\    mov x0, x20
         \\    cbnz x21, 5f
         \\    mov x1, x19
+        \\    mov x2, #0
         \\    b kmain
         \\5:  mov x1, x22
         \\    b kmainSecondary

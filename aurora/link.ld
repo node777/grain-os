@@ -10,6 +10,8 @@ SECTIONS
     __aurora_start = .;
     .text : { KEEP(*(.text.start)) *(.text .text.*) }
     .rodata : ALIGN(16) { *(.srodata .srodata.*) *(.rodata .rodata.*) }
+    /* Measured boot hashes Aurora's code: everything up to here. */
+    __aurora_code_end = .;
     .data : ALIGN(16) { *(.sdata .sdata.*) *(.data .data.*) }
     .bss (NOLOAD) : ALIGN(4096) {
         __bss_start = .;

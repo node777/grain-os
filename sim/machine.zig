@@ -30,13 +30,41 @@ pub const Machine = struct {
 
     /// Boot on a platform the test changed (from `arch.platform`).
     pub fn bootOn(harts: u32, ram_size: usize, plat: core.fdt.Platform) !Machine {
-        try arch.init(ram_size);
-        const k = try std.heap.page_allocator.create(K);
-        k.* = .{};
         const elf_bytes = arch.fakeRootElf();
-        try k.boot(.{ .platform = &plat, .reserved = &.{}, .root_elf = &elf_bytes, .now = 1000, .root_budget_ticks = 100_000 });
+        return bootWith(harts, ram_size, plat, &elf_bytes, &.{}, .{});
+    }
+
+    /// Boot with any root task image and device tree (the fuzzer's way in).
+    pub fn bootWith(harts: u32, ram_size: usize, plat: core.fdt.Platform, root_elf: []const u8, dtb: []const u8, measurement: abi.Measurement) !Machine {
+        try arch.init(ram_size);
+        errdefer arch.deinit();
+        const k = try std.heap.page_allocator.create(K);
+        errdefer std.heap.page_allocator.destroy(k);
+        k.* = .{};
+        try k.boot(.{ .platform = &plat, .reserved = &.{}, .root_elf = root_elf, .dtb = dtb, .measurement = measurement, .now = 1000, .root_budget_ticks = 100_000 });
         for (0..harts) |h| k.hartOnline(@intCast(h), 1000);
         return .{ .k = k, .root = k.currentThread(0).? };
+    }
+
+    /// Read the root task's memory at `va` (through its page tables).
+    pub fn readUser(m: *Machine, va: u64, out: []u8) !void {
+        const P = arch.Paging;
+        for (out, 0..) |*b, i| {
+            const a = va + i;
+            var table_pa = m.k.vspaceRoot(m.root) orelse return error.NoVSpace;
+            var level: usize = P.levels;
+            const pte = while (level > 0) {
+                level -= 1;
+                const ptes: *const [P.entries]u64 = @ptrFromInt(arch.physToVirt(table_pa));
+                const e = ptes[P.index(a, level)];
+                if (!P.isValid(e)) return error.NotMapped;
+                if (P.isLeaf(e)) break e;
+                table_pa = P.address(e);
+            } else return error.NotMapped;
+            const page = P.address(pte) & ~((@as(u64, 1) << P.levelShift(level)) - 1);
+            const off = a & ((@as(u64, 1) << P.levelShift(level)) - 1);
+            b.* = @as(*const u8, @ptrFromInt(arch.physToVirt(page + off))).*;
+        }
     }
 
     pub fn deinit(m: *Machine) void {
@@ -44,7 +72,7 @@ pub const Machine = struct {
         arch.deinit();
     }
 
-    pub fn current(m: *Machine, hart: u32) ?*Thread {
+    pub fn current(m: *const Machine, hart: u32) ?*Thread {
         return m.k.currentThread(hart);
     }
 
