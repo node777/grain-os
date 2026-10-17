@@ -91,6 +91,13 @@ badge        : u32   delivered to the receiver with every message or signal
   receiver arrives. Steward stamps the low 16 bits of the IDL hash (§3.2) on
   every endpoint it hands out, so a client built against `kv.v1` cannot
   talk to a server serving `echo.v1`, whatever slot it was given.
+- **Protocols are delivered:** the receiver gets the sender's protocol id
+  with the badge (`a7` bits 32..47). A domain serving several protocols
+  receives on one unstamped endpoint and dispatches on that id
+  (`idl.serveAll`), so a label is only ever read as a method of the protocol
+  the caller actually holds. Steward gives each domain one endpoint for all
+  its services; a domain of one protocol keeps its receive side stamped, so
+  the kernel still refuses strangers before they reach it.
 - **Introspection:** `CNode.identify` returns the kind, rights, badge, the
   kind *behind* a lease, and the object id; `CNode.lease_info` returns a
   lease's remaining uses and expiry. Agents can ask any slot what it is.
@@ -486,10 +493,11 @@ Clients are known by name from `DomainInfo.clients`, which Steward fills
 with every domain using the service (by badge) and the agent; Steward itself
 calls unbadged.
 
-**Console input.** `console.read_line` hands out what the owner typed, a line
-at a time, and is refused to the agent. *Limit:* any domain the manifest
-wires to the console could read input; input should be its own service, once
-a domain can serve more than one endpoint.
+**Console input** is its own service, `input.v1`, which the console domain
+serves next to `console.v1` on the same endpoint. Only domains the manifest
+wires to `input` (in the dev system, the store, for the passphrase) can
+read what the owner types; holding `console.v1`, as the agent does, gives
+no way to.
 
 **Ready.** Once mounted and unlocked, the store asks Steward (lifecycle
 `ready`) whether every domain came up, confirms a generation on trial if so,

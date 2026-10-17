@@ -467,6 +467,31 @@ test "endpoints refuse a sender whose protocol differs from the receiver's" {
     // Unstamped capabilities are not checked; the right protocol goes through.
     _ = try m.sys(0, .send, 102, 0, &.{});
     try expectEqual(@as(u64, 7), Machine.result(server).badge);
+    // The receiver learns the protocol the sender's capability speaks.
+    try expectEqual(@as(u16, 0x1234), Machine.result(server).protocol);
+}
+
+test "an unstamped receiver serves several protocols and learns which each sender speaks" {
+    var m = try bootMachine();
+    defer m.deinit();
+    try retype(&m, .endpoint, 0, 100);
+    const all = abi.Rights.all.bits();
+    // The server's capability is unstamped; two clients speak different protocols.
+    try expectEqual(abi.Status.ok, (try m.invoke(0, S.cnode, abi.CNodeMethod.mint, &.{ 102, 100, all, 7, 0x1111 })).status);
+    try expectEqual(abi.Status.ok, (try m.invoke(0, S.cnode, abi.CNodeMethod.mint, &.{ 103, 100, all, 8, 0x2222 })).status);
+
+    // The server runs below the root, so the root's first send queues.
+    const server = try spawn(&m, 110, 111, 50, 50_000, 50_000);
+    _ = try m.invoke(0, 110, abi.ThreadMethod.resume_thread, &.{});
+    try std.testing.expect(m.current(0) == m.root);
+    _ = try m.sys(0, .send, 103, 0, &.{});
+    try expectEqual(abi.ThreadState.blocked_send, m.root.state);
+    try std.testing.expect(m.current(0) == server);
+    _ = try m.sys(0, .recv, 100, 0, &.{});
+    const r = Machine.result(server);
+    try expectEqual(@as(u64, 8), r.badge);
+    try expectEqual(@as(u16, 0x2222), r.protocol);
+    try m.check();
 }
 
 test "a queued sender with the wrong protocol is refused when the receiver arrives" {

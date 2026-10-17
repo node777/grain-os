@@ -25,6 +25,8 @@ domain console like driver {
     restart = on_fault
     device port { virtio = 3 }
     provides console { protocol = console.v1 }
+    # What the owner types: only the store (for the passphrase) reads it.
+    provides input { protocol = input.v1 }
 }
 
 domain rng like driver {
@@ -90,6 +92,7 @@ domain tablecloth like dev {
     await_ready
     device disk { virtio = 2, optional }
     uses console { from = console.console, protocol = console.v1 }
+    uses input { from = console.input, protocol = input.v1 }
     uses entropy { from = rng.entropy, protocol = entropy.v1 }
     provides tablecloth { protocol = tablecloth.v1 }
 }

@@ -214,7 +214,8 @@ fn testThreadSignal() !void {
 fn echoServer(ep: usize) callconv(.c) noreturn {
     var r = g.recv(@intCast(ep));
     while (true) {
-        r = g.replyRecv(@intCast(ep), .{ .length = 2 }, .{ r.w[0] + 1, r.badge });
+        // Answers value + 1, the badge it saw, and the sender's protocol id.
+        r = g.replyRecv(@intCast(ep), .{ .length = 3 }, .{ r.w[0] + 1, r.badge, r.protocol });
     }
 }
 
@@ -265,7 +266,8 @@ fn testProtocolCheck() !void {
     try expectStatus(.protocol_mismatch, g.call(bad, .{ .length = 1 }, .{1}).status);
     const r = g.call(good, .{ .length = 1 }, .{1});
     try expectStatus(.ok, r.status);
-    try check(r.w[0] == 2 and r.w[1] == 3);
+    // The server learns which protocol the caller's capability speaks.
+    try check(r.w[0] == 2 and r.w[1] == 3 and r.w[2] == 0x1111);
     _ = g.invoke(w.thread, abi.ThreadMethod.suspend_thread, .{});
 }
 
@@ -290,7 +292,7 @@ fn testPassiveServerCall() !void {
     try expectStatus(.ok, g.invoke(w.thread, abi.ThreadMethod.bind_sched, .{0}).status);
     const r = g.call(badged, .{ .length = 1 }, .{41});
     try expectStatus(.ok, r.status);
-    try check(r.w[0] == 42 and r.w[1] == 99 and r.tag.length == 2);
+    try check(r.w[0] == 42 and r.w[1] == 99 and r.w[2] == 0 and r.tag.length == 3);
     try benchCalls(badged, "ipc_call_passive_server", 2000);
 }
 

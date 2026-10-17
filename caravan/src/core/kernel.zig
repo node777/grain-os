@@ -1433,7 +1433,10 @@ pub fn Kernel(comptime A: type) type {
 
         /// Copy a message from `src` to `dst`, including capabilities when the
         /// sender may grant. Sets dst's a0 (ok), a1 (tag) and a7 (badge).
-        fn transfer(k: *Self, src: *Thread, dst: *Thread, badge: u32, grant: bool) void {
+        /// The receiver gets a7 = badge | protocol << 32: who sent it (the
+        /// badge) and which protocol the sender's capability speaks, so one
+        /// endpoint can serve several protocols and tell them apart.
+        fn transfer(k: *Self, src: *Thread, dst: *Thread, badge: u32, protocol: u16, grant: bool) void {
             k.stats.ipc_transfers += 1;
             const msg_regs = [_]Reg{ .a2, .a3, .a4, .a5, .a6 };
             var tag: abi.Tag = undefined;
@@ -1472,7 +1475,7 @@ pub fn Kernel(comptime A: type) type {
             }
             dst.ctx.set(.a0, @backingInt(abi.Status.ok));
             dst.ctx.set(.a1, @as(usize, @bitCast(tag)));
-            dst.ctx.set(.a7, badge);
+            dst.ctx.set(.a7, @as(u64, badge) | @as(u64, protocol) << 32);
         }
 
         fn link(k: *Self, head: *ObjId, tail: *ObjId, t: *Thread) void {
@@ -1541,7 +1544,7 @@ pub fn Kernel(comptime A: type) type {
             if (ep.mode == .receiving) {
                 const recv = k.popFront(&ep.head, &ep.tail).?;
                 if (ep.head == 0) ep.mode = .idle;
-                k.transfer(t, recv, c.badge, grant);
+                k.transfer(t, recv, c.badge, c.protocol, grant);
                 if (is_call) {
                     k.startReply(t, recv);
                 } else {
@@ -1612,7 +1615,7 @@ pub fn Kernel(comptime A: type) type {
             if (ep.mode == .sending) {
                 const sender = k.popFront(&ep.head, &ep.tail).?;
                 if (ep.head == 0) ep.mode = .idle;
-                k.transfer(sender, t, sender.send_badge, sender.send_grant);
+                k.transfer(sender, t, sender.send_badge, sender.send_protocol, sender.send_grant);
                 if (sender.send_call) {
                     sender.state = .inactive; // re-blocked by startReply
                     k.startReply(sender, t);
@@ -1657,7 +1660,7 @@ pub fn Kernel(comptime A: type) type {
                 if (tag.label == 1) caller.ctx.set(.pc, arg(t, .a2));
                 caller.clearFault();
             } else {
-                k.transfer(t, caller, 0, false);
+                k.transfer(t, caller, 0, 0, false);
             }
             if (t.sc != 0 and t.sc == caller.sc and t.sc != t.home_sc) {
                 // Give the lent context back.

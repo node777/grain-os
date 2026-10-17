@@ -25,6 +25,8 @@ pub const Result = struct {
     tag: Tag,
     w: [5]usize,
     badge: usize,
+    /// On receive: the protocol id stamped on the sender's capability (0 if none).
+    protocol: u16 = 0,
 
     pub fn ok(r: Result) bool {
         return r.status == .ok;
@@ -59,7 +61,7 @@ pub inline fn syscall(number: abi.Syscall, a0: usize, a1: usize, w: [5]usize) Re
           [a6] "{a6}" (w[4]),
           [a7] "{a7}" (@backingInt(number)),
         : .{ .memory = true });
-    return .{ .status = @fromBackingInt(@intCast(r0)), .tag = @bitCast(r1), .w = .{ r2, r3, r4, r5, r6 }, .badge = r7 };
+    return .{ .status = @fromBackingInt(@intCast(r0)), .tag = @bitCast(r1), .w = .{ r2, r3, r4, r5, r6 }, .badge = r7 & 0xffff_ffff, .protocol = @truncate(r7 >> 32) };
 }
 
 fn words(args: anytype) [5]usize {

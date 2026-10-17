@@ -7,7 +7,8 @@
 //! Register convention (RISC-V):
 //!
 //!   in:  a7 = Syscall, a0 = capability slot (CPtr), a1 = Tag, a2..a6 = message words 0..4
-//!   out: a0 = Status, a1 = Tag, a2..a6 = message words 0..4, a7 = badge (receive operations)
+//!   out: a0 = Status, a1 = Tag, a2..a6 = message words 0..4, a7 = badge (receive operations;
+//!        bits 32..47 hold the protocol id of the sender's capability, 0 if none)
 //!
 //! Messages longer than five words continue in the thread's IPC buffer
 //! (`IpcBuffer.words[5..]`). Capabilities travel through the IPC buffer too.

@@ -380,12 +380,30 @@ pub fn callStatus(comptime M: type, ep: grain.CPtr, args: M.Params) struct { sta
     return .{ .status = out.r.status, .label = 0, .results = decode(M.Results, &out.w) catch null, .code = 0 };
 }
 
-pub const Caller = struct { badge: usize };
+/// Who is calling: the badge Steward gave their capability, and the protocol
+/// it speaks (the kernel delivers both; neither can be forged).
+pub const Caller = struct { badge: usize, protocol: u16 = 0 };
 
 /// Serve protocol `P` on `ep` forever: each request goes to
 /// `impl.<method>(params, caller) !Results`.
 pub fn serve(comptime P: type, ep: grain.CPtr, impl: anytype) noreturn {
-    comptime check(P);
+    serveAll(.{P}, ep, impl);
+}
+
+/// Serve several protocols on one endpoint. The kernel tells the server
+/// which protocol each message speaks (the sender's capability), so a label
+/// is only ever read as a method of the protocol the caller holds. `impl`
+/// has every protocol's methods; their names must not clash. An unstamped
+/// sender (Steward) speaks the first protocol.
+pub fn serveAll(comptime protocols: anytype, ep: grain.CPtr, impl: anytype) noreturn {
+    comptime {
+        for (protocols, 0..) |P, i| {
+            check(P);
+            for (protocols, 0..) |Q, j| if (j < i) for (methodNames(P)) |a| for (methodNames(Q)) |b| {
+                if (std.mem.eql(u8, a, b)) @compileError(fullName(P) ++ " and " ++ fullName(Q) ++ " both have a method '" ++ a ++ "'; one endpoint cannot serve both");
+            };
+        }
+    }
     var r = grain.recv(ep);
     while (true) {
         const req = gather(r);
@@ -393,21 +411,24 @@ pub fn serve(comptime P: type, ep: grain.CPtr, impl: anytype) noreturn {
         var reply: Words = @splat(0);
         reply[0] = @backingInt(ErrorCode.unknown_method);
         var reply_len: u7 = 1;
-        inline for (comptime methodNames(P)) |n| {
-            const M = @field(P, n);
-            if (r.tag.label == M.label) {
-                if (decode(M.Params, &req)) |params| {
-                    if (@field(@TypeOf(impl.*), n)(impl, params, .{ .badge = r.badge })) |res| {
-                        reply_label = 0;
-                        reply = encode(M.Results, res);
-                        reply_len = @intCast(words(M.Results));
-                    } else |e| {
-                        reply[0] = @backingInt(codeOf(e));
+        inline for (protocols, 0..) |P, pi| {
+            const speaks = r.protocol == kernelId(P) or (r.protocol == 0 and pi == 0);
+            if (speaks) inline for (comptime methodNames(P)) |n| {
+                const M = @field(P, n);
+                if (r.tag.label == M.label) {
+                    if (decode(M.Params, &req)) |params| {
+                        if (@field(@TypeOf(impl.*), n)(impl, params, .{ .badge = r.badge, .protocol = r.protocol })) |res| {
+                            reply_label = 0;
+                            reply = encode(M.Results, res);
+                            reply_len = @intCast(words(M.Results));
+                        } else |e| {
+                            reply[0] = @backingInt(codeOf(e));
+                        }
+                    } else |_| {
+                        reply[0] = @backingInt(ErrorCode.invalid_args);
                     }
-                } else |_| {
-                    reply[0] = @backingInt(ErrorCode.invalid_args);
                 }
-            }
+            };
         }
         r = grain.syscall(.reply_recv, ep, @bitCast(grain.Tag{ .label = reply_label, .length = reply_len }), scatter(&reply, reply_len));
     }

@@ -187,6 +187,9 @@ pub fn validate(m: Manifest, buf: []u8) ?[]const u8 {
         for (d.provides, 0..) |p, pi| {
             if (!isName(p.name)) return f.msg("domain '{s}': service name '{s}' must be 1-{d} characters of a-z, 0-9 and _", .{ d.name, p.name, max_name });
             for (d.provides[0..pi]) |q| if (std.mem.eql(u8, q.name, p.name)) return f.msg("domain '{s}' provides '{s}' twice", .{ d.name, p.name });
+            // A domain's services share one endpoint and are told apart by
+            // protocol, so each must speak a different one.
+            for (d.provides[0..pi]) |q| if (std.mem.eql(u8, q.protocol, p.protocol)) return f.msg("domain '{s}' provides '{s}' and '{s}', both {s}; a domain's services must speak different protocols", .{ d.name, q.name, p.name, p.protocol });
             if (p.protocol.len == 0 or p.protocol.len > max_name) return f.msg("domain '{s}': service '{s}' needs a protocol name of 1-{d} characters", .{ d.name, p.name, max_name });
         }
 
@@ -317,6 +320,7 @@ test "each mistake gets its own explanation" {
     try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .budget_us = 20, .period_us = 10 }} }, "budget_us (20) is larger than period_us (10)");
     try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .memory_kib = 48 }} }, "memory_kib 48 must be a power of two");
     try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .stack_kib = 6 }} }, "stack_kib 6 must be a multiple of 4");
+    try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .provides = &.{ .{ .name = "one", .protocol = "echo.v1" }, .{ .name = "two", .protocol = "echo.v1" } } }} }, "must speak different protocols");
     try expectError(.{ .name = "t", .domains = &.{ console, .{ .name = "a", .program = "x", .uses = &.{.{ .name = "out", .from = "console.consol", .protocol = "console.v1" }} } } }, "uses 'console.consol', but no domain provides it");
     try expectError(.{ .name = "t", .domains = &.{ console, .{ .name = "a", .program = "x", .uses = &.{.{ .name = "out", .from = "console.console", .protocol = "console.v2" }} } } }, "expects 'console.console' to speak console.v2, but it speaks console.v1");
     try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .devices = &.{.{ .name = "gpu", .virtio = 16 }} }} }, "virtio id 16");

@@ -351,8 +351,8 @@ const Domain = struct {
     restarts: u32 = 0,
     status: Status = .not_started,
     exit_code: u16 = 0,
-    /// One endpoint per provided service, in Steward's memory so it
-    /// survives the provider's restarts.
+    /// The domain's endpoint, once per provided service (all the same
+    /// endpoint), in Steward's memory so it survives the provider's restarts.
     endpoints: [schema.max_provides]g.CPtr = @splat(0),
     thread_id: u64 = 0,
     /// Steward's copy of the domain's CNode (to install later grants).
@@ -489,7 +489,10 @@ fn build(comptime i: usize) !void {
     }
     info.use_count = md.uses.len;
     inline for (md.provides, 0..) |p, pi| {
-        try mintProtocol(cnode, D.Slot.first_provide + pi, st.endpoints[pi], .{ .send = true, .recv = true, .grant = true }, 0, comptime proto.kernelIdOf(p.protocol));
+        // A server of one protocol has the kernel refuse other senders; a
+        // server of several receives them all and dispatches on the id.
+        const recv_protocol: u16 = if (md.provides.len == 1) comptime proto.kernelIdOf(p.protocol) else 0;
+        try mintProtocol(cnode, D.Slot.first_provide + pi, st.endpoints[pi], .{ .send = true, .recv = true, .grant = true }, 0, recv_protocol);
         info.provides[pi] = .{ .name = undefined, .protocol = undefined, .slot = D.Slot.first_provide + pi, .protocol_id = comptime proto.idOf(p.protocol) };
         D.setName(&info.provides[pi].name, p.name);
         D.setName(&info.provides[pi].protocol, p.protocol);
@@ -678,7 +681,12 @@ export fn stewardMain(bi: *const abi.BootInfo) callconv(.c) noreturn {
     lifecycle = retypeFrom(pool, .endpoint, 0) catch @panic("no lifecycle endpoint");
     probeDevices() catch |e| g.record("device_probe_failed", .{ .err = @errorName(e) });
     inline for (manifest.domains, 0..) |md, i| {
-        inline for (md.provides, 0..) |_, pi| domains[i].endpoints[pi] = retypeFrom(pool, .endpoint, 0) catch @panic("no endpoint");
+        // One endpoint per domain, for all its services: the kernel tells the
+        // server which protocol each message speaks.
+        if (md.provides.len > 0) {
+            const ep = retypeFrom(pool, .endpoint, 0) catch @panic("no endpoint");
+            inline for (md.provides, 0..) |_, pi| domains[i].endpoints[pi] = ep;
+        }
     }
     inline for (0..agent_grants.len) |k| makeAgentLease(k) catch |e| g.record("agent_lease_failed", .{ .service = agent_grants[k].name, .err = @errorName(e) });
     inline for (0..ndomains) |i| {

@@ -159,8 +159,6 @@ Built:
 - Kumara device keys signed by an owner root key; petnames.
 - The Ledger for grants, revocations and generation switches made by
   Steward itself (agent actions and the agent's switches are recorded).
-- Console input as its own service (any domain wired to the console can
-  read input today; the agent cannot).
 - `zig build run` boots the kernel directly with a persistent disk;
   booting it through Aurora, with each build staged as a generation, is the
   natural next step.

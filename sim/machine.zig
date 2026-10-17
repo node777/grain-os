@@ -13,6 +13,8 @@ pub const Result = struct {
     tag: abi.Tag,
     words: [5]u64,
     badge: u64,
+    /// The protocol id of the sender's capability (a7 bits 32..47).
+    protocol: u16,
 };
 
 pub const Machine = struct {
@@ -67,7 +69,8 @@ pub const Machine = struct {
             .status = @fromBackingInt(@intCast(t.ctx.get(.a0))),
             .tag = @bitCast(t.ctx.get(.a1)),
             .words = .{ t.ctx.get(.a2), t.ctx.get(.a3), t.ctx.get(.a4), t.ctx.get(.a5), t.ctx.get(.a6) },
-            .badge = t.ctx.get(.a7),
+            .badge = t.ctx.get(.a7) & 0xffff_ffff,
+            .protocol = @truncate(t.ctx.get(.a7) >> 32),
         };
     }
 

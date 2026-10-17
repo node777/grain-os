@@ -199,9 +199,11 @@ fn say(console: g.CPtr, text: []const u8) void {
     proto.console.print(console, text) catch {};
 }
 
-fn readLine(console: g.CPtr, out: *[128]u8) []u8 {
+/// The owner's next typed line (input.v1, polled: the driver cannot hold a
+/// reply open, so a line is either waiting or not).
+fn readLine(input: g.CPtr, out: *[128]u8) []u8 {
     while (true) {
-        if (idl.call(proto.console.read_line, console, .{})) |r| {
+        if (idl.call(proto.input.read_line, input, .{})) |r| {
             if (r.ready) {
                 const t = r.text.slice();
                 @memcpy(out[0..t.len], t);
@@ -212,7 +214,7 @@ fn readLine(console: g.CPtr, out: *[128]u8) []u8 {
     }
 }
 
-fn unlock(space: *g.Space, console: g.CPtr, entropy: g.CPtr) !void {
+fn unlock(space: *g.Space, console: g.CPtr, input: g.CPtr, entropy: g.CPtr) !void {
     const l = cloth.sup.lock;
     const heap = try space.mapHeap(D.Layout.heap + 0x10_0000, l.m_kib / 4 + 64);
     var fba: std.heap.FixedBufferAllocator = .init(heap);
@@ -223,9 +225,9 @@ fn unlock(space: *g.Space, console: g.CPtr, entropy: g.CPtr) !void {
         defer std.crypto.secureZero(u8, &again);
         while (true) {
             say(console, "tablecloth: this disk is new. Choose a passphrase:\n");
-            const a = readLine(console, &pass);
+            const a = readLine(input, &pass);
             say(console, "tablecloth: once more:\n");
-            const b = readLine(console, &again);
+            const b = readLine(input, &again);
             if (a.len > 0 and std.mem.eql(u8, a, b)) {
                 var seed: [64]u8 = undefined;
                 defer std.crypto.secureZero(u8, &seed);
@@ -245,7 +247,7 @@ fn unlock(space: *g.Space, console: g.CPtr, entropy: g.CPtr) !void {
     while (true) {
         tries += 1;
         say(console, "tablecloth: passphrase:\n");
-        const p = readLine(console, &pass);
+        const p = readLine(input, &pass);
         fba.reset();
         if (cloth.unlock(fba.allocator(), p)) |_| {
             g.log("tablecloth_unlocked", .{ .created = false, .tries = tries });
@@ -288,7 +290,7 @@ pub fn main() !u16 {
         .current = g.klog.hex(std.mem.readInt(u64, cur[0..8], .big)),
         .tries = cloth.sup.boot.tries,
     });
-    try unlock(&space, g.use("console") orelse return error.NoService, g.use("entropy") orelse return error.NoService);
+    try unlock(&space, g.use("console") orelse return error.NoService, g.use("input") orelse return error.NoService, g.use("entropy") orelse return error.NoService);
 
     // Ask Steward whether the whole boot came up; if it did, a generation
     // on trial becomes current.
