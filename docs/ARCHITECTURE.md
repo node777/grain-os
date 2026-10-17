@@ -453,20 +453,39 @@ Ask for the same bytes and you get the same bytes, forever. An object is
 named by its hash; **Mantra** names bind words to hashes once and for all
 (`system@3`), and *tips* are names that move (the head of a chain).
 
-**On disk** (4 KiB blocks): two superblock slots, then an append-only log of
+**On disk** (4 KiB blocks): two superblock slots, then a circular log of
 object bytes packed end to end, then a table (sorted object index and names)
-per commit. A commit appends after `log_end`, flushes, writes the *other*
-superblock slot (sequence number, checksum, where the table is, the
-generation state, the wrapped key), and flushes again. Nothing a committed
-superblock points at is ever overwritten, so a power cut leaves the old state
-or the new one, and a torn superblock fails its checksum so the other slot
-wins.
+per commit. Log positions only grow; position *p* lives in block
+2 + (*p* / 4096) mod the log's size, so the log wraps around the disk. A
+commit appends at the tail, flushes, writes the *other* superblock slot
+(sequence number, checksum, `head` and `tail` of the log, where the table is,
+the generation state, the wrapped key), and flushes again. Appends stop at
+the *committed* head, so nothing a committed superblock points at is ever
+overwritten: a power cut leaves the old state or the new one, and a torn
+superblock fails its checksum so the other slot wins.
+
+**Reclaiming.** An object is *live* if a name, the boot state (current,
+pending, previous) or the secret-names object reaches it, directly, through
+a generation descriptor (a named or booting descriptor keeps its chunks), or
+through **links**: an object may be stored with a link to one other object,
+which it then keeps alive (each Ledger entry links the one before it, so
+only the head needs a name). `reclaim(budget)` walks the oldest committed
+`budget` blocks: live objects there are copied to the tail, the rest leave
+the table, and the commit moves the head past them. The budget shrinks until
+the copies and the new table fit in the free space, so a full disk can still
+reclaim. Marking needs the secret names, so the store must be unlocked.
+**Retiring** a Mantra name leaves a tombstone: the name then means nothing
+and can never be bound to other bytes, so "a name means those bytes forever"
+still holds. `forget(generation)` retires a generation's names and clears it
+as the rollback target (never the current or pending one). An object stored
+and committed without a name is garbage at the next reclaim.
 
 **Proved in the simulator** (`zig build test`): a disk model whose volatile
 cache keeps, loses or tears (at a sector boundary) each unflushed write when
 the power goes. A scenario of single-commit steps (passphrase, first
 generation, a second generation with a sealed secret, stage, boot attempt,
-confirm, rollback, boot attempt, confirm) is cut at *every* device operation
+confirm, rollback, boot attempt, confirm, forget, reclaim, then filling and
+reclaiming until the log has wrapped round the disk) is cut at *every* device operation
 of every step, several ways each, and every recovery must mount, equal the
 state before or after that step exactly, read every object intact, and
 accept new commits. Removing the flush between the table and the superblock
@@ -488,7 +507,8 @@ one is refused and asked again), and serves `tablecloth.v1`: `put`, `write`
 + `store` for objects up to 64 KiB, `read` (480 bytes per call, checked
 against the hash), `has`, `bind`/`lookup` (each client's names live under its
 own name: `kumara` binding `secret` makes `kumara/secret`; secret names are
-sealed), `commit`, `info`, and `switch_to` (stage a generation, §3.1).
+sealed), `retire`, `commit`, `info` (including free space), `switch_to` and
+`rollback` (§3.8), and, for Steward and the agent, `forget` and `reclaim`.
 Clients are known by name from `DomainInfo.clients`, which Steward fills
 with every domain using the service (by badge) and the agent; Steward itself
 calls unbadged.
@@ -505,9 +525,9 @@ and reports settled; a test system does not power off before that. Steward
 never blocks on a domain (an earlier draft had Steward call the store, and a
 store fault would have deadlocked the supervisor).
 
-- *Planned:* reclaiming space (the log only grows), an index that is not
-  rewritten whole per commit, changing the passphrase, and directories as
-  capabilities.
+- *Planned:* an index that is not rewritten whole per commit, reclaiming on
+  a schedule (today an agent or Steward asks), changing the passphrase, and
+  directories as capabilities.
 
 ### 3.5 Envoy: the AI interface
 
@@ -687,14 +707,16 @@ the new one.
 **Proved:**
 - in the simulator, a power cut at every device operation of: first
   generation, second generation with a sealed secret, stage, boot attempt,
-  confirm, rollback, boot attempt, confirm (§3.4);
-- in QEMU (`zig build qemu-test`), six boots on one disk: an agent asks for
+  confirm, rollback, boot attempt, confirm, forget, reclaim (§3.4);
+- in QEMU (`zig build qemu-test`), eight boots on one disk: an agent asks for
   the store, uploads the next generation (18 of 211 chunks; the rest are
   there) and switches; the power is cut right after Aurora records the trial
   boot; the next boot retries, comes up as the new generation and is
   confirmed; the agent rolls back; the power is cut while the store is
-  confirming; the next boot completes the rollback. The identity is the same
-  in every boot;
+  confirming; the next boot completes the rollback; the agent forgets the
+  generation it left and reclaims the space (the chunks only it used are
+  dropped), and the next boot still comes up whole. The identity is the
+  same in every boot;
 - in QEMU, a generation that never comes up (the faults system has no store,
   so it can never confirm) is tried three times, then Aurora boots the last
   good one.
@@ -705,9 +727,9 @@ Envoy's `upload` verb moves bulk bytes into a store the agent holds (base64,
 2 KiB per line, one audited action per object), and `tools/envoy.py`'s
 `upload_generation` sends only the chunks the store lacks.
 
-- *Planned:* reclaiming the space of generations no longer named; a
-  generation list and rollback in grainsh; Aurora on real boards (it needs
-  only SBI, a device tree and a virtio or NVMe disk driver); measured boot
+- *Planned:* a generation list and rollback in grainsh; Aurora on real
+  boards (it needs only SBI, a device tree and a virtio or NVMe disk
+  driver); measured boot
   (Aurora reports what it loaded, so remote parties can check it).
 
 ## 4. Where Grain departs from its inspirations

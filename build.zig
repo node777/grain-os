@@ -93,12 +93,11 @@ pub fn build(b: *std.Build) void {
     // grain-disk: Tablecloth disks on the host. Tests boot from a fresh copy
     // of a cheap one (Argon2id at 1 MiB, one pass: test-only).
     const tablecloth_mod = b.createModule(.{ .root_source_file = b.path("grain/lib/tablecloth.zig") });
-    const generation_mod = b.createModule(.{ .root_source_file = b.path("grain/lib/generation.zig") });
     const disk_exe = b.addExecutable(.{ .name = "grain-disk", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/disk/main.zig"),
         .target = host,
         .optimize = .Debug,
-        .imports = &.{ .{ .name = "tablecloth", .module = tablecloth_mod }, .{ .name = "generation", .module = generation_mod } },
+        .imports = &.{.{ .name = "tablecloth", .module = tablecloth_mod }},
     }) });
     b.installArtifact(disk_exe);
     const test_disk_run = b.addRunArtifact(disk_exe);
@@ -369,7 +368,9 @@ pub fn build(b: *std.Build) void {
     // "next" build (only the chunks the disk lacks) and switches; the power
     // is cut right after Aurora records the trial boot, which then succeeds
     // and is confirmed; the agent rolls back; the power is cut mid-confirm;
-    // the rollback completes. The identity is the same throughout.
+    // the rollback completes; the agent forgets the old generation and
+    // reclaims its space, and the system still boots. The identity is the
+    // same throughout.
     const gen_disk_run = b.addRunArtifact(disk_exe);
     gen_disk_run.addArg("format");
     const gen_disk = gen_disk_run.addOutputFileArg("gen-disk.img");
@@ -383,14 +384,15 @@ pub fn build(b: *std.Build) void {
     const next_pack = next_pack_run.addOutputDirectoryArg("next");
     const qtest_gen = b.addSystemCommand(&.{
         "python3",                                          "tools/harness.py",
-        "--timeout",                                        "240",
+        "--timeout",                                        "330",
         "--smp",                                            smp,
         "--virtio-console",                                 "--boots",
-        "6",                                                "--console-input",
+        "8",                                                "--console-input",
         "open sesame",                                      "--console-input",
         "open sesame",                                      "--agent",
         "1:tools/gen_upgrade.py",                           "--agent",
-        "4:tools/gen_rollback.py",                          "--kill-on",
+        "4:tools/gen_rollback.py",                          "--agent",
+        "7:tools/gen_forget.py",                            "--kill-on",
         "2:boot trial=true tries=1",                        "--kill-on",
         "5:domain_ready domain=tablecloth",                 "--expect",
         "1:boot trial=false",                               "--expect",
@@ -408,7 +410,12 @@ pub fn build(b: *std.Build) void {
         "6:boot trial=true tries=2",                        "--expect",
         "6:steward_start tag=main",                         "--expect",
         "6:generation_confirmed promoted=true",             "--expect",
-        "6:kumara_ready name=sift-noon-city created=false",
+        "6:kumara_ready name=sift-noon-city created=false", "--expect",
+        "7:generation_forgotten by=agent",                  "--expect",
+        "7:tablecloth_reclaimed",                           "--expect",
+        "8:boot trial=false",                               "--expect",
+        "8:steward_start tag=main",                         "--expect",
+        "8:kumara_ready name=sift-noon-city created=false",
     });
     qtest_gen.addPrefixedFileArg("--virtio-rng=", rng_file);
     qtest_gen.addPrefixedFileArg("--disk=", gen_disk);

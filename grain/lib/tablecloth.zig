@@ -8,13 +8,21 @@
 //!
 //!     block 0, 1   two superblock slots; the valid one with the higher `seq`
 //!                  is the truth
-//!     block 2..    the log: object bytes, packed end to end, then the table
+//!     block 2..    the log, circular: object bytes packed end to end, then
+//!                  the table, from `head` (nothing live is older) to `tail`
 //!
-//! Every commit appends (objects, then a new table) after `log_end`, flushes,
-//! writes the *other* superblock slot, and flushes again. Nothing a committed
-//! superblock points at is ever overwritten, so a crash leaves either the old
-//! state or the new one, and a torn superblock write fails its checksum and
-//! the other slot wins.
+//! Log positions only grow; position p lives in block 2 + (p / 4096) mod the
+//! log's size, so the log wraps around the disk. Every commit appends
+//! (objects, then a new table) at the tail, flushes, writes the *other*
+//! superblock slot, and flushes again. Nothing a committed superblock points
+//! at is ever overwritten (appends stop at the committed head), so a crash
+//! leaves either the old state or the new one, and a torn superblock write
+//! fails its checksum and the other slot wins.
+//!
+//! Space comes back by **reclaiming** the oldest part of the log: objects
+//! there that are still live (reachable from a name, the boot state, a
+//! generation, or a link) are copied to the tail, the rest are dropped, and
+//! one commit moves the head past them.
 //!
 //! Objects are **public** (named by BLAKE3 of their bytes; the system's
 //! generations, which Aurora reads before anyone unlocks the disk) or
@@ -32,6 +40,9 @@
 const std = @import("std");
 const Blake3 = std.crypto.hash.Blake3;
 const Aead = std.crypto.aead.chacha_poly.XChaCha20Poly1305;
+/// Generation descriptors are public objects the store can read: their
+/// chunks stay live while the descriptor does.
+pub const generation = @import("generation.zig");
 
 pub const block_size = 4096;
 pub const Block = [block_size]u8;
@@ -56,6 +67,8 @@ pub const Error = error{
     /// A Mantra name is bound once: it may not change.
     NameTaken,
     AlreadyUnlocked,
+    /// The generation is current or on trial.
+    InUse,
     Io,
     OutOfMemory,
 };
@@ -99,7 +112,7 @@ pub const Lock = extern struct {
 };
 
 pub const magic = "tblcloth".*;
-pub const version: u32 = 1;
+pub const version: u32 = 2;
 
 pub const Super = extern struct {
     magic: [8]u8 = magic,
@@ -107,8 +120,10 @@ pub const Super = extern struct {
     _pad: u32 = 0,
     seq: u64 = 0,
     blocks: u64 = 0,
-    /// The first block no committed state uses.
-    log_end: u64 = first_log_block,
+    /// Log position (bytes) before which nothing is live.
+    head: u64 = 0,
+    /// The first log block (position / 4096) no committed state uses.
+    tail: u64 = 0,
     table: Ref = .{},
     boot: Boot = .{},
     lock: Lock = .{},
@@ -123,13 +138,23 @@ pub const Super = extern struct {
 
     fn valid(s: *const Super) bool {
         return std.mem.eql(u8, &s.magic, &magic) and s.version == version and
-            std.mem.eql(u8, &s.sum, &s.checksum()) and s.log_end <= s.blocks and s.log_end >= first_log_block;
+            std.mem.eql(u8, &s.sum, &s.checksum()) and s.blocks > first_log_block + 1 and
+            s.tail * block_size >= s.head and s.tail - s.head / block_size <= s.blocks - first_log_block;
+    }
+
+    pub fn logBlocks(s: *const Super) u64 {
+        return s.blocks - first_log_block;
+    }
+
+    /// Blocks the committed log occupies, from the head's block to the tail.
+    pub fn usedBlocks(s: *const Super) u64 {
+        return s.tail - s.head / block_size;
     }
 };
 
 comptime {
     std.debug.assert(@sizeOf(Super) <= block_size);
-    std.debug.assert(@sizeOf(Super) == 8 + 8 + 8 + 8 + 8 + @sizeOf(Ref) + @sizeOf(Boot) + @sizeOf(Lock) + 32);
+    std.debug.assert(@sizeOf(Super) == 8 + 8 + 8 + 8 + 8 + 8 + @sizeOf(Ref) + @sizeOf(Boot) + @sizeOf(Lock) + 32);
 }
 
 pub const flag_sealed: u32 = 1;
@@ -137,10 +162,13 @@ pub const flag_sealed: u32 = 1;
 /// One object in the table.
 pub const Entry = extern struct {
     hash: Hash,
+    /// Its log position.
     offset: u64,
     /// Bytes stored (sealed: plaintext + tag).
     len: u32,
     flags: u32,
+    /// Another object this one keeps alive (a chain's previous link), or zero.
+    link: Hash = zero,
 
     pub fn sealed(e: Entry) bool {
         return e.flags & flag_sealed != 0;
@@ -152,10 +180,12 @@ pub const Entry = extern struct {
 };
 
 pub const flag_tip: u32 = 1;
+pub const flag_retired: u32 = 2;
 
-/// A name. Mantra names are bound once and then mean those bytes forever;
-/// a *tip* (`flags = flag_tip`) is a name that moves, such as the head of a
-/// chain.
+/// A name. Mantra names are bound once and then mean those bytes forever,
+/// until *retired*: then they mean nothing, and can never be bound again
+/// (the name stays in the table as a tombstone). A *tip* (`flag_tip`) is a
+/// name that moves, such as the head of a chain.
 pub const Name = extern struct {
     name: [name_len]u8,
     hash: Hash,
@@ -167,7 +197,7 @@ pub const Name = extern struct {
     }
 };
 
-const table_magic = "tblindx1".*;
+const table_magic = "tblindx2".*;
 
 const TableHeader = extern struct {
     magic: [8]u8 = table_magic,
@@ -252,7 +282,7 @@ pub fn Store(comptime Dev: type, comptime cap: Capacity) type {
         /// The sealed object holding the secret names in the committed table.
         secret_names: Hash = zero,
         keys: ?Keys = null,
-        /// Next free byte of the log, and the block it falls in, buffered.
+        /// Next free log position, and the block it falls in, buffered.
         cursor: u64,
         tail: Block = @splat(0),
         dirty: bool = false,
@@ -267,7 +297,7 @@ pub fn Store(comptime Dev: type, comptime cap: Capacity) type {
         pub fn format(s: *Self, dev: *Dev, blocks: u64, cost: KdfCost) Error!void {
             if (blocks < first_log_block + 2) return error.NoSpace;
             if (cost.t < 1 or cost.m_kib < 8) return error.BadPassphrase;
-            s.* = .{ .dev = dev, .sup = .{ .blocks = blocks, .seq = 0, .lock = .{ .t = cost.t, .m_kib = cost.m_kib } }, .cursor = first_log_block * block_size };
+            s.* = .{ .dev = dev, .sup = .{ .blocks = blocks, .seq = 0, .lock = .{ .t = cost.t, .m_kib = cost.m_kib } }, .cursor = 0 };
             var empty: Block = @splat(0);
             try s.devWrite(0, &empty);
             try s.devWrite(1, &empty);
@@ -286,7 +316,7 @@ pub fn Store(comptime Dev: type, comptime cap: Capacity) type {
                 if (best == null or c.seq > best.?.seq) best = c;
             }
             s.sup = best orelse return error.NotFormatted;
-            s.cursor = s.sup.log_end * block_size;
+            s.cursor = s.sup.tail * block_size;
             try s.loadTable();
         }
 
@@ -327,18 +357,25 @@ pub fn Store(comptime Dev: type, comptime cap: Capacity) type {
             return s.cursor / block_size;
         }
 
+        /// The device block that holds log block `v`.
+        fn phys(s: *const Self, v: u64) u64 {
+            return first_log_block + v % s.sup.logBlocks();
+        }
+
         /// Append bytes at the cursor; full blocks go to the device at once.
+        /// The log may not reach the *committed* head: what the last commit
+        /// points at stays intact until the next one says otherwise.
         fn append(s: *Self, bytes: []const u8) Error!void {
             var rest = bytes;
             while (rest.len > 0) {
-                if (s.cursorBlock() >= s.sup.blocks) return error.NoSpace;
+                if (s.cursorBlock() >= s.sup.head / block_size + s.sup.logBlocks()) return error.NoSpace;
                 const at: usize = @intCast(s.cursor % block_size);
                 const n = @min(rest.len, block_size - at);
                 @memcpy(s.tail[at..][0..n], rest[0..n]);
                 s.cursor += n;
                 rest = rest[n..];
                 if (s.cursor % block_size == 0) {
-                    try s.devWrite(s.cursorBlock() - 1, &s.tail);
+                    try s.devWrite(s.phys(s.cursorBlock() - 1), &s.tail);
                     s.tail = @splat(0);
                 }
             }
@@ -358,7 +395,7 @@ pub fn Store(comptime Dev: type, comptime cap: Capacity) type {
                     const n = @min(out.len - done, block_size - at);
                     // The block under the cursor may not be on the device yet.
                     const src: *const Block = if (block == r.s.cursorBlock() and r.s.cursor % block_size != 0) &r.s.tail else blk: {
-                        try r.s.devRead(block, &r.s.io);
+                        try r.s.devRead(r.s.phys(block), &r.s.io);
                         break :blk &r.s.io;
                     };
                     @memcpy(out[done..][0..n], src[at..][0..n]);
@@ -404,18 +441,28 @@ pub fn Store(comptime Dev: type, comptime cap: Capacity) type {
         /// Store public bytes; returns their name (BLAKE3). Storing what is
         /// already there costs nothing.
         pub fn put(s: *Self, data: []const u8) Error!Hash {
+            return s.putLinked(data, zero);
+        }
+
+        /// `put`, keeping `link` alive as long as this object is.
+        pub fn putLinked(s: *Self, data: []const u8, link: Hash) Error!Hash {
             if (data.len > max_object) return error.TooLarge;
             const h = publicHash(data);
             if (s.has(h)) return h;
             const at = s.cursor;
             try s.append(data);
-            try s.insert(.{ .hash = h, .offset = at, .len = @intCast(data.len), .flags = 0 });
+            try s.insert(.{ .hash = h, .offset = at, .len = @intCast(data.len), .flags = 0, .link = link });
             return h;
         }
 
         /// Store bytes sealed under the master key, for `owner` alone;
         /// returns their keyed name. `scratch` must hold `data.len + tag_len`.
         pub fn seal(s: *Self, owner: []const u8, data: []const u8, scratch: []u8) Error!Hash {
+            return s.sealLinked(owner, data, scratch, zero);
+        }
+
+        /// `seal`, keeping `link` alive as long as this object is.
+        pub fn sealLinked(s: *Self, owner: []const u8, data: []const u8, scratch: []u8, link: Hash) Error!Hash {
             const k = s.keys orelse return error.Locked;
             if (data.len > max_object) return error.TooLarge;
             const h = sealedHash(&k, owner, data);
@@ -424,7 +471,7 @@ pub fn Store(comptime Dev: type, comptime cap: Capacity) type {
             Aead.encrypt(ct[0..data.len], ct[data.len..][0..tag_len], data, &h, h[0..24].*, k.enc);
             const at = s.cursor;
             try s.append(ct);
-            try s.insert(.{ .hash = h, .offset = at, .len = @intCast(ct.len), .flags = flag_sealed });
+            try s.insert(.{ .hash = h, .offset = at, .len = @intCast(ct.len), .flags = flag_sealed, .link = link });
             return h;
         }
 
@@ -473,6 +520,7 @@ pub fn Store(comptime Dev: type, comptime cap: Capacity) type {
             const l = try s.nameList(secret);
             if (findName(l.items[0..l.n.*], name)) |i| {
                 const n = &l.items[i];
+                if (n.flags & flag_retired != 0) return error.NameTaken;
                 if (n.flags & flag_tip == 0 or !tip) {
                     if (std.mem.eql(u8, &n.hash, &h) and (n.flags & flag_tip != 0) == tip) return;
                     return error.NameTaken;
@@ -491,7 +539,30 @@ pub fn Store(comptime Dev: type, comptime cap: Capacity) type {
 
         pub fn lookup(s: *Self, name: []const u8, secret: bool) Error!?Hash {
             const l = try s.nameList(secret);
-            return if (findName(l.items[0..l.n.*], name)) |i| l.items[i].hash else null;
+            const i = findName(l.items[0..l.n.*], name) orelse return null;
+            return if (l.items[i].flags & flag_retired != 0) null else l.items[i].hash;
+        }
+
+        /// Retire a name: a Mantra name then means nothing, and can never be
+        /// bound again; a tip just goes. What only it kept alive can then be
+        /// reclaimed.
+        pub fn retire(s: *Self, name: []const u8, secret: bool) Error!void {
+            const l = try s.nameList(secret);
+            const i = findName(l.items[0..l.n.*], name) orelse return error.NotFound;
+            if (l.items[i].flags & flag_retired != 0) return;
+            retireAt(l.items, l.n, i);
+            if (secret) s.secrets_dirty = true;
+            s.dirty = true;
+        }
+
+        fn retireAt(items: []Name, n: *usize, i: usize) void {
+            if (items[i].flags & flag_tip != 0) {
+                items[i] = items[n.* - 1];
+                n.* -= 1;
+            } else {
+                items[i].hash = zero;
+                items[i].flags |= flag_retired;
+            }
         }
 
         pub fn publicNames(s: *const Self) []const Name {
@@ -521,11 +592,14 @@ pub fn Store(comptime Dev: type, comptime cap: Capacity) type {
                     try s.append(p);
                     len += p.len;
                 }
-                if (s.cursor % block_size != 0) try s.devWrite(s.cursorBlock(), &s.tail);
+                if (s.cursor % block_size != 0) try s.devWrite(s.phys(s.cursorBlock()), &s.tail);
                 next.table = .{ .offset = at, .len = @intCast(len) };
                 h.final(&next.table.hash);
-                next.log_end = std.math.divCeil(u64, s.cursor, block_size) catch unreachable;
-                if (next.log_end > next.blocks) return error.NoSpace;
+                next.tail = std.math.divCeil(u64, s.cursor, block_size) catch unreachable;
+                // Nothing live is older than the oldest object or the table.
+                var head = at;
+                for (s.objects[0..s.n_objects]) |e| head = @min(head, e.offset);
+                next.head = head;
                 try s.devFlush();
             }
             next.sum = next.checksum();
@@ -534,10 +608,150 @@ pub fn Store(comptime Dev: type, comptime cap: Capacity) type {
             try s.devWrite(next.seq % 2, &s.io);
             try s.devFlush();
             s.sup = next;
-            s.cursor = next.log_end * block_size;
+            s.cursor = next.tail * block_size;
             s.tail = @splat(0);
             s.dirty = false;
             s.secrets_dirty = false;
+        }
+
+        // --- Reclaiming space -----------------------------------------------
+
+        /// Log blocks free for appending.
+        pub fn freeBlocks(s: *const Self) u64 {
+            return s.sup.head / block_size + s.sup.logBlocks() - (std.math.divCeil(u64, s.cursor, block_size) catch unreachable);
+        }
+
+        const Marks = std.StaticBitSet(cap.objects);
+
+        /// Mark `first` and everything its links keep alive.
+        fn markChain(s: *const Self, live: *Marks, first: Hash) void {
+            var h = first;
+            while (s.find(h)) |i| {
+                if (live.isSet(i)) return;
+                live.set(i);
+                h = s.objects[i].link;
+            }
+        }
+
+        /// Mark a root; a generation descriptor also keeps its chunks.
+        fn markRoot(s: *Self, live: *Marks, scanned: *Marks, h: Hash) Error!void {
+            const i = s.find(h) orelse return;
+            s.markChain(live, h);
+            if (scanned.isSet(i)) return;
+            scanned.set(i);
+            const e = s.objects[i];
+            const G = generation;
+            if (e.sealed() or e.len < @sizeOf(G.Header)) return;
+            var hasher = Blake3.init(.{});
+            var r = s.reader(e.offset, e.len);
+            var hd: G.Header = undefined;
+            try r.readInto(std.mem.asBytes(&hd), &hasher);
+            if (!std.mem.eql(u8, &hd.magic, &G.magic)) return;
+            if (e.len != @sizeOf(G.Header) + @as(u64, hd.segments) * @sizeOf(G.Segment) + @as(u64, hd.chunks) * 32) return;
+            var seg: G.Segment = undefined;
+            for (0..hd.segments) |_| try r.readInto(std.mem.asBytes(&seg), &hasher);
+            for (0..hd.chunks) |_| {
+                var c: Hash = undefined;
+                try r.readInto(&c, &hasher);
+                s.markChain(live, c);
+            }
+            var got: Hash = undefined;
+            hasher.final(&got);
+            if (!std.mem.eql(u8, &got, &h)) return error.Corrupt;
+        }
+
+        /// What is live: everything the boot state, a name or the secret
+        /// names reach, through generation descriptors and links. Secret
+        /// names are roots too, so this needs the store unlocked.
+        fn mark(s: *Self, live: *Marks) Error!void {
+            if (s.passphraseSet() and s.keys == null) return error.Locked;
+            var scanned: Marks = .empty;
+            const b = s.sup.boot;
+            for ([_]Hash{ b.current, b.pending, b.previous }) |h| try s.markRoot(live, &scanned, h);
+            for (s.names[0..s.n_names]) |n| try s.markRoot(live, &scanned, n.hash);
+            for (s.secrets[0..s.n_secrets]) |n| try s.markRoot(live, &scanned, n.hash);
+            s.markChain(live, s.secret_names);
+        }
+
+        pub const Reclaimed = extern struct {
+            /// Objects dropped, and live ones copied forward.
+            dropped: u32,
+            copied: u32,
+            /// Log blocks free afterwards.
+            free: u64,
+        };
+
+        /// Clear up to `budget` blocks at the head of the log: copy what is
+        /// still live there to the tail, drop the rest, and commit, which
+        /// moves the head past them. When the live part would not fit in the
+        /// free space, the budget shrinks until it does.
+        pub fn reclaim(s: *Self, budget: u64) Error!Reclaimed {
+            var live: Marks = .empty;
+            try s.mark(&live);
+            const head = s.sup.head;
+            var target = @min(s.sup.tail * block_size, (head / block_size + budget) * block_size);
+            while (target > head) {
+                var need: u64 = 2 * block_size + @sizeOf(TableHeader) + s.n_objects * @sizeOf(Entry) + s.n_names * @sizeOf(Name);
+                if (s.secrets_dirty) need += s.n_secrets * @sizeOf(Name) + tag_len;
+                for (s.objects[0..s.n_objects], 0..) |e, i| {
+                    if (e.offset < target and live.isSet(i)) need += e.len;
+                }
+                if (need <= s.freeBlocks() * block_size) break;
+                target = @max(head, (head / block_size + (target / block_size - head / block_size) / 2) * block_size);
+            }
+            // Only the committed log is cleared: what was stored since the
+            // last commit stays, live or not, until a later reclaim.
+            var out: Reclaimed = .{ .dropped = 0, .copied = 0, .free = 0 };
+            var buf: Block = undefined;
+            for (s.objects[0..s.n_objects], 0..) |*e, i| {
+                if (e.offset >= target or !live.isSet(i)) continue;
+                const at = s.cursor;
+                var r = s.reader(e.offset, e.len);
+                var left: usize = e.len;
+                while (left > 0) {
+                    const n = @min(left, block_size);
+                    try r.readInto(buf[0..n], null);
+                    try s.append(buf[0..n]);
+                    left -= n;
+                }
+                e.offset = at;
+                out.copied += 1;
+            }
+            var kept: usize = 0;
+            for (0..s.n_objects) |i| {
+                if (s.objects[i].offset < target and !live.isSet(i)) {
+                    out.dropped += 1;
+                    continue;
+                }
+                s.objects[kept] = s.objects[i];
+                kept += 1;
+            }
+            s.n_objects = kept;
+            s.dirty = true;
+            try s.commit();
+            out.free = s.freeBlocks();
+            return out;
+        }
+
+        /// Let a generation go: every public name for it retires, and it is
+        /// no longer the one to roll back to. The current or pending one
+        /// cannot go. Commits; a reclaim then frees what only it used.
+        pub fn forget(s: *Self, gen: Hash) Error!void {
+            const b = &s.sup.boot;
+            if (std.mem.eql(u8, &gen, &b.current) or std.mem.eql(u8, &gen, &b.pending)) return error.InUse;
+            if (std.mem.eql(u8, &gen, &b.previous)) b.previous = zero;
+            var i: usize = 0;
+            while (i < s.n_names) {
+                const n = &s.names[i];
+                if (std.mem.eql(u8, &n.hash, &gen) and n.flags & flag_retired == 0) {
+                    const tip = n.flags & flag_tip != 0;
+                    retireAt(&s.names, &s.n_names, i);
+                    if (tip) continue;
+                }
+                i += 1;
+            }
+            s.dirty = true;
+            try s.commit();
         }
 
         // --- The lock -------------------------------------------------------
@@ -781,7 +995,7 @@ test "objects, names, sealing, dedupe, remount" {
 
     // A flipped byte in an object is caught.
     const e = t.entry(a).?;
-    disk.media[e.offset / block_size][e.offset % block_size] ^= 1;
+    disk.media[first_log_block + e.offset / block_size % t.sup.logBlocks()][e.offset % block_size] ^= 1;
     try testing.expectError(error.Corrupt, t.get(a, "anyone", &buf));
 }
 
@@ -865,10 +1079,23 @@ fn scenarioStep(s: *TestStore, i: usize) !void {
         7 => try s.stage((try s.lookup("system@1", false)).?), // rollback
         8 => _ = try s.chooseBoot(),
         9 => _ = try s.confirm(),
+        10 => try s.forget((try s.lookup("system@2", false)).?),
+        11 => _ = try s.reclaim(1000),
+        // Fill and clear the log until it has wrapped around the disk.
+        12, 14, 16, 18 => {
+            var data: [30_000]u8 = undefined;
+            for (&data, 0..) |*b, j| b.* = @truncate(j *% i);
+            try s.bind("scratch", try s.put(&data), false, true);
+            try s.commit();
+        },
+        13, 15, 17, 19 => {
+            try s.retire("scratch", false);
+            _ = try s.reclaim(1000);
+        },
         else => unreachable,
     }
 }
-const scenario_steps = 10;
+const scenario_steps = 20;
 
 test "a power cut at any device operation leaves the old state or the new one" {
     var prng = std.Random.DefaultPrng.init(0x7ab1ec10);
@@ -925,7 +1152,7 @@ test "a power cut at any device operation leaves the old state or the new one" {
                 std.debug.print("step {d} cut {d}: state is neither before nor after\n  got {any}\n  before {any}\n  after {any}\n", .{ step, cut, got, before, after });
                 return error.TestUnexpectedResult;
             }
-            var buf: [8192]u8 = undefined;
+            var buf: [32 * 1024]u8 = undefined;
             for (r.objects[0..r.n_objects]) |e| {
                 // Sealed objects here belong to kumara or the store itself.
                 _ = r.get(e.hash, "kumara", &buf) catch |err| switch (err) {
@@ -939,4 +1166,102 @@ test "a power cut at any device operation leaves the old state or the new one" {
         };
     }
     try testing.expect(cuts > 100);
+
+    // The scenario's last steps take the log round the disk.
+    var disk = try SimDisk.init(testing.allocator, 48);
+    defer disk.deinit();
+    try TestStore.format(&scratch_store, &disk, 48, cheap);
+    for (0..scenario_steps) |i| {
+        var s: TestStore = undefined;
+        try s.mount(&disk);
+        if (i > 0) try s.unlock(testing.allocator, "pass");
+        try scenarioStep(&s, i);
+    }
+    var s: TestStore = undefined;
+    try s.mount(&disk);
+    try testing.expect(s.sup.tail > s.sup.logBlocks());
+}
+
+test "reclaiming: names, the boot state, generations and links keep objects; the log wraps" {
+    var disk = try SimDisk.init(testing.allocator, 40);
+    defer disk.deinit();
+    try TestStore.format(&scratch_store, &disk, 40, cheap);
+    const s = &scratch_store;
+    try s.create(testing.allocator, "pass", testEntropy(3));
+
+    // A generation: a descriptor naming two chunks, kept by the boot state.
+    const c1 = try s.put("chunk one");
+    const c2 = try s.put("chunk two");
+    const G = generation;
+    var desc: [@sizeOf(G.Header) + @sizeOf(G.Segment) + 64]u8 = undefined;
+    const hd: G.Header = .{ .entry = 0x8020_0000, .segments = 1, .chunks = 2, .label = @splat(0), .closure = zero };
+    const seg: G.Segment = .{ .paddr = 0x8020_0000, .memsz = 18, .filesz = 18, .first_chunk = 0, .chunks = 2 };
+    @memcpy(desc[0..@sizeOf(G.Header)], std.mem.asBytes(&hd));
+    @memcpy(desc[@sizeOf(G.Header)..][0..@sizeOf(G.Segment)], std.mem.asBytes(&seg));
+    @memcpy(desc[desc.len - 64 ..][0..32], &c1);
+    @memcpy(desc[desc.len - 32 ..], &c2);
+    const g = try s.put(&desc);
+    try s.commit();
+    try s.install(g);
+
+    // A chain: only its newest link is named; the rest are kept by links.
+    var scratch: [64]u8 = undefined;
+    var prev = zero;
+    for (0..3) |i| {
+        const entry_text = [_]u8{ 'e', '0' + @as(u8, @intCast(i)) };
+        prev = try s.sealLinked("ledger", &entry_text, &scratch, prev);
+    }
+    try s.bind("ledger/head", prev, true, true);
+    const named = try s.put("kept by a name");
+    try s.bind("kept@1", named, false, false);
+    const loose = try s.put("kept by nothing");
+    try s.commit();
+
+    var r = try s.reclaim(1000);
+    try testing.expectEqual(@as(u32, 1), r.dropped);
+    try testing.expect(!s.has(loose) and s.has(named) and s.has(c1) and s.has(c2) and s.has(g));
+    try testing.expectEqual(@as(usize, 8), s.n_objects); // with the secret names
+    try testing.expectError(error.InUse, s.forget(g));
+
+    // Fill the disk, clear it, and go round it twice.
+    var data: [20_000]u8 = undefined;
+    var stored: usize = 0;
+    for (0..12) |round| {
+        for (&data, 0..) |*b, j| b.* = @truncate(j *% (round + 3));
+        const h = s.put(&data) catch |e| {
+            try testing.expectEqual(error.NoSpace, e);
+            r = try s.reclaim(1000);
+            try testing.expect(r.free > 6);
+            continue;
+        };
+        try s.bind("scratch", h, false, true);
+        try s.commit();
+        stored += 1;
+        if (round % 3 == 2) {
+            try s.retire("scratch", false);
+            _ = try s.reclaim(1000);
+        }
+    }
+    try testing.expect(stored >= 8 and s.sup.tail > 2 * s.sup.logBlocks());
+
+    // A retired Mantra name means nothing, and cannot come back.
+    try s.retire("kept@1", false);
+    try testing.expect(try s.lookup("kept@1", false) == null);
+    try testing.expectError(error.NameTaken, s.bind("kept@1", named, false, false));
+    _ = try s.reclaim(1000);
+    try testing.expect(!s.has(named));
+
+    // After all that, a fresh mount reads everything still live.
+    var t: TestStore = undefined;
+    try t.mount(&disk);
+    try t.unlock(testing.allocator, "pass");
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("chunk two", try t.get(c2, "anyone", &buf));
+    var h = (try t.lookup("ledger/head", true)).?;
+    var n: usize = 0;
+    while (!std.mem.eql(u8, &h, &zero)) : (n += 1) {
+        _ = try t.get(h, "ledger", &buf);
+        h = t.entry(h).?.link;
+    }
+    try testing.expectEqual(@as(usize, 3), n);
 }

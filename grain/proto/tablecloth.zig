@@ -4,6 +4,10 @@
 //! the names it binds are kept under its own name (`kumara` binding
 //! `secret` makes `kumara/secret`), and a sealed object opens only for the
 //! client that stored it. Public objects can be read by anyone.
+//!
+//! Space comes back through `reclaim`: objects no name, generation, boot
+//! state or link keeps alive are dropped. An object stored and committed
+//! without a name is garbage at the next reclaim.
 const idl = @import("grain").idl;
 
 pub const name = "tablecloth";
@@ -17,6 +21,7 @@ pub const NameText = idl.Text(39);
 pub const info = idl.Method(.{ .label = 1, .effect = .pure, .doc = "The store's state." }, struct {}, struct {
     blocks: u64,
     used: u64,
+    free: u64,
     objects: u32,
     seq: u64,
     locked: bool,
@@ -27,6 +32,7 @@ pub const info = idl.Method(.{ .label = 1, .effect = .pure, .doc = "The store's 
     pub const docs = .{
         .blocks = "Disk size in 4 KiB blocks",
         .used = "Blocks the committed log uses",
+        .free = "Blocks free for new objects",
         .objects = "Objects stored",
         .seq = "Commit number",
         .locked = "Whether sealed objects are unavailable (no passphrase given yet)",
@@ -46,9 +52,10 @@ pub const write = idl.Method(.{ .label = 3, .effect = .mutates, .doc = "Stage by
     data: idl.Bytes(chunk),
 }, struct {});
 
-pub const store = idl.Method(.{ .label = 4, .effect = .mutates, .doc = "Store the first `len` staged bytes, public or sealed for you alone; returns their hash." }, struct {
+pub const store = idl.Method(.{ .label = 4, .effect = .mutates, .doc = "Store the first `len` staged bytes, public or sealed for you alone, keeping `link` (another object, or empty) alive as long as they are; returns their hash." }, struct {
     len: u32,
     sealed: bool,
+    link: Hash,
 }, struct { hash: Hash });
 
 pub const read = idl.Method(.{ .label = 5, .effect = .pure, .doc = "Up to 480 bytes of an object from an offset, checked against its hash." }, struct {
@@ -88,6 +95,24 @@ pub const rollback = idl.Method(.{ .label = 11, .effect = .external, .doc = "Go 
     generation: Hash,
 });
 
+pub const retire = idl.Method(.{ .label = 12, .effect = .mutates, .doc = "Retire one of your names. A retired Mantra name means nothing and can never be bound again; a tip just goes." }, struct {
+    name: NameText,
+    secret: bool,
+}, struct {});
+
+pub const forget = idl.Method(.{ .label = 13, .effect = .external, .doc = "Let a generation go: its names retire and it is no longer the rollback target. Not the current or pending one. Commits." }, struct {
+    generation: Hash,
+}, struct {});
+
+pub const reclaim = idl.Method(.{ .label = 14, .effect = .external, .doc = "Bring back space at the oldest end of the log, up to `budget` blocks: live objects there move forward, the rest are dropped. Commits." }, struct {
+    budget: u32,
+}, struct {
+    dropped: u32,
+    copied: u32,
+    free: u64,
+    pub const docs = .{ .dropped = "Objects dropped", .copied = "Live objects moved forward", .free = "Blocks free afterwards" };
+});
+
 // ---------------------------------------------------------------------------
 // Client helpers
 
@@ -96,13 +121,18 @@ const grain = @import("grain");
 /// Store bytes of any size up to 64 KiB (staged 480 at a time), public or
 /// sealed for the caller; returns the hash.
 pub fn storeBytes(ep: grain.CPtr, data: []const u8, sealed: bool) idl.CallError![32]u8 {
+    return storeLinked(ep, data, sealed, null);
+}
+
+/// `storeBytes`, keeping `link` alive as long as the new object is.
+pub fn storeLinked(ep: grain.CPtr, data: []const u8, sealed: bool, link: ?[32]u8) idl.CallError![32]u8 {
     var off: usize = 0;
     while (off < data.len) {
         const n = @min(data.len - off, chunk);
         _ = try idl.call(write, ep, .{ .offset = @intCast(off), .data = idl.Bytes(chunk).from(data[off..][0..n]) });
         off += n;
     }
-    const r = try idl.call(store, ep, .{ .len = @intCast(data.len), .sealed = sealed });
+    const r = try idl.call(store, ep, .{ .len = @intCast(data.len), .sealed = sealed, .link = if (link) |l| Hash.from(&l) else .{} });
     return r.hash.data;
 }
 

@@ -17,7 +17,7 @@
 //! real use, and tests format cheap disks.
 const std = @import("std");
 const tc = @import("tablecloth");
-const gen = @import("generation");
+const gen = tc.generation;
 
 /// A generation built from a kernel ELF: the descriptor and the chunks it
 /// names (slices of the ELF), in order.
@@ -193,10 +193,12 @@ pub fn main(init: std.process.Init) !u8 {
         const s = try arena.create(Store);
         try s.mount(&d);
         const b = s.sup.boot;
-        std.debug.print("@disk seq={d} blocks={d} used_blocks={d} objects={d} passphrase={} current={x} pending={x} tries={d}\n", .{
-            s.sup.seq, s.sup.blocks, s.sup.log_end, s.n_objects, s.passphraseSet(), b.current[0..8], b.pending[0..8], b.tries,
+        std.debug.print("@disk seq={d} blocks={d} used_blocks={d} free_blocks={d} objects={d} passphrase={} current={x} pending={x} tries={d}\n", .{
+            s.sup.seq, s.sup.blocks, s.sup.usedBlocks(), s.freeBlocks(), s.n_objects, s.passphraseSet(), b.current[0..8], b.pending[0..8], b.tries,
         });
-        for (s.publicNames()) |*n| std.debug.print("@disk name={s} hash={x}\n", .{ n.text(), n.hash[0..8] });
+        for (s.publicNames()) |*n| {
+            if (n.flags & tc.flag_retired != 0) std.debug.print("@disk name={s} retired\n", .{n.text()}) else std.debug.print("@disk name={s} hash={x}\n", .{ n.text(), n.hash[0..8] });
+        }
         return 0;
     }
     return usage();

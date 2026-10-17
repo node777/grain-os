@@ -67,7 +67,7 @@ fn storeError(e: tc.Error) anyerror {
     return switch (e) {
         error.NotFound => error.NotFound,
         error.Locked, error.Io => error.Unavailable,
-        error.BadName, error.TooLarge, error.NameTaken => error.InvalidArgs,
+        error.BadName, error.TooLarge, error.NameTaken, error.InUse => error.InvalidArgs,
         else => error.Failed,
     };
 }
@@ -77,7 +77,8 @@ const Server = struct {
         const b = cloth.sup.boot;
         return .{
             .blocks = cloth.sup.blocks,
-            .used = cloth.sup.log_end,
+            .used = cloth.sup.usedBlocks(),
+            .free = cloth.freeBlocks(),
             .objects = @intCast(cloth.n_objects),
             .seq = cloth.sup.seq,
             .locked = cloth.locked(),
@@ -109,7 +110,8 @@ const Server = struct {
         const s = stagingFor(c.badge);
         if (p.len > s.len) return error.InvalidArgs;
         cached = .{};
-        const h = (if (p.sealed) cloth.seal(owner, s.data[0..p.len], &obj_buf) else cloth.put(s.data[0..p.len])) catch |e| return storeError(e);
+        const link: tc.Hash = if (p.link.len == 0) tc.zero else try hashOf(p.link);
+        const h = (if (p.sealed) cloth.sealLinked(owner, s.data[0..p.len], &obj_buf, link) else cloth.putLinked(s.data[0..p.len], link)) catch |e| return storeError(e);
         s.len = 0;
         return .{ .hash = P.Hash.from(&h) };
     }
@@ -152,7 +154,7 @@ const Server = struct {
     pub fn commit(_: *Server, _: P.commit.Params, c: idl.Caller) !P.commit.Results {
         _ = try ownerOf(c);
         cloth.commit() catch |e| return storeError(e);
-        g.log("tablecloth_commit", .{ .seq = cloth.sup.seq, .objects = cloth.n_objects, .used_blocks = cloth.sup.log_end });
+        g.log("tablecloth_commit", .{ .seq = cloth.sup.seq, .objects = cloth.n_objects, .used_blocks = cloth.sup.usedBlocks() });
         return .{ .seq = cloth.sup.seq };
     }
 
@@ -172,6 +174,31 @@ const Server = struct {
         const h = cloth.rollback() catch |e| return storeError(e);
         g.log("generation_staged", .{ .generation = g.klog.hex(std.mem.readInt(u64, h[0..8], .big)), .by = owner, .rollback = true });
         return .{ .generation = P.Hash.from(&h) };
+    }
+
+    pub fn retire(_: *Server, p: P.retire.Params, c: idl.Caller) !P.retire.Results {
+        var buf: [tc.name_len]u8 = undefined;
+        const full = try fullName(&buf, try ownerOf(c), p.name);
+        cloth.retire(full, p.secret) catch |e| return storeError(e);
+        return .{};
+    }
+
+    pub fn forget(_: *Server, p: P.forget.Params, c: idl.Caller) !P.forget.Results {
+        const owner = try ownerOf(c);
+        if (!std.mem.eql(u8, owner, "steward") and !std.mem.eql(u8, owner, "agent")) return error.Unavailable;
+        const h = try hashOf(p.generation);
+        cloth.forget(h) catch |e| return storeError(e);
+        g.log("generation_forgotten", .{ .generation = g.klog.hex(std.mem.readInt(u64, h[0..8], .big)), .by = owner });
+        return .{};
+    }
+
+    pub fn reclaim(_: *Server, p: P.reclaim.Params, c: idl.Caller) !P.reclaim.Results {
+        const owner = try ownerOf(c);
+        if (!std.mem.eql(u8, owner, "steward") and !std.mem.eql(u8, owner, "agent")) return error.Unavailable;
+        cached = .{};
+        const r = cloth.reclaim(p.budget) catch |e| return storeError(e);
+        g.log("tablecloth_reclaimed", .{ .dropped = r.dropped, .copied = r.copied, .free_blocks = r.free, .by = owner });
+        return .{ .dropped = r.dropped, .copied = r.copied, .free = r.free };
     }
 };
 
@@ -284,7 +311,8 @@ pub fn main() !u16 {
     const cur = cloth.sup.boot.current;
     g.log("tablecloth_mounted", .{
         .blocks = cloth.sup.blocks,
-        .used_blocks = cloth.sup.log_end,
+        .used_blocks = cloth.sup.usedBlocks(),
+        .free_blocks = cloth.freeBlocks(),
         .seq = cloth.sup.seq,
         .objects = cloth.n_objects,
         .current = g.klog.hex(std.mem.readInt(u64, cur[0..8], .big)),

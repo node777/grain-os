@@ -844,7 +844,7 @@ fn verbUpload(o: *Out, req: Value) void {
     const len_v = req.object.get("len") orelse return err(o, "invalid_request", "upload needs \"data\" or \"done\" with \"len\"");
     if (len_v != .integer or len_v.integer < 0) return err(o, "invalid_request", "\"len\" is a number");
     const zero: idl.Words = @splat(0);
-    if (idl.call(TC.store, c.info.slot, .{ .len = @intCast(len_v.integer), .sealed = false })) |r| {
+    if (idl.call(TC.store, c.info.slot, .{ .len = @intCast(len_v.integer), .sealed = false, .link = .{} })) |r| {
         _ = audit("upload", c.name(), "store", "ok", false, zero, zero, 0);
         okResult(o);
         o.obj();

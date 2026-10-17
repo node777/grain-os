@@ -64,7 +64,8 @@ const Server = struct {
         std.crypto.hash.Blake3.hash(e.body(), &digest, .{});
         const s = try idl.call(proto.kumara.sign, kumara, .{ .message = idl.Bytes(256).from(&digest) });
         e.signature = s.signature.data[0..64].*;
-        const h = try TC.storeBytes(store, std.mem.asBytes(&e), true);
+        // Each entry keeps the one before it, so only the head needs a name.
+        const h = try TC.storeLinked(store, std.mem.asBytes(&e), true, if (head_seq == 0) null else head_hash);
         _ = try idl.call(TC.bind, store, .{ .name = TC.NameText.from("head"), .hash = TC.Hash.from(&h), .secret = true, .tip = true });
         _ = try idl.call(TC.commit, store, .{});
         head_hash = h;
