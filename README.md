@@ -122,6 +122,8 @@ hash chain: verified  head f82b57c52ddf0fb7...
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the design of Caravan and Grain
 - [docs/PLAN.md](docs/PLAN.md): phased roadmap and open questions
 - [docs/TESTING.md](docs/TESTING.md): how each layer is built, booted, tested and driven
+- [docs/MAC.md](docs/MAC.md): getting ready to run and use Grain on a Mac, safely
+- [docs/CAPABILITY_MODEL.md](docs/CAPABILITY_MODEL.md): the capability model, written for an external reviewer
 - [docs/BRIX.md](docs/BRIX.md): Brix, the language manifests are written in
 - [docs/GLOSSARY.md](docs/GLOSSARY.md): the proposed names (Tally, Pond, Rishi, Brix, …) and what each maps to
 - [docs/RESEARCH.md](docs/RESEARCH.md): what we took from seL4, Hubris, Zircon, NixOS, Linux, TigerBeetle and others

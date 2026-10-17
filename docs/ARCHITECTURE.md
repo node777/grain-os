@@ -918,7 +918,10 @@ the new one.
   good one.
 
 **The agent's part.** The store is `askable` in the dev manifest: the agent
-must ask before it can upgrade or roll back, and the owner's policy decides.
+must ask before it can upgrade or roll back. Today the manifest is the
+owner's whole policy: Steward grants an askable lease on the first request,
+without asking anyone. Asking the owner at that moment (on the console or
+the desktop) is *planned*.
 Envoy's `upload` verb moves bulk bytes into a store the agent holds (base64,
 2 KiB per line, one audited action per object), and `tools/envoy.py`'s
 `upload_generation` sends only the chunks the store lacks.

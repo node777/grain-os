@@ -100,8 +100,10 @@ sender's protocol and badge with every message.
   entry names, badged per client and stamped with the protocol, and checks
   at compile time that every `uses` has a matching `provides`.
 - **The agent** (Envoy) holds only leases: send and grant, never revoke;
-  limited in time or uses where the manifest says; askable ones only after
-  the owner's policy allows. Every call is audited in a hash chain.
+  limited in time or uses where the manifest says. Askable ones are granted
+  on the agent's first request, at once: the manifest is the owner's only
+  policy (asking the owner at run time is planned). Every call is audited
+  in a hash chain.
 - **Kumara** signs for a caller under the caller's domain name as the
   context, so a signature asked for by one domain can never pass as
   another's. Attestations use the context `@attest`, which no domain name
