@@ -21,15 +21,16 @@ terminal, by a human or an AI, with a pass or fail answer in seconds.**
 zig build test        # host: unit tests, kernel scenarios, manifest, image, IDL, Brix, Kumara,
                       # generation format, and Tablecloth with its crash simulator; a short simulator run
 zig build qemu-test   # QEMU riscv64, 2 harts: kernel suite; the dev system; the dev system on a disk,
-                      # booted twice; an agent driving Envoy; the faults system; generations through
-                      # Aurora with power cuts; a broken generation given up; a miswired manifest
+                      # booted twice; an agent driving Envoy; the desktop through QMP; the faults system;
+                      # generations through Aurora with power cuts; a broken generation given up;
+                      # a miswired manifest
 zig build check-manifest -Dsystem=system/my.brix  # check a manifest (Brix or ZON)
 zig-out/bin/brix --print system/my.brix           # what a .brix evaluates to
 zig build sim         # the deterministic simulator (16 seeds × 50k steps); -Dseed=N replays one
 zig build bench -Doptimize=ReleaseFast   # one hart: benchmark and kernel-profile records
 zig build run         # boot through Aurora in real time with an Envoy socket; each build becomes the
                       # current generation of a disk that persists between runs (zig-out/run-disk.img);
-                      # type the disk's passphrase in the terminal
+                      # type the disk's passphrase in the terminal; -Ddisplay shows the desktop in a window
 zig-out/bin/grain-disk show zig-out/run-disk.img     # what a disk holds: commits, free space, generations, names
 zig-out/bin/grain-disk passwd zig-out/run-disk.img   # change the passphrase (old, then new, on stdin)
 python3 tools/envoy.py shell --socket PATH    # grainsh, the structured shell
@@ -101,7 +102,15 @@ The four layers, from fastest to most real:
    boot that runs. A second run
    stages a generation that can never come up and checks Aurora gives it up
    after three tries and boots the last good one.
-9. **Manifest compile failure:** `zig build check-manifest
+9. **QEMU, the desktop** (`--display`): the dev system with a screen,
+   keyboard and tablet. `tools/desktop_session.py` finds the shell's
+   launcher in the scene the agent reads through Envoy, clicks it, types
+   `whoami`, finds the identity among the shell's answers, clicks the
+   shell's `clear` button, and puts the window away from the dock; at each
+   step it holds the scene against a screenshot (every filled element shows
+   its colour where the scene says it is topmost; every line of text has
+   ink).
+10. **Manifest compile failure:** `zig build check-manifest
    -Dsystem=system/tests/miswired.brix` must fail, and its stderr must name
    the missing service (brix reports it with the line of the block).
 
@@ -110,7 +119,11 @@ virtio console as a Unix socket the harness serves (QEMU waits for it, so no
 output is lost): its output goes to a temporary file (`--show-console`
 prints it, `--expect-console TEXT` checks it) and `--console-input LINE`
 types a line (the disk passphrase). `--disk IMG` attaches a virtio-blk disk,
-a fresh copy unless `--disk-inplace`.
+a fresh copy unless `--disk-inplace`. `--display` attaches a screen
+(virtio-gpu, 1024x768), a keyboard and a tablet, and a QMP socket; an agent
+script whose `run` takes a third parameter gets a `Screen`: `shot()`
+(a screendump, with `pixel(img, x, y)`), `type(text)`, `key(...)`,
+`click(x, y)`, and `wait(record)` to follow the system's records.
 
 **Several boots, and power cuts.** `--boots N` boots N times on the same
 disk. `--expect`, `--expect-console`, `--console-input`, `--agent` and
@@ -250,7 +263,7 @@ start `Trace <cpu>:`, so you can profile one hart at a time.
 | 3 Userspace and drivers | virtio-console, blk, net | QEMU with virtio devices; block images built by `zig build`; networking through QEMU user-mode net with port forwards |
 | 4 Envoy | the AI interface end to end | the harness is a **driver**: it opens Envoy's virtio console as a socket (`-chardev socket`) and runs an agent script of Envoy calls with expected typed results (`tools/agent_session.py`). `zig build run` plus grainsh or the MCP bridge is how to operate the OS interactively ✅ |
 | 5 Storage and identity | Granary, Ledger, generations, Seal | virtio-blk images; power-cut injection (kill QEMU at random instructions, reboot, verify) |
-| 6 Desktop | compositor, UI | virtio-gpu; QMP `screendump` writes PNGs the agent can look at; input injected through QMP |
+| 6 Desktop | compositor, UI | virtio-gpu and virtio-input in QEMU, driven through QMP (`screendump`, `input-send-event`); the scene (`scene.v1`, through Envoy) is checked against screenshots ✅ |
 | 7 Social | two or more instances | several QEMU instances on a QEMU socket network (`-netdev socket`/`dgram`); tests script introductions, app hosting, transfer and revocation |
 | any | whole-system determinism | QEMU `-icount rr=record/replay` for bit-exact machine replay; Grain's own Ledger replay compared against it |
 | 8 Ports | aarch64, x86_64 | the same test suite on `qemu-system-aarch64 -M virt` and `qemu-system-x86_64 -M q35`, run as a CI matrix |

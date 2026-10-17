@@ -70,7 +70,7 @@ pub fn build(b: *std.Build) void {
     // boot image and embedded in its own Steward. grain-pack refuses an image
     // missing a program, and Steward refuses a miswired manifest at compile time.
     const system_path = b.option([]const u8, "system", "System manifest for run/steward/check-manifest: .brix or .zon (default system/dev.brix)") orelse "system/dev.brix";
-    const program_names = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker", "crasher", "waiter", "registry", "kv", "envoy", "tablecloth", "kumara", "ledger" };
+    const program_names = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker", "crasher", "waiter", "registry", "kv", "envoy", "tablecloth", "kumara", "ledger", "surf", "shell" };
 
     const pack = b.addExecutable(.{ .name = "grain-pack", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/pack/main.zig"),
@@ -251,6 +251,8 @@ pub fn build(b: *std.Build) void {
     // Real entropy: a new disk gets its own master key and identity (tests
     // use a fixed pattern so their names are known).
     run.addArg("--virtio-rng=/dev/urandom");
+    // -Ddisplay: the desktop, in a window on the host.
+    if (b.option(bool, "display", "zig build run: show the desktop in a window") orelse false) run.addArgs(&.{ "--display", "--window" });
     run.addArtifactArg(aurora);
     run.stdio = .inherit;
     run.has_side_effects = true;
@@ -334,7 +336,7 @@ pub fn build(b: *std.Build) void {
         "--console-input",  "open sesame",
         "--expect",         "kumara_ready domain=kumara created=true",
         "--expect",         "ledger_ready domain=ledger entries=0",
-        "--expect",         "envoy_ready domain=envoy capabilities=5",
+        "--expect",         "envoy_ready domain=envoy capabilities=6",
         "--expect",         "envoy_bye domain=envoy",
         "--expect",         "domain_exit domain=envoy code=0",
         "--expect",         "summary failed=0",
@@ -346,6 +348,31 @@ pub fn build(b: *std.Build) void {
     qtest_agent.stdio = .inherit;
     qtest_agent.has_side_effects = true;
     qtest_agent.step.dependOn(&qtest_storage.step);
+
+    // The desktop: a screen, keyboard and tablet driven through QEMU's
+    // monitor. tools/desktop_session.py opens the shell from the dock, types
+    // a command, clicks a button, and holds the scene an agent reads through
+    // Envoy (scene.v1) against screenshots, element by element.
+    const qtest_desktop = b.addSystemCommand(&.{
+        "python3",          "tools/harness.py",
+        "--timeout",        qemu_timeout,
+        "--smp",            smp,
+        "--virtio-console", "--display",
+        "--agent",          "tools/desktop_session.py",
+        "--console-input",  "open sesame",
+        "--console-input",  "open sesame",
+        "--expect",         "surf_ready domain=surf width=1024 height=768 keyboard=true pointer=true",
+        "--expect",         "surf_window_shown domain=surf owner=shell",
+        "--expect",         "shell_ran domain=shell command=whoami ok=true",
+        "--expect",         "surf_window_hidden domain=surf owner=shell",
+        "--expect",         "envoy_bye domain=envoy",
+    });
+    qtest_desktop.addPrefixedFileArg("--virtio-rng=", rng_file);
+    qtest_desktop.addPrefixedFileArg("--disk=", test_disk);
+    qtest_desktop.addArtifactArg(kernel);
+    qtest_desktop.stdio = .inherit;
+    qtest_desktop.has_side_effects = true;
+    qtest_desktop.step.dependOn(&qtest_agent.step);
 
     // The failure path: restart limit, service revocation, no hung client.
     const qtest_faults = b.addSystemCommand(&.{
@@ -362,7 +389,7 @@ pub fn build(b: *std.Build) void {
     qtest_faults.addArtifactArg(kernel_faults);
     qtest_faults.stdio = .inherit;
     qtest_faults.has_side_effects = true;
-    qtest_faults.step.dependOn(&qtest_agent.step);
+    qtest_faults.step.dependOn(&qtest_desktop.step);
 
     // A miswired manifest must fail to compile, with the explanation.
     const miswired = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "check-manifest", "-Dsystem=system/tests/miswired.brix" });
@@ -509,6 +536,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(kumara_tests).step);
     const tablecloth_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/tablecloth.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(tablecloth_tests).step);
+    const paint_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/paint.zig"), .target = host, .optimize = optimize }) });
+    test_step.dependOn(&b.addRunArtifact(paint_tests).step);
+    const input_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/virtio_input.zig"), .target = host, .optimize = optimize }) });
+    test_step.dependOn(&b.addRunArtifact(input_tests).step);
     const brix_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/brix/brix.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(brix_tests).step);
     const idl_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/idl.zig"), .target = host, .optimize = optimize, .imports = &.{ .{ .name = "abi", .module = abi_mod }, .{ .name = "klog", .module = klog_mod } } }) });

@@ -408,6 +408,14 @@ binaries stay in `zig-out` for gdb. The dev system's kernel image went from
   up to 504 bytes. A message is up to 64 words each way, checked at compile
   time: the first five travel in registers, the rest through the IPC buffers
   (the kernel copies them, §2.6), so a 480-byte chunk is one call.
+- A parameter may be an `idl.Cap`: a capability that travels with the call
+  (through the IPC buffer, only over an endpoint capability with `grant`).
+  The server receives it in `idl.recv_slot` and must move it to keep it;
+  otherwise it is dropped after the handler. Agents hold no capabilities of
+  their own, so Envoy refuses such methods. (An application hands Surf the
+  signal to raise for its events this way, §3.9.)
+- A server whose thread has a bound signal (§2.6) gets `impl.onSignal(bits)`
+  for each wakeup that is not a message.
 - `grain/lib/idl.zig` generates, at `comptime`, typed client calls
   (`idl.call(proto.kv.put, ep, .{ .key = 1, .value = 2 })`), server dispatch
   (`idl.serve(proto.kv, ep, impl)`, which calls `impl.put(params, caller)`
@@ -620,7 +628,10 @@ enforces the limits, and an exhausted or expired lease fails with
   and most cloud VMs on every architecture. *Built:* the modern (1.x)
   virtio-mmio transport and split virtqueues in `grain/lib/virtio.zig`;
   `virtio_console` (one port, with per-client line buffering so concurrent
-  writers never tear each other's lines) and `virtio_rng`. Drivers program
+  writers never tear each other's lines), `virtio_rng`, and libraries for
+  block (`virtio_blk.zig`), two-dimensional GPU (`virtio_gpu.zig`) and input
+  (`virtio_input.zig`), which the domains that own those devices drive
+  themselves (Tablecloth its disk, Surf the screen, keyboard and tablet). Drivers program
   DMA with physical addresses from `Frame.info`. Until the IOMMU is in use,
   a driver with a DMA-capable device is trusted with memory; that is the
   main reason drivers are separate domains with their own regions.
@@ -750,6 +761,67 @@ Envoy's `upload` verb moves bulk bytes into a store the agent holds (base64,
   boards (it needs only SBI, a device tree and a virtio or NVMe disk
   driver); measured boot
   (Aurora reports what it loaded, so remote parties can check it).
+
+### 3.9 Surf and the desktop
+
+> **Status (Phase 6):** built: `grain/programs/surf` (the compositor),
+> `grain/programs/shell` (the first application), `surf.v1` and `scene.v1`,
+> `grain/lib/paint.zig` with the Grain Mono font, and the desktop QEMU test.
+> Surf and Brushstroke are the owner's names (GLOSSARY.md).
+
+![The desktop in the QEMU test: the shell, opened from the dock, has answered whoami](images/desktop.png)
+
+**Strokes, not pixels.** An application never hands Surf pixels. It
+describes its window as a list of **brushstrokes**: a filled rectangle, a
+rounded panel, a line of text, an outline, each with a colour, an optional
+element id (clicks on it are reported with that id) and a role (`button`,
+`answer`, `input`, …). `stroke` stages the next frame's strokes by index and
+`present` swaps them in whole, so a window is never seen half drawn. Surf
+paints them (anti-aliased panel corners and text, `paint.zig`, integers
+only) into a framebuffer it owns, and flushes only the damaged rectangle.
+
+**So the screen is data.** Everything Surf shows is a stroke in some
+window's list, its own desktop included: window 0 holds the background, the
+top bar (with the focused window's title) and the dock, with one launcher
+per application window; frames and titles come from each window's record.
+`scene.v1` (read-only) returns the windows, every element in screen
+coordinates with its kind, colour, id, role and text, the pointer, and what
+is topmost at a point. The agent holds it through Envoy, so an agent sees
+the screen as typed data and never has to guess from pixels. The desktop
+test holds that claim against screenshots: every filled element shows its
+colour where the scene says it is topmost, and every line of text has ink.
+
+**One thread, every source.** Surf drives virtio-gpu (one screen-sized
+resource backed by 2 MiB frames, set as the scanout) and two virtio-input
+devices (it tells the tablet from the keyboard by whether it reports
+absolute axes). Both input devices raise one signal bound to Surf's thread
+(§2.6): its receive returns for a client's call or for a key, whichever
+comes first, with no polling and no second thread. Keys go to the focused
+window; a click focuses and raises a window and is reported with the
+element under the pointer; a launcher opens its window, or puts it away if
+it is in front. Each window has an event queue; an application gives Surf
+a send-only signal (`listen`, an `idl.Cap`) and Surf raises it when events
+wait, so Surf never blocks on an application.
+
+**The shell** opens a hidden window, appears in the dock, and when opened
+takes typed commands (`whoami`, `store`, `ledger`, `get`/`put`, `echo`,
+`clear`) over the services the manifest gives it; its answers are `answer`
+strokes anyone with the scene can read. Without a screen Surf is skipped
+(its devices are optional) and the shell rests.
+
+**Tested** (`zig build qemu-test`): the harness's `--display` attaches the
+screen, keyboard and tablet and drives them through QEMU's monitor (QMP):
+screendumps, typed keys (paced like a person: the device lends the guest
+sixteen event buffers and drops a burst beyond them, as hardware does) and
+pointer clicks. The session finds the shell's launcher in the scene, clicks
+it, types `whoami`, finds the identity among the shell's answers, clicks
+its `clear` button, puts it away from the dock, and checks scene against
+screen at each step.
+
+- *Planned:* moving and resizing windows, a hardware cursor, more than one
+  window per application, shared-memory surfaces for applications that do
+  need pixels (images, video), Rishi as the shell's name if the owner wants
+  it, and a real display path on hardware (Phase 8).
 
 ## 4. Where Grain departs from its inspirations
 

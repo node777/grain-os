@@ -121,6 +121,36 @@ domain ledger like dev {
     provides ledger { protocol = ledger.v1 }
 }
 
+# The desktop: Surf drives the screen, keyboard and pointer, and paints
+# every window from typed strokes. Without a screen it is skipped.
+domain surf like dev {
+    program = surf
+    priority = 190
+    budget = 4ms
+    period = 10ms
+    memory = 16MiB
+    stack = 64KiB
+    device screen { virtio = 16, optional }
+    device keys { virtio = 18, optional }
+    device pointer { virtio = 18, instance = 1, optional }
+    provides surf { protocol = surf.v1 }
+    # What is on the screen, read back as data.
+    provides scene { protocol = scene.v1 }
+}
+
+# The first application: a shell the owner opens from the dock.
+domain shell like dev {
+    program = shell
+    priority = 100
+    hart = 1
+    stack = 32KiB
+    uses surf { from = surf.surf, protocol = surf.v1 }
+    uses kumara { from = kumara.kumara, protocol = kumara.v1 }
+    uses tablecloth { from = tablecloth.tablecloth, protocol = tablecloth.v1 }
+    uses ledger { from = ledger.ledger, protocol = ledger.v1 }
+    uses kv { from = store.kv, protocol = kv.v1 }
+}
+
 domain checker like dev {
     program = checker
     kind = task
@@ -138,4 +168,6 @@ agent {
     askable entropy { from = rng.entropy, protocol = entropy.v1, uses = 2 }
     # Upgrading or rolling back the system is the owner's call to grant.
     askable tablecloth { from = tablecloth.tablecloth, protocol = tablecloth.v1 }
+    # The agent sees the screen as the owner does, as data.
+    grant scene { from = surf.scene, protocol = scene.v1 }
 }

@@ -11,7 +11,16 @@ an audit ledger), and **loyal** (it answers to its owner only).
 
 RISC-V is the primary target; aarch64 and x86_64 follow.
 
-> Status: **Phase 5: Grain keeps things.** A content store (Tablecloth)
+> Status: **Phase 6: a personal desktop.** Grain boots to a desktop that
+> Surf, its compositor, paints from typed brushstrokes: applications
+> describe their windows as fills, panels and lines of text with roles, so
+> the whole screen reads back as data, and an agent sees what the owner sees
+> without guessing from pixels. The first application is a shell, opened
+> from the dock.
+>
+> ![The Grain desktop: the shell, opened from the dock, answering whoami](docs/images/desktop.png)
+>
+> Phase 5: Grain keeps things. A content store (Tablecloth)
 > survives a power cut at any instant and seals private data under the
 > owner's passphrase; each instance has an identity (Kumara) with a
 > three-word name; a signed Ledger records what the agent does; and whole
@@ -34,7 +43,8 @@ RISC-V is the primary target; aarch64 and x86_64 follow.
 ```sh
 tools/setup.sh        # Zig 0.17.0, QEMU, OpenSBI, gdb-multiarch (Debian/Ubuntu)
 zig build test        # host: unit tests, kernel scenario tests, short simulator run
-zig build qemu-test   # QEMU, 2 harts: kernel suite, the dev system, an agent session, faults, a miswired manifest
+zig build qemu-test   # QEMU, 2 harts: kernel suite, the dev system, an agent session, the desktop, storage,
+                      # generations through Aurora, faults, a miswired manifest
 zig build run         # boot the dev system through Aurora, in real time, on a disk that persists
                       # (type its passphrase); it prints an Envoy socket to connect to
 python3 tools/envoy.py shell --socket PATH   # grainsh: operate the running system

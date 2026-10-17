@@ -168,12 +168,19 @@ Built:
 - The Ledger for grants, revocations and generation switches made by
   Steward itself (agent actions and the agent's switches are recorded).
 
-## Phase 6: the personal desktop
+## Phase 6: the personal desktop (done)
 - virtio-gpu and virtio-input drivers, a compositor domain, a minimal
   widget toolkit, the structured shell as the first graphical app.
 - Testing through QMP screendump images and injected input.
 - Exit: boot to a desktop; open the shell; every visible element can be
   inspected as typed data through Envoy.
+- Built: Surf (the compositor; apps draw typed brushstrokes, `surf.v1`, and
+  the whole screen reads back as data, `scene.v1`), the shell, Grain Mono,
+  bound signals in the kernel (one thread serves clients and interrupts),
+  capability parameters in the IDL, and the harness's `--display` (QMP).
+- Exit, met: the desktop test opens the shell from the dock, runs `whoami`,
+  clicks a button, and checks every visible element the agent reads through
+  Envoy against screenshots.
 
 ## Phase 7: the social layer
 - virtio-net, a userspace UDP/IP stack, Courier (identity-addressed,

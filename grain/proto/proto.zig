@@ -12,8 +12,10 @@ pub const tablecloth = @import("tablecloth.zig");
 pub const kumara = @import("kumara.zig");
 pub const ledger = @import("ledger.zig");
 pub const input = @import("input.zig");
+pub const surf = @import("surf.zig");
+pub const scene = @import("scene.zig");
 
-pub const all = .{ console, entropy, echo, kv, registry, tablecloth, kumara, ledger, input };
+pub const all = .{ console, entropy, echo, kv, registry, tablecloth, kumara, ledger, input, surf, scene };
 
 comptime {
     for (all) |P| idl.check(P);

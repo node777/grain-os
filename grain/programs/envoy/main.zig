@@ -328,6 +328,8 @@ fn parseParams(comptime T: type, args: ?Value) error{InvalidArgs}!T {
     var v: T = undefined;
     inline for (comptime std.meta.fieldNames(T)) |f| {
         const F = @FieldType(T, f);
+        // An agent holds no capabilities of its own to pass.
+        if (@typeInfo(F) == .@"struct" and @hasDecl(F, "idl_cap")) return error.InvalidArgs;
         const j = argOf(args, f) orelse return error.InvalidArgs;
         if (@typeInfo(F) == .@"struct" and @hasDecl(F, "idl_bytes")) {
             if (j != .string) return error.InvalidArgs;

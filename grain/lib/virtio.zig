@@ -112,6 +112,10 @@ pub const Device = struct {
     pub fn config32(d: Device, off: usize) u32 {
         return @as(*volatile u32, @ptrFromInt(d.base + 0x100 + off)).*;
     }
+
+    pub fn setConfigByte(d: Device, off: usize, v: u8) void {
+        @as(*volatile u8, @ptrFromInt(d.base + 0x100 + off)).* = v;
+    }
 };
 
 pub const queue_size = 16;

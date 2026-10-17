@@ -116,6 +116,125 @@ class ConsolePump:
         self.thread.join(timeout=timeout)
 
 
+class Screen:
+    """The display, for scripts: QEMU's monitor (QMP) takes screenshots and
+    types and clicks as the owner would, and records can be waited for.
+
+    Coordinates are screen pixels; colours are 0xRRGGBB."""
+
+    # What a character is typed with: QEMU key names (qcodes), shifted or not.
+    SHIFTED = {'!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6', '&': '7', '*': '8', '(': '9', ')': '0',
+               '_': 'minus', '+': 'equal', '{': 'bracket_left', '}': 'bracket_right', ':': 'semicolon',
+               '"': 'apostrophe', '~': 'grave_accent', '|': 'backslash', '<': 'comma', '>': 'dot', '?': 'slash'}
+    PLAIN = {' ': 'spc', '\n': 'ret', '-': 'minus', '=': 'equal', '[': 'bracket_left', ']': 'bracket_right',
+             ';': 'semicolon', "'": 'apostrophe', '`': 'grave_accent', '\\': 'backslash', ',': 'comma', '.': 'dot',
+             '/': 'slash', '\b': 'backspace', '\t': 'tab'}
+
+    def __init__(self, qmp_path, lines, proc, width, height):
+        self.qmp_path, self.lines, self.proc = qmp_path, lines, proc
+        self.width, self.height = width, height
+        self.sock = None
+        self.shots = 0
+
+    def _qmp(self, command, **arguments):
+        if self.sock is None:
+            deadline = time.time() + 10
+            while True:
+                try:
+                    s = socket.socket(socket.AF_UNIX)
+                    s.connect(self.qmp_path)
+                    break
+                except OSError:
+                    if time.time() > deadline:
+                        raise
+                    time.sleep(0.05)
+            self.sock = s
+            self.f = s.makefile("rw")
+            self.f.readline()  # greeting
+            self._qmp("qmp_capabilities")
+        msg = {"execute": command}
+        if arguments:
+            msg["arguments"] = arguments
+        self.f.write(json.dumps(msg) + "\n")
+        self.f.flush()
+        while True:
+            r = json.loads(self.f.readline())
+            if "error" in r:
+                raise RuntimeError(f"QMP {command}: {r['error']}")
+            if "return" in r:
+                return r["return"]
+
+    def wait(self, expectation, timeout=60.0, after=0):
+        """Block until a record matching `expectation` appears (at or after
+        line index `after`); returns its index."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for i in range(after, len(self.lines)):
+                line = self.lines[i]
+                if record_prefix(line):
+                    rec = parse_record(line)
+                    if rec and matches(rec, expectation):
+                        return i
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.02)
+        raise TimeoutError(f"no record {expectation!r}")
+
+    def mark(self):
+        """A position in the output, to wait for records after it."""
+        return len(self.lines)
+
+    def shot(self, keep=None):
+        """A screenshot: (width, height, RGB bytes). `keep` saves the PPM."""
+        path = keep or os.path.join(os.path.dirname(self.qmp_path), f"shot{self.shots}.ppm")
+        self.shots += 1
+        self._qmp("screendump", filename=os.path.abspath(path))
+        with open(path, "rb") as f:
+            data = f.read()
+        # P6\n<w> <h>\n255\n<rgb>
+        parts = data.split(b"\n", 3)
+        w, h = (int(v) for v in parts[1].split())
+        return w, h, parts[3]
+
+    @staticmethod
+    def pixel(image, x, y):
+        w, _, rgb = image
+        i = (y * w + x) * 3
+        return rgb[i] << 16 | rgb[i + 1] << 8 | rgb[i + 2]
+
+    def _keys(self, names, down):
+        self._qmp("input-send-event", events=[{"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": n}}} for n in names])
+
+    def key(self, *names):
+        """Press and release keys together (e.g. key("shift", "a"))."""
+        self._keys(names, True)
+        self._keys(list(reversed(names)), False)
+
+    def type(self, text, pace=0.05):
+        """Type like a person: the device lends the guest only so many event
+        buffers, and a burst beyond them is dropped, as on real hardware."""
+        for ch in text:
+            time.sleep(pace)
+            if ch.isalpha() and ch.isupper():
+                self.key("shift", ch.lower())
+            elif ch.isalnum():
+                self.key(ch)
+            elif ch in self.SHIFTED:
+                self.key("shift", self.SHIFTED[ch])
+            else:
+                self.key(self.PLAIN[ch])
+
+    def move(self, x, y):
+        self._qmp("input-send-event", events=[
+            {"type": "abs", "data": {"axis": "x", "value": x * 32767 // (self.width - 1)}},
+            {"type": "abs", "data": {"axis": "y", "value": y * 32767 // (self.height - 1)}}])
+
+    def click(self, x, y):
+        self.move(x, y)
+        for down in (True, False):
+            self._qmp("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": "left"}}])
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("kernel")
@@ -156,6 +275,11 @@ def main():
     ap.add_argument("--boots", type=int, default=1,
                     help="boot this many times in a row on the same disk; prefix --expect, "
                          "--expect-console, --console-input and --kill-on with 'N:' for one boot")
+    ap.add_argument("--display", action="store_true",
+                    help="attach a screen (virtio-gpu, 1024x768), keyboard and tablet, driven through QMP; "
+                         "agent scripts with a third parameter get a Screen")
+    ap.add_argument("--window", action="store_true",
+                    help="with --display: show the screen in a window on the host (records still come on stdout)")
     ap.add_argument("--kill-on", action="append", default=[],
                     help="'N:record': cut the power (kill QEMU) the moment boot N prints this record")
     args = ap.parse_args()
@@ -206,8 +330,15 @@ def run_boot(args, boot, tmpdir, disk):
     # Envoy is a task that waits for its agent: give it a port only on boots
     # that have one (elsewhere it is skipped, its port being optional).
     envoy_socket = args.envoy_socket or args.interactive or bool(for_boot(args.agent, boot))
-    if args.virtio_console or args.virtio_rng or envoy_socket or disk:
+    if args.virtio_console or args.virtio_rng or envoy_socket or disk or args.display:
         devices += ["-global", "virtio-mmio.force-legacy=false"]
+    qmp_path = os.path.join(tmpdir, f"qmp{boot}.sock")
+    if args.display:
+        # Keyboard before tablet: device-tree order, so the manifest's
+        # instance 0 and 1 (Surf tells them apart by what they report).
+        devices += ["-device", "virtio-gpu-device,xres=1024,yres=768",
+                    "-device", "virtio-keyboard-device", "-device", "virtio-tablet-device",
+                    "-qmp", f"unix:{qmp_path},server=on,wait=off"]
     if args.virtio_rng:
         devices += ["-object", f"rng-random,id=rng0,filename={args.virtio_rng}", "-device", "virtio-rng-device,rng=rng0"]
     if disk:
@@ -233,6 +364,10 @@ def run_boot(args, boot, tmpdir, disk):
         devices += ["-device", "virtio-serial-device,id=vser1", "-chardev", f"socket,id=envoy0,path={envoy_path},server=on,wait=off",
                     "-device", "virtconsole,chardev=envoy0,bus=vser1.0"]
     qemu = list(QEMU_RISCV64)
+    if args.window:
+        # A window for the screen; the serial console stays on stdout.
+        qemu.remove("-nographic")
+        qemu += ["-display", "default", "-serial", "stdio", "-monitor", "none"]
     if args.realtime or args.interactive:
         # Not -icount sleep=on: with QEMU 8.2 and two harts that stalls the
         # boot (no progress once a hart-1 domain starts; the same image runs
@@ -297,7 +432,11 @@ def run_boot(args, boot, tmpdir, disk):
             if not ok:
                 agent_failures.append(name)
         try:
-            script.run(envoy.Session(envoy_path, connect_timeout=args.timeout), check)
+            session = envoy.Session(envoy_path, connect_timeout=args.timeout)
+            if args.display and script.run.__code__.co_argcount >= 3:
+                script.run(session, check, Screen(qmp_path, lines, proc, 1024, 768))
+            else:
+                script.run(session, check)
         except Exception as e:  # report and fail, don't hang
             print(f"@agent error={type(e).__name__} detail={json.dumps(str(e))}")
             agent_failures.append("exception")

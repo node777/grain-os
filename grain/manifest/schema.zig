@@ -125,6 +125,15 @@ pub const known_virtio = [_]struct { id: u32, what: []const u8 }{
     .{ .id = 2, .what = "block device" },
     .{ .id = 3, .what = "console" },
     .{ .id = 4, .what = "entropy source" },
+    .{ .id = 16, .what = "screen" },
+    .{ .id = 18, .what = "keyboard or pointer" },
+};
+
+/// "2 block device, 3 console, ...": for messages.
+const known_virtio_list = blk: {
+    var out: []const u8 = "";
+    for (known_virtio, 0..) |kv, i| out = out ++ (if (i > 0) ", " else "") ++ std.fmt.comptimePrint("{d} {s}", .{ kv.id, kv.what });
+    break :blk out;
 };
 
 const Fail = struct {
@@ -212,7 +221,7 @@ pub fn validate(m: Manifest, buf: []u8) ?[]const u8 {
             const known = for (known_virtio) |kv| {
                 if (kv.id == dev.virtio) break true;
             } else false;
-            if (!known) return f.msg("domain '{s}': device '{s}' asks for virtio id {d}, which no driver here supports (known: 3 console, 4 entropy source)", .{ d.name, dev.name, dev.virtio });
+            if (!known) return f.msg("domain '{s}': device '{s}' asks for virtio id {d}, which no driver here supports (known: " ++ known_virtio_list ++ ")", .{ d.name, dev.name, dev.virtio });
         }
     }
 
@@ -323,7 +332,7 @@ test "each mistake gets its own explanation" {
     try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .provides = &.{ .{ .name = "one", .protocol = "echo.v1" }, .{ .name = "two", .protocol = "echo.v1" } } }} }, "must speak different protocols");
     try expectError(.{ .name = "t", .domains = &.{ console, .{ .name = "a", .program = "x", .uses = &.{.{ .name = "out", .from = "console.consol", .protocol = "console.v1" }} } } }, "uses 'console.consol', but no domain provides it");
     try expectError(.{ .name = "t", .domains = &.{ console, .{ .name = "a", .program = "x", .uses = &.{.{ .name = "out", .from = "console.console", .protocol = "console.v2" }} } } }, "expects 'console.console' to speak console.v2, but it speaks console.v1");
-    try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .devices = &.{.{ .name = "gpu", .virtio = 16 }} }} }, "virtio id 16");
+    try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .devices = &.{.{ .name = "net", .virtio = 1 }} }} }, "virtio id 1, which no driver here supports (known: 2 block device, 3 console, 4 entropy source, 16 screen, 18 keyboard or pointer)");
     try expectError(.{ .name = "t", .domains = &.{
         .{ .name = "a", .program = "x", .budget_us = 6_000, .period_us = 10_000 },
         .{ .name = "b", .program = "x", .budget_us = 4_000, .period_us = 10_000 },

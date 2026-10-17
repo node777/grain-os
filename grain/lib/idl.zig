@@ -135,8 +135,26 @@ fn isBytes(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "idl_bytes");
 }
 
+/// A capability passed with a call (parameters only). It travels in the IPC
+/// buffer, not as words, and only if the caller's capability to the
+/// endpoint has the `grant` right. The server finds it in `recv_slot` and
+/// must move it elsewhere to keep it; it is deleted after the handler.
+pub const Cap = struct {
+    pub const idl_cap = true;
+    slot: grain.CPtr = 0,
+};
+
+fn isCap(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "idl_cap");
+}
+
+/// Where a server receives a `Cap` parameter: an empty slot of its own, set
+/// before serving (0: capabilities are not accepted).
+pub var recv_slot: grain.CPtr = 0;
+
 fn fieldWords(comptime T: type) usize {
     if (comptime isBytes(T)) return 1 + (T.idl_bytes + 7) / 8;
+    if (comptime isCap(T)) return 0;
     return switch (@typeInfo(T)) {
         .int, .bool, .@"enum" => 1,
         else => @compileError("idl: unsupported field type " ++ @typeName(T) ++ " (use u8..u64, i64, bool, an enum, or idl.Bytes(n))"),
@@ -158,7 +176,9 @@ pub fn encode(comptime T: type, v: T) Words {
     inline for (comptime std.meta.fieldNames(T)) |f| {
         const F = @FieldType(T, f);
         const x = @field(v, f);
-        if (comptime isBytes(F)) {
+        if (comptime isCap(F)) {
+            // Not a word: see `call`.
+        } else if (comptime isBytes(F)) {
             out[i] = x.len;
             var buf: [((F.idl_bytes + 7) / 8) * 8]u8 = @splat(0);
             @memcpy(buf[0..F.idl_bytes], &x.data);
@@ -182,7 +202,9 @@ pub fn decode(comptime T: type, w: *const Words) error{InvalidArgs}!T {
     var i: usize = 0;
     inline for (comptime std.meta.fieldNames(T)) |f| {
         const F = @FieldType(T, f);
-        if (comptime isBytes(F)) {
+        if (comptime isCap(F)) {
+            @field(v, f) = .{}; // filled in by the server loop
+        } else if (comptime isBytes(F)) {
             var b: F = .{};
             if (w[i] > F.idl_bytes) return error.InvalidArgs;
             b.len = @intCast(w[i]);
@@ -261,6 +283,7 @@ fn jsonString(comptime s: []const u8) []const u8 {
 fn typeName(comptime T: type) []const u8 {
     comptime {
         if (isBytes(T)) return std.fmt.comptimePrint("{s}({d})", .{ if (T.idl_text) "text" else "bytes", T.idl_bytes });
+        if (isCap(T)) return "cap";
         return switch (@typeInfo(T)) {
             .int => @typeName(T),
             .bool => "bool",
@@ -358,15 +381,32 @@ fn gather(r: grain.Result) Words {
 }
 
 /// Call method `M` with already-encoded words; the raw result.
-pub fn callWords(ep: grain.CPtr, label: u32, w: *const Words, n: usize) struct { r: grain.Result, w: Words } {
-    const r = grain.syscall(.call, ep, @bitCast(grain.Tag{ .label = label, .length = @intCast(n) }), scatter(w, n));
+pub fn callWords(ep: grain.CPtr, label: u32, w: *const Words, n: usize) RawResult {
+    return callWordsCaps(ep, label, w, n, 0);
+}
+
+pub const RawResult = struct { r: grain.Result, w: Words };
+
+fn callWordsCaps(ep: grain.CPtr, label: u32, w: *const Words, n: usize, caps: u3) RawResult {
+    const r = grain.syscall(.call, ep, @bitCast(grain.Tag{ .label = label, .length = @intCast(n), .caps = caps }), scatter(w, n));
     return .{ .r = r, .w = gather(r) };
+}
+
+/// Put a call's `Cap` parameters in the IPC buffer; returns how many.
+fn sendCaps(comptime T: type, v: T) u3 {
+    var n: u3 = 0;
+    inline for (comptime std.meta.fieldNames(T)) |f| if (comptime isCap(@FieldType(T, f))) {
+        const ib: *grain.abi.IpcBuffer = @ptrFromInt(grain.ipc_buffer);
+        ib.send_caps[n] = @field(v, f).slot;
+        n += 1;
+    };
+    return n;
 }
 
 /// A typed call: `try idl.call(echo.ping, ep, .{ .value = 41 })`.
 pub fn call(comptime M: type, ep: grain.CPtr, args: M.Params) CallError!M.Results {
     const w = encode(M.Params, args);
-    const out = callWords(ep, M.label, &w, words(M.Params));
+    const out = callWordsCaps(ep, M.label, &w, words(M.Params), sendCaps(M.Params, args));
     if (out.r.status != .ok) return error.Transport;
     if (out.r.tag.label != 0) return errorOf(@fromBackingInt(@intCast(out.w[0])));
     return decode(M.Results, &out.w) catch error.Failed;
@@ -404,8 +444,16 @@ pub fn serveAll(comptime protocols: anytype, ep: grain.CPtr, impl: anytype) nore
             };
         }
     }
+    const ib: *grain.abi.IpcBuffer = @ptrFromInt(grain.ipc_buffer);
+    ib.recv_slots[0] = recv_slot;
     var r = grain.recv(ep);
     while (true) {
+        if (r.signalled) {
+            // The thread's bound signal fired (devices, timers): no caller.
+            if (@hasDecl(@TypeOf(impl.*), "onSignal")) impl.onSignal(r.w[0]);
+            r = grain.recv(ep);
+            continue;
+        }
         const req = gather(r);
         var reply_label: u32 = 1;
         var reply: Words = @splat(0);
@@ -416,7 +464,11 @@ pub fn serveAll(comptime protocols: anytype, ep: grain.CPtr, impl: anytype) nore
             if (speaks) inline for (comptime methodNames(P)) |n| {
                 const M = @field(P, n);
                 if (r.tag.label == M.label) {
-                    if (decode(M.Params, &req)) |params| {
+                    if (decode(M.Params, &req)) |decoded| {
+                        var params = decoded;
+                        inline for (comptime std.meta.fieldNames(M.Params)) |f| if (comptime isCap(@FieldType(M.Params, f))) {
+                            @field(params, f).slot = if (r.tag.caps > 0) recv_slot else 0;
+                        };
                         if (@field(@TypeOf(impl.*), n)(impl, params, .{ .badge = r.badge, .protocol = r.protocol })) |res| {
                             reply_label = 0;
                             reply = encode(M.Results, res);
@@ -430,6 +482,9 @@ pub fn serveAll(comptime protocols: anytype, ep: grain.CPtr, impl: anytype) nore
                 }
             };
         }
+        // A capability the handler did not move is dropped, so the slot is
+        // empty for the next one.
+        if (r.tag.caps > 0) _ = grain.invoke(grain.S.cnode, grain.abi.CNodeMethod.delete, .{recv_slot});
         r = grain.syscall(.reply_recv, ep, @bitCast(grain.Tag{ .label = reply_label, .length = reply_len }), scatter(&reply, reply_len));
     }
 }

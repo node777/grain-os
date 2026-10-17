@@ -9,6 +9,9 @@ pub const virtio_blk = @import("virtio_blk.zig");
 pub const tablecloth = @import("tablecloth.zig");
 pub const kumara = @import("kumara.zig");
 pub const generation = @import("generation.zig");
+pub const paint = @import("paint.zig");
+pub const virtio_gpu = @import("virtio_gpu.zig");
+pub const virtio_input = @import("virtio_input.zig");
 
 /// Options for a program's root (`pub const std_options = grain.std_options;`):
 /// Caravan's pages are 4 KiB, which std cannot know for a freestanding target.
