@@ -211,6 +211,16 @@ seL4 tracks every derived capability in a derivation tree. Caravan does not.
   server that takes a new call without replying aborts the old caller.
 - `signal`, `wait`, `poll` on signals. An `Irq` bound to a signal sets the
   signal's badge bits, and stays masked until `Irq.ack`.
+- **Bound signals.** `Thread.bind_signal` ties one signal to one thread:
+  while that thread waits to receive on any endpoint, the signal firing
+  ends the wait too (a7 bit 63 says so; the bits arrive in word 0), and a
+  signal already pending ends the next receive at once, ahead of queued
+  senders. So one thread, on one scheduling context, serves its clients and
+  its devices' interrupts with no polling and no second thread (Surf, the
+  compositor, waits this way on its clients, its GPU and its input
+  devices). Bindings are symmetric and undone when either side is revoked
+  or destroyed; the invariants check both, and that no receiver ever waits
+  while its bound signal is pending.
 - **Measured** (QEMU, one hart, ReleaseFast, instructions retired including
   user code): null system call about 690, minimal object method about 740,
   call/reply round trip to a passive server about 2,100. A register-only fastpath that

@@ -8,7 +8,8 @@
 //!
 //!   in:  a7 = Syscall, a0 = capability slot (CPtr), a1 = Tag, a2..a6 = message words 0..4
 //!   out: a0 = Status, a1 = Tag, a2..a6 = message words 0..4, a7 = badge (receive operations;
-//!        bits 32..47 hold the protocol id of the sender's capability, 0 if none)
+//!        bits 32..47 hold the protocol id of the sender's capability, 0 if none; bit 63
+//!        set means no message: the thread's bound signal fired, its bits in word 0)
 //!
 //! Messages longer than five words continue in the thread's IPC buffer
 //! (`IpcBuffer.words[5..]`). Capabilities travel through the IPC buffer too.
@@ -91,6 +92,8 @@ pub const Tag = packed struct(usize) {
 };
 
 pub const register_words = 5;
+/// In a7 after a receive: the thread's bound signal fired (no message).
+pub const recv_signalled: u64 = 1 << 63;
 /// The most bytes one `DebugMethod.write` takes (the IPC buffer's words).
 pub const max_debug_write = max_message_words * 8;
 pub const max_message_words = 64;
@@ -248,6 +251,11 @@ pub const ThreadMethod = enum(u32) {
     info = 8,
     /// (mcp 0..255) the highest priority the thread may set; at most the caller's
     set_mcp = 9,
+    /// (signal_cptr or 0 to unbind) while the thread waits to receive on an
+    /// endpoint, this signal firing ends the wait too (a7 bit 63, the bits
+    /// in word 0), so one thread serves its clients and its interrupts.
+    /// A signal binds to one thread at a time.
+    bind_signal = 10,
 };
 
 /// Methods on a root page table (created with size_bits = top level).

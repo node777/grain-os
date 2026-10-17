@@ -211,6 +211,44 @@ fn testThreadSignal() !void {
     _ = g.invoke(w.thread, abi.ThreadMethod.suspend_thread, .{});
 }
 
+var bound_bits: usize = 0;
+
+/// Serves calls and its bound signal on one wait: a call is answered with
+/// the signal bits seen so far.
+fn boundServer(ep: usize) callconv(.c) noreturn {
+    var r = g.recv(@intCast(ep));
+    while (true) {
+        if (r.signalled) {
+            bound_bits |= r.w[0];
+            r = g.recv(@intCast(ep));
+        } else r = g.replyRecv(@intCast(ep), .{ .length = 1 }, .{bound_bits});
+    }
+}
+
+fn boundBitsSeen() bool {
+    return bound_bits != 0;
+}
+
+fn testBoundSignal() !void {
+    const ep = try retype(.endpoint, 0);
+    const sig = try retype(.signal, 0);
+    const badged = slot();
+    try expectStatus(.ok, g.invoke(S.cnode, abi.CNodeMethod.mint, .{ badged, sig, (abi.Rights{ .send = true }).bits(), 0b100 }).status);
+    const w = try spawn(boundServer, ep, .{ .prio = 254 });
+    try expectStatus(.ok, g.invoke(w.thread, abi.ThreadMethod.bind_signal, .{sig}).status);
+    server_thread = w.thread;
+    try check(runOthersUntil(serverWaiting, 100_000));
+    // The signal ends the server's receive; it notes the bits and waits again.
+    _ = g.signal(badged);
+    try check(runOthersUntil(boundBitsSeen, 100_000));
+    try check(runOthersUntil(serverWaiting, 100_000));
+    // And it still serves calls.
+    const r = g.call(ep, .{ .length = 1 }, .{0});
+    try expectStatus(.ok, r.status);
+    try check(r.w[0] == 0b100 and !r.signalled);
+    _ = g.invoke(w.thread, abi.ThreadMethod.suspend_thread, .{});
+}
+
 fn echoServer(ep: usize) callconv(.c) noreturn {
     var r = g.recv(@intCast(ep));
     while (true) {
@@ -547,6 +585,7 @@ export fn rootMain(bi: *const abi.BootInfo) callconv(.c) noreturn {
     run("identify_root_caps", testIdentify);
     run("mint_and_revoke", testMintRevoke);
     run("thread_signal", testThreadSignal);
+    run("bound_signal", testBoundSignal);
     run("syscall_cost", testSyscallCost);
     run("protocol_check", testProtocolCheck);
     run("long_debug_write", testLongDebugWrite);

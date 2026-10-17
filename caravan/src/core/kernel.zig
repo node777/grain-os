@@ -221,6 +221,8 @@ pub fn Kernel(comptime A: type) type {
             reply_from: ObjId,
             /// Pending fault (kind 0 = none).
             fault: Fault,
+            /// A signal that also ends this thread's waits to receive.
+            bound_signal: ObjId,
 
             fn faulted(t: *const Thread) bool {
                 return @backingInt(t.fault.kind) != 0;
@@ -250,6 +252,9 @@ pub fn Kernel(comptime A: type) type {
             word: u64,
             head: ObjId,
             tail: ObjId,
+            /// The thread whose receives this signal also ends, if any.
+            bound: ObjId,
+            _pad: u32,
         };
 
         pub const SchedContext = struct {
@@ -814,7 +819,10 @@ pub fn Kernel(comptime A: type) type {
             switch (e.kind) {
                 .thread => k.destroyThread(k.thread(id)),
                 .endpoint => k.abortEndpoint(id),
-                .signal => k.abortQueue(&k.body(Signal, id).head, &k.body(Signal, id).tail),
+                .signal => {
+                    k.abortQueue(&k.body(Signal, id).head, &k.body(Signal, id).tail);
+                    k.unbindSignal(id);
+                },
                 .sched_context => k.destroySchedContext(id),
                 .frame => k.unmapFrame(id),
                 .page_table => k.destroyTable(id),
@@ -900,7 +908,10 @@ pub fn Kernel(comptime A: type) type {
             const e = &k.table[id];
             switch (e.kind) {
                 .endpoint => k.abortEndpoint(id),
-                .signal => k.abortQueue(&k.body(Signal, id).head, &k.body(Signal, id).tail),
+                .signal => {
+                    k.abortQueue(&k.body(Signal, id).head, &k.body(Signal, id).tail);
+                    k.unbindSignal(id);
+                },
                 .frame => k.unmapFrame(id),
                 else => {},
             }
@@ -1153,6 +1164,7 @@ pub fn Kernel(comptime A: type) type {
             }
             t.reply_to = 0;
             k.detach(t);
+            if (k.alive(t.bound_signal, .signal)) k.unbindSignal(t.bound_signal);
             if (k.alive(t.home_sc, .sched_context)) {
                 const sc = k.body(SchedContext, t.home_sc);
                 sc.owner = 0;
@@ -1604,6 +1616,12 @@ pub fn Kernel(comptime A: type) type {
         }
 
         fn deliverRecv(k: *Self, t: *Thread, c: Cap) void {
+            // A pending bound signal comes first: interrupts do not wait
+            // behind a queue of clients.
+            if (k.alive(t.bound_signal, .signal) and k.body(Signal, t.bound_signal).word != 0) {
+                k.deliverBound(t, k.body(Signal, t.bound_signal));
+                return;
+            }
             const ep = k.body(Endpoint, c.object);
             // Queued senders speaking another protocol are refused.
             while (ep.mode == .sending and protocolsDiffer(k.thread(ep.head).send_protocol, c.protocol)) {
@@ -1689,7 +1707,31 @@ pub fn Kernel(comptime A: type) type {
                 setResult(w, .ok, &.{s.word});
                 s.word = 0;
                 k.makeRunnable(w);
+            } else if (k.alive(s.bound, .thread) and k.thread(s.bound).state == .blocked_recv) {
+                // The bound thread is waiting to receive: end that wait.
+                const t = k.thread(s.bound);
+                const ep = k.body(Endpoint, t.queue);
+                k.unlink(&ep.head, &ep.tail, t);
+                if (ep.head == 0) ep.mode = .idle;
+                k.deliverBound(t, s);
+                k.makeRunnable(t);
             }
+        }
+
+        /// End `t`'s receive with its bound signal's bits instead of a message.
+        fn deliverBound(k: *Self, t: *Thread, s: *Signal) void {
+            _ = k;
+            setResult(t, .ok, &.{s.word});
+            t.ctx.set(.a1, 0);
+            t.ctx.set(.a7, abi.recv_signalled);
+            s.word = 0;
+        }
+
+        /// Undo the binding between signal `id` and its thread.
+        fn unbindSignal(k: *Self, id: ObjId) void {
+            const s = k.body(Signal, id);
+            if (k.alive(s.bound, .thread) and k.thread(s.bound).bound_signal == id) k.thread(s.bound).bound_signal = 0;
+            s.bound = 0;
         }
 
         fn waitOp(k: *Self, t: *Thread, blocking: bool) Error!void {
@@ -1948,6 +1990,21 @@ pub fn Kernel(comptime A: type) type {
                         sc.holder = target.id;
                         if (target.state == .stalled) k.makeRunnable(target);
                     }
+                    setResult(t, .ok, &.{});
+                },
+                .bind_signal => {
+                    const cp = arg(t, .a2);
+                    if (cp == 0) {
+                        if (k.alive(target.bound_signal, .signal)) k.unbindSignal(target.bound_signal);
+                        setResult(t, .ok, &.{});
+                        return;
+                    }
+                    const sc = try k.resolveKind(t, cp, .signal, .{ .recv = true });
+                    const s = k.body(Signal, sc.object);
+                    if (k.alive(s.bound, .thread) and s.bound != target.id) return error.InvalidState;
+                    if (k.alive(target.bound_signal, .signal)) k.unbindSignal(target.bound_signal);
+                    s.bound = target.id;
+                    target.bound_signal = sc.object;
                     setResult(t, .ok, &.{});
                 },
                 .set_mcp => {
@@ -2234,11 +2291,19 @@ pub fn Kernel(comptime A: type) type {
                             },
                             .inactive, .stalled => {},
                         }
+                        if (t.bound_signal != 0) {
+                            if (!k.alive(t.bound_signal, .signal) or k.body(Signal, t.bound_signal).bound != id) return "signal binding not symmetric";
+                            if (t.state == .blocked_recv and k.body(Signal, t.bound_signal).word != 0) return "receiver waits while its bound signal is pending";
+                        }
                         // A caller lends its context while it waits for a reply,
                         // so only threads that can run must hold their own.
                         if ((t.state == .running or t.state == .ready) and k.alive(t.sc, .sched_context)) {
                             if (k.body(SchedContext, t.sc).holder != id) return "runnable thread's context held by another";
                         }
+                    },
+                    .signal => {
+                        const sg = k.body(Signal, id);
+                        if (sg.bound != 0 and (!k.alive(sg.bound, .thread) or k.thread(sg.bound).bound_signal != id)) return "signal binding not symmetric";
                     },
                     .sched_context => {
                         const sc = k.body(SchedContext, id);

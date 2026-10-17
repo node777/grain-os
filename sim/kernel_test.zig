@@ -512,3 +512,62 @@ test "a queued sender with the wrong protocol is refused when the receiver arriv
     try expectEqual(abi.ThreadState.blocked_recv, server.state);
     try std.testing.expect(m.current(0) == m.root);
 }
+
+test "a bound signal ends its thread's receive, pending or while it waits" {
+    var m = try bootMachine();
+    defer m.deinit();
+    try retype(&m, .endpoint, 0, 100);
+    try retype(&m, .signal, 0, 101);
+    const all = abi.Rights.all.bits();
+    try expectEqual(abi.Status.ok, (try m.invoke(0, S.cnode, abi.CNodeMethod.mint, &.{ 102, 101, all, 0x40, 0 })).status);
+    try retype(&m, .signal, 0, 103);
+
+    // A server below the root, bound to the signal; a lower poker that
+    // signals it once the server is waiting.
+    const server = try spawn(&m, 110, 111, 50, 50_000, 50_000);
+    const poker = try spawn(&m, 112, 113, 40, 50_000, 50_000);
+    try expectEqual(abi.Status.ok, (try m.invoke(0, 110, abi.ThreadMethod.bind_signal, &.{101})).status);
+    // One thread per signal.
+    try expectEqual(abi.Status.invalid_state, (try m.invoke(0, 112, abi.ThreadMethod.bind_signal, &.{101})).status);
+    _ = try m.invoke(0, 110, abi.ThreadMethod.resume_thread, &.{});
+    _ = try m.invoke(0, 112, abi.ThreadMethod.resume_thread, &.{});
+
+    // Pending before the receive: it returns at once, with the bits.
+    _ = try m.sys(0, .signal, 102, 0, &.{});
+    _ = try m.sys(0, .wait, 103, 0, &.{}); // the root steps aside
+    try std.testing.expect(m.current(0) == server);
+    _ = try m.sys(0, .recv, 100, 0, &.{});
+    var r = Machine.result(server);
+    try std.testing.expect(r.signalled);
+    try expectEqual(@as(u64, 0x40), r.words[0]);
+    try expectEqual(abi.ThreadState.running, server.state);
+
+    // Fired while it waits: the wait ends, and the endpoint forgets it.
+    _ = try m.sys(0, .recv, 100, 0, &.{});
+    try expectEqual(abi.ThreadState.blocked_recv, server.state);
+    try std.testing.expect(m.current(0) == poker);
+    _ = try m.sys(0, .signal, 102, 0, &.{});
+    try std.testing.expect(m.current(0) == server);
+    r = Machine.result(server);
+    try std.testing.expect(r.signalled);
+    try expectEqual(@as(u64, 0x40), r.words[0]);
+
+    // A message is still a message.
+    _ = try m.sys(0, .recv, 100, 0, &.{});
+    try std.testing.expect(m.current(0) == poker);
+    _ = try m.sys(0, .send, 100, @bitCast(abi.Tag{ .label = 9 }), &.{});
+    r = Machine.result(server);
+    try std.testing.expect(!r.signalled);
+    try expectEqual(@as(u32, 9), r.tag.label);
+
+    // Unbound, the signal no longer reaches the receive; revoking a bound
+    // signal unbinds it.
+    _ = try m.sys(0, .recv, 100, 0, &.{});
+    try expectEqual(abi.Status.ok, (try m.invoke(0, 110, abi.ThreadMethod.bind_signal, &.{0})).status);
+    _ = try m.sys(0, .signal, 102, 0, &.{});
+    try expectEqual(abi.ThreadState.blocked_recv, server.state);
+    try expectEqual(abi.Status.ok, (try m.invoke(0, 112, abi.ThreadMethod.bind_signal, &.{101})).status);
+    try expectEqual(abi.Status.ok, (try m.invoke(0, S.cnode, abi.CNodeMethod.revoke, &.{101})).status);
+    try expectEqual(@as(u32, 0), poker.bound_signal);
+    try m.check();
+}

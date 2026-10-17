@@ -150,7 +150,7 @@ fn randomSyscall(m: *Machine, g: Gen, hart: u32) !abi.Status {
         }
         if (roll < 45) {
             var target = g.slot();
-            const method = 1 + g.rng.uintLessThan(u64, 9);
+            const method = 1 + g.rng.uintLessThan(u64, 10);
             // Slots below 100 hold the root's own objects and its untyped
             // regions; mostly only look at them.
             if (target < 100 and !g.chance(2)) {

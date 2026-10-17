@@ -27,6 +27,9 @@ pub const Result = struct {
     badge: usize,
     /// On receive: the protocol id stamped on the sender's capability (0 if none).
     protocol: u16 = 0,
+    /// On receive: no message came; the thread's bound signal fired, with
+    /// its bits in `w[0]` (see `bindSignal`).
+    signalled: bool = false,
 
     pub fn ok(r: Result) bool {
         return r.status == .ok;
@@ -61,7 +64,7 @@ pub inline fn syscall(number: abi.Syscall, a0: usize, a1: usize, w: [5]usize) Re
           [a6] "{a6}" (w[4]),
           [a7] "{a7}" (@backingInt(number)),
         : .{ .memory = true });
-    return .{ .status = @fromBackingInt(@intCast(r0)), .tag = @bitCast(r1), .w = .{ r2, r3, r4, r5, r6 }, .badge = r7 & 0xffff_ffff, .protocol = @truncate(r7 >> 32) };
+    return .{ .status = @fromBackingInt(@intCast(r0)), .tag = @bitCast(r1), .w = .{ r2, r3, r4, r5, r6 }, .badge = r7 & 0xffff_ffff, .protocol = @truncate(r7 >> 32), .signalled = r7 & abi.recv_signalled != 0 };
 }
 
 fn words(args: anytype) [5]usize {
@@ -107,6 +110,12 @@ pub fn poll(cap: CPtr) Result {
 }
 pub fn yield() void {
     _ = syscall(.yield, 0, 0, @splat(0));
+}
+
+/// Let `sig` end this thread's receives too: one thread then serves its
+/// clients and its interrupts (a receive returns `signalled`).
+pub fn bindSignal(sig: CPtr) Status {
+    return invoke(S.thread, abi.ThreadMethod.bind_signal, .{sig}).status;
 }
 
 // ---------------------------------------------------------------------------

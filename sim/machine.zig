@@ -15,6 +15,8 @@ pub const Result = struct {
     badge: u64,
     /// The protocol id of the sender's capability (a7 bits 32..47).
     protocol: u16,
+    /// The bound signal ended the receive (a7 bit 63); its bits are word 0.
+    signalled: bool = false,
 };
 
 pub const Machine = struct {
@@ -71,6 +73,7 @@ pub const Machine = struct {
             .words = .{ t.ctx.get(.a2), t.ctx.get(.a3), t.ctx.get(.a4), t.ctx.get(.a5), t.ctx.get(.a6) },
             .badge = t.ctx.get(.a7) & 0xffff_ffff,
             .protocol = @truncate(t.ctx.get(.a7) >> 32),
+            .signalled = t.ctx.get(.a7) & abi.recv_signalled != 0,
         };
     }
 
