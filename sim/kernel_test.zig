@@ -571,3 +571,42 @@ test "a bound signal ends its thread's receive, pending or while it waits" {
     try expectEqual(@as(u32, 0), poker.bound_signal);
     try m.check();
 }
+
+test "a signal's alarm fires once, after its ticks; rearming replaces it, zero cancels" {
+    var m = try bootMachine();
+    defer m.deinit();
+    try retype(&m, .signal, 0, 101);
+    const all = abi.Rights.all.bits();
+    try expectEqual(abi.Status.ok, (try m.invoke(0, S.cnode, abi.CNodeMethod.mint, &.{ 102, 101, all, 0x8, 0 })).status);
+
+    // Armed, the root waits; time passes; the alarm wakes it with the badge.
+    try expectEqual(abi.Status.ok, (try m.invoke(0, 102, abi.SignalMethod.alarm, &.{1000})).status);
+    _ = try m.sys(0, .wait, 101, 0, &.{});
+    try expectEqual(abi.ThreadState.blocked_signal, m.root.state);
+    try m.advance(0, 999);
+    try expectEqual(abi.ThreadState.blocked_signal, m.root.state);
+    try m.advance(0, 2);
+    try expectEqual(abi.ThreadState.running, m.root.state);
+    try expectEqual(@as(u64, 0x8), Machine.result(m.root).words[0]);
+
+    // Rearming replaces: only the later alarm is left.
+    _ = try m.invoke(0, 102, abi.SignalMethod.alarm, &.{500});
+    _ = try m.invoke(0, 102, abi.SignalMethod.alarm, &.{2000});
+    try m.advance(0, 600);
+    try expectEqual(@as(u64, 0), (try m.sys(0, .poll, 101, 0, &.{})).ctx.get(.a2));
+    try m.advance(0, 1500);
+    try expectEqual(@as(u64, 0x8), (try m.sys(0, .poll, 101, 0, &.{})).ctx.get(.a2));
+
+    // Zero cancels; revoking an armed signal takes its alarm off the list.
+    _ = try m.invoke(0, 102, abi.SignalMethod.alarm, &.{100});
+    _ = try m.invoke(0, 102, abi.SignalMethod.alarm, &.{0});
+    try m.advance(0, 200);
+    try expectEqual(@as(u64, 0), (try m.sys(0, .poll, 101, 0, &.{})).ctx.get(.a2));
+    _ = try m.invoke(0, 102, abi.SignalMethod.alarm, &.{100});
+    try expectEqual(abi.Status.ok, (try m.invoke(0, S.cnode, abi.CNodeMethod.revoke, &.{101})).status);
+    try expectEqual(@as(u32, 0), m.k.harts[0].alarm_head);
+    // An alarm needs the right to signal.
+    try expectEqual(abi.Status.ok, (try m.invoke(0, S.cnode, abi.CNodeMethod.mint, &.{ 103, 101, (abi.Rights{ .recv = true }).bits(), 0, 0 })).status);
+    try expectEqual(abi.Status.no_rights, (try m.invoke(0, 103, abi.SignalMethod.alarm, &.{100})).status);
+    try m.check();
+}

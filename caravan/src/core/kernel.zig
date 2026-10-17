@@ -255,6 +255,12 @@ pub fn Kernel(comptime A: type) type {
             /// The thread whose receives this signal also ends, if any.
             bound: ObjId,
             _pad: u32,
+            /// An armed alarm: when it fires (0 = none), the bits it sets,
+            /// and its place on that hart's alarm list (sorted by time).
+            alarm_at: u64,
+            alarm_bits: u64,
+            next_alarm: ObjId,
+            alarm_hart: u32,
         };
 
         pub const SchedContext = struct {
@@ -302,6 +308,8 @@ pub fn Kernel(comptime A: type) type {
             run_tail: [256]ObjId = @splat(0),
             bitmap: [4]u64 = @splat(0),
             release_head: ObjId = 0,
+            /// Signals with alarms armed on this hart, soonest first.
+            alarm_head: ObjId = 0,
             timer_deadline: u64 = std.math.maxInt(u64),
             /// The running thread used up a full-bandwidth budget: it goes
             /// to the back of its queue at the next reschedule.
@@ -822,6 +830,7 @@ pub fn Kernel(comptime A: type) type {
                 .signal => {
                     k.abortQueue(&k.body(Signal, id).head, &k.body(Signal, id).tail);
                     k.unbindSignal(id);
+                    k.removeAlarm(id);
                 },
                 .sched_context => k.destroySchedContext(id),
                 .frame => k.unmapFrame(id),
@@ -911,6 +920,7 @@ pub fn Kernel(comptime A: type) type {
                 .signal => {
                     k.abortQueue(&k.body(Signal, id).head, &k.body(Signal, id).tail);
                     k.unbindSignal(id);
+                    k.removeAlarm(id);
                 },
                 .frame => k.unmapFrame(id),
                 else => {},
@@ -1211,6 +1221,40 @@ pub fn Kernel(comptime A: type) type {
             }
         }
 
+        fn removeAlarm(k: *Self, id: ObjId) void {
+            const s = k.body(Signal, id);
+            if (s.alarm_at == 0) return;
+            const h = &k.harts[s.alarm_hart];
+            var prev: ObjId = 0;
+            var cur = h.alarm_head;
+            while (cur != 0) : (cur = k.body(Signal, cur).next_alarm) {
+                if (cur == id) {
+                    if (prev == 0) h.alarm_head = s.next_alarm else k.body(Signal, prev).next_alarm = s.next_alarm;
+                    break;
+                }
+                prev = cur;
+            }
+            s.next_alarm = 0;
+            s.alarm_at = 0;
+        }
+
+        /// Arm signal `id` to fire `bits` at `at`, on hart `hi`'s list.
+        fn insertAlarm(k: *Self, id: ObjId, hi: u32, when: u64, bits: u64) void {
+            const s = k.body(Signal, id);
+            s.alarm_at = when;
+            s.alarm_bits = bits;
+            s.alarm_hart = hi;
+            const h = &k.harts[hi];
+            var prev: ObjId = 0;
+            var cur = h.alarm_head;
+            while (cur != 0 and k.body(Signal, cur).alarm_at <= when) {
+                prev = cur;
+                cur = k.body(Signal, cur).next_alarm;
+            }
+            s.next_alarm = cur;
+            if (prev == 0) h.alarm_head = id else k.body(Signal, prev).next_alarm = id;
+        }
+
         fn insertRelease(k: *Self, id: ObjId) void {
             const sc = k.body(SchedContext, id);
             const h = &k.harts[sc.hart];
@@ -1262,6 +1306,15 @@ pub fn Kernel(comptime A: type) type {
                     const t = k.thread(sc.holder);
                     if (t.state == .stalled and t.sc == id) k.makeRunnable(t);
                 }
+            }
+            while (h.alarm_head != 0) {
+                const id = h.alarm_head;
+                const s = k.body(Signal, id);
+                if (s.alarm_at > k.now) break;
+                h.alarm_head = s.next_alarm;
+                s.next_alarm = 0;
+                s.alarm_at = 0;
+                k.signalDeliver(id, s.alarm_bits);
             }
         }
 
@@ -1325,6 +1378,7 @@ pub fn Kernel(comptime A: type) type {
                 if (k.alive(t.sc, .sched_context)) deadline = k.now +| k.body(SchedContext, t.sc).remaining;
             }
             if (h.release_head != 0) deadline = @min(deadline, k.body(SchedContext, h.release_head).refill_at);
+            if (h.alarm_head != 0) deadline = @min(deadline, k.body(Signal, h.alarm_head).alarm_at);
             // Only move the timer earlier. A timer that fires early costs one
             // spurious event (handled like any other); reprogramming on every
             // kernel entry would cost a firmware call each time.
@@ -1794,6 +1848,7 @@ pub fn Kernel(comptime A: type) type {
                 .lease => try k.invokeLease(t, c, method),
                 .debug_console => try k.invokeDebug(t, c, method),
                 .frame => try k.invokeFrame(t, c, method),
+                .signal => try k.invokeSignal(t, c, method),
                 else => return error.UnknownMethod,
             }
         }
@@ -2137,6 +2192,19 @@ pub fn Kernel(comptime A: type) type {
             setResult(t, .ok, &.{});
         }
 
+        fn invokeSignal(k: *Self, t: *Thread, c: Cap, method: u32) Error!void {
+            const m = std.enums.fromInt(abi.SignalMethod, method) orelse return error.UnknownMethod;
+            try need(c, .{ .send = true });
+            switch (m) {
+                .alarm => {
+                    const ticks = arg(t, .a2);
+                    k.removeAlarm(c.object);
+                    if (ticks != 0) k.insertAlarm(c.object, k.handling_hart, k.now +| ticks, if (c.badge == 0) 1 else c.badge);
+                    setResult(t, .ok, &.{});
+                },
+            }
+        }
+
         fn invokeIrq(k: *Self, t: *Thread, c: Cap, method: u32) Error!void {
             const m = std.enums.fromInt(abi.IrqMethod, method) orelse return error.UnknownMethod;
             try need(c, .{ .configure = true });
@@ -2304,6 +2372,8 @@ pub fn Kernel(comptime A: type) type {
                     .signal => {
                         const sg = k.body(Signal, id);
                         if (sg.bound != 0 and (!k.alive(sg.bound, .thread) or k.thread(sg.bound).bound_signal != id)) return "signal binding not symmetric";
+                        if (sg.alarm_at != 0 and !k.onAlarmList(id)) return "armed alarm not on its hart's list";
+                        if (sg.alarm_at != 0 and sg.alarm_at <= k.now and k.harts[sg.alarm_hart].online and k.handling_hart == sg.alarm_hart) return "alarm overdue on its own hart";
                     },
                     .sched_context => {
                         const sc = k.body(SchedContext, id);
@@ -2350,6 +2420,24 @@ pub fn Kernel(comptime A: type) type {
                 }
             }
             return null;
+        }
+
+        fn onAlarmList(k: *Self, id: ObjId) bool {
+            const s = k.body(Signal, id);
+            if (s.alarm_hart >= k.harts.len) return false;
+            var n = k.harts[s.alarm_hart].alarm_head;
+            var count: usize = 0;
+            var last: u64 = 0;
+            while (n != 0) : (n = k.body(Signal, n).next_alarm) {
+                if (!k.alive(n, .signal)) return false;
+                const when = k.body(Signal, n).alarm_at;
+                if (when == 0 or when < last) return false;
+                last = when;
+                if (n == id) return true;
+                count += 1;
+                if (count > k.table.len) return false;
+            }
+            return false;
         }
 
         fn onReleaseList(k: *Self, id: ObjId) bool {

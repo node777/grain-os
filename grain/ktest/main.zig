@@ -249,6 +249,25 @@ fn testBoundSignal() !void {
     _ = g.invoke(w.thread, abi.ThreadMethod.suspend_thread, .{});
 }
 
+fn testAlarm() !void {
+    const sig = try retype(.signal, 0);
+    const badged = slot();
+    try expectStatus(.ok, g.invoke(S.cnode, abi.CNodeMethod.mint, .{ badged, sig, (abi.Rights{ .send = true }).bits(), 0b10 }).status);
+    // Not yet; then, after its ticks, once.
+    const t0 = g.time();
+    try expectStatus(.ok, g.alarm(badged, ticks(2_000)));
+    try check(g.poll(sig).w[0] == 0);
+    const r = g.wait(sig);
+    try check(r.w[0] == 0b10 and g.time() - t0 >= ticks(2_000));
+    try check(g.poll(sig).w[0] == 0);
+    // Cancelled, it never fires.
+    try expectStatus(.ok, g.alarm(badged, ticks(1_000)));
+    try expectStatus(.ok, g.alarm(badged, 0));
+    const t1 = g.time();
+    while (g.time() - t1 < ticks(3_000)) g.yield();
+    try check(g.poll(sig).w[0] == 0);
+}
+
 fn echoServer(ep: usize) callconv(.c) noreturn {
     var r = g.recv(@intCast(ep));
     while (true) {
@@ -586,6 +605,7 @@ export fn rootMain(bi: *const abi.BootInfo) callconv(.c) noreturn {
     run("mint_and_revoke", testMintRevoke);
     run("thread_signal", testThreadSignal);
     run("bound_signal", testBoundSignal);
+    run("alarm", testAlarm);
     run("syscall_cost", testSyscallCost);
     run("protocol_check", testProtocolCheck);
     run("long_debug_write", testLongDebugWrite);

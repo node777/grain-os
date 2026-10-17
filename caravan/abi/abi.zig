@@ -303,6 +303,14 @@ pub const LeaseMethod = enum(u32) {
     arm = 1,
 };
 
+/// Methods on a signal.
+pub const SignalMethod = enum(u32) {
+    /// (ticks, or 0 to cancel) after `ticks` timer ticks the signal fires as
+    /// if signalled through this capability (its badge, or 1). One alarm per
+    /// signal: arming it again replaces the last. Needs the `send` right.
+    alarm = 1,
+};
+
 pub const DebugMethod = enum(u32) {
     /// (byte count, then up to 32 bytes packed little-endian in a3..a6).
     /// A count of 33..`max_debug_write` takes the bytes from the start of the

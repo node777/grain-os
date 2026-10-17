@@ -221,6 +221,15 @@ seL4 tracks every derived capability in a derivation tree. Caravan does not.
   devices). Bindings are symmetric and undone when either side is revoked
   or destroyed; the invariants check both, and that no receiver ever waits
   while its bound signal is pending.
+- **Alarms.** `Signal.alarm(ticks)` fires the signal after `ticks` timer
+  ticks, as if signalled through that capability (its badge, or 1); arming
+  again replaces the alarm and 0 cancels it. Each hart keeps armed signals
+  in a list sorted by time, beside its scheduling-context release list, and
+  programs its timer for whichever comes first; time reaches the kernel only
+  through the event door, so alarms are as deterministic as everything else.
+  With a bound signal, a server's receive ends on a message, an interrupt or
+  a timeout (Courier's retransmits, §3.7). The invariants check that every
+  armed alarm is on its hart's list, in order.
 - **Measured** (QEMU, one hart, ReleaseFast, instructions retired including
   user code): null system call about 690, minimal object method about 740,
   call/reply round trip to a passive server about 2,100. A register-only fastpath that

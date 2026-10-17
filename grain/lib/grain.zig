@@ -115,6 +115,12 @@ pub fn yield() void {
     _ = syscall(.yield, 0, 0, @splat(0));
 }
 
+/// Fire `sig` (through this capability: its badge, or 1) after `ticks`
+/// timer ticks; 0 cancels. One alarm per signal; arming again replaces it.
+pub fn alarm(sig: CPtr, ticks: u64) Status {
+    return invoke(sig, abi.SignalMethod.alarm, .{ticks}).status;
+}
+
 /// Let `sig` end this thread's receives too: one thread then serves its
 /// clients and its interrupts (a receive returns `signalled`).
 pub fn bindSignal(sig: CPtr) Status {
