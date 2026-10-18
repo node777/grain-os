@@ -252,9 +252,13 @@ Built:
 - Built: `grain-emu` (`emu/`, ARCHITECTURE §3.10), an emulated RISC-V
   machine that boots the same images as QEMU: the kernel suite, the dev
   system, storage, Aurora and agent sessions pass on it.
-- Next: virtio-gpu and virtio-input in the emulator (the desktop); the
-  WebAssembly build and the page; the CI workflow and the public Pages
-  repository (it needs the owner to create it).
+- Built: the WebAssembly build and the terminal page (docs/WEB.md): the
+  console, grainsh over Envoy, the system log, the disk kept in browser
+  storage, three setups; tested in headless Chromium; the CI workflow that
+  builds, tests and publishes it.
+- Next: the public Pages repository and its deploy key (the owner's to
+  create, docs/WEB.md); virtio-gpu and virtio-input in the emulator (the
+  desktop on a canvas).
 
 ## Owner decisions
 - **Milestone:** build through Phase 2 before the next review (done); then

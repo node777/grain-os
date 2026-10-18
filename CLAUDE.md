@@ -24,7 +24,8 @@
   boots. Instruction or device changes need a test in `emu/hart_test.zig`
   (or the file's own tests) and `zig build emu-test`. The machine itself
   stays host-free (everything outside goes through `Host`), so it can be
-  built for WebAssembly.
+  built for WebAssembly (`emu/wasm.zig`). Page changes (`web/`): run
+  `zig build web-test` (Node and Playwright).
 - Machine-readable output goes through `klog` (`@caravan` from the kernel,
   `@grain` from user space): `<event> k=v`, names `[a-z0-9_]`.
 - Benchmarks: run `zig build bench -Doptimize=ReleaseFast` (one hart). Under

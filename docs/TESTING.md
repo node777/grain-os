@@ -33,6 +33,8 @@ zig build fuzz        # every fuzz target, a longer seeded sweep (-Dfuzz-sweep=p
 zig build fuzz --fuzz=100K  # Zig's coverage-guided fuzzer on them (crashing inputs: .zig-cache/f/)
 zig build model       # the model checker: every order of every IPC and revocation scenario
 zig build emu-test    # the kernel suite and the system on grain-emu (emu/), not QEMU
+zig build web         # the web page in zig-out/web (serve it; -Doptimize=ReleaseSafe to publish)
+zig build web-test    # the page in headless Chromium (Node and Playwright)
 zig-out/bin/grain-emu --harts 2 --stats zig-out/bin/caravan-ktest   # the emulator by hand
 python3 tools/harness.py --emu zig-out/bin/grain-emu ...            # any harness run, on the emulator
 valgrind --tool=callgrind zig-out/bin/caravan-profile   # where the core spends an IPC round trip
@@ -120,6 +122,14 @@ The four layers, from fastest to most real:
    through Aurora and a real-time agent session on it through the same
    harness and expectations as on QEMU (`--emu PATH`). The emulator supports
    what those need; `--display`, NVMe and Arm are refused.
+
+3e. **The web page** (`zig build web-test`, `tools/web_test.mjs`; docs/WEB.md):
+   headless Chromium loads the built site from a local server and runs the
+   kernel suite, then the dev system on a fresh disk (choosing a
+   passphrase in the console, grainsh calls, an ask the owner approves, the
+   audit chain verified in the page, `bye`), then reloads and checks the
+   disk survived (the same identity; a wrong passphrase refused). CI runs it
+   on the release build (`.github/workflows/web.yml`).
 
 4. **QEMU, kernel suite** (`caravan-ktest`): the kernel test program runs as
    root task, on 2 harts. That covers boot info, capability identity, mint and revoke, thread

@@ -181,7 +181,7 @@ pub const Machine = struct {
         for (0..phnum) |k| {
             const off = phoff + k * phentsize;
             if (off + 56 > image.len) return error.BadElf;
-            const ph = image[off..][0..56];
+            const ph = image[@intCast(off)..][0..56];
             if (std.mem.readInt(u32, ph[0..4], .little) != 1) continue; // PT_LOAD
             const p_offset = std.mem.readInt(u64, ph[8..16], .little);
             const p_paddr = std.mem.readInt(u64, ph[24..32], .little);
@@ -190,9 +190,10 @@ pub const Machine = struct {
             if (p_memsz == 0) continue;
             if (p_paddr < ram_base or p_paddr - ram_base + p_memsz > m.ram.len or p_filesz > p_memsz) return error.OutsideRam;
             if (p_offset + p_filesz > image.len) return error.BadElf;
-            const dst = m.ram[p_paddr - ram_base ..][0..p_memsz];
-            @memcpy(dst[0..p_filesz], image[p_offset..][0..p_filesz]);
-            @memset(dst[p_filesz..], 0);
+            const dst = m.ram[@intCast(p_paddr - ram_base)..][0..@intCast(p_memsz)];
+            const filesz: usize = @intCast(p_filesz);
+            @memcpy(dst[0..filesz], image[@intCast(p_offset)..][0..filesz]);
+            @memset(dst[filesz..], 0);
             lowest = @min(lowest, p_paddr);
         }
         if (lowest == std.math.maxInt(u64)) return error.NothingToLoad;
@@ -206,7 +207,7 @@ pub const Machine = struct {
         defer m.gpa.free(blob);
         const top = ram_base + m.ram.len;
         m.dtb_addr = std.mem.alignBackward(u64, top - blob.len, 2 << 20);
-        @memcpy(m.ram[m.dtb_addr - ram_base ..][0..blob.len], blob);
+        @memcpy(m.ram[@intCast(m.dtb_addr - ram_base)..][0..blob.len], blob);
         const h = &m.harts[0];
         h.pc = entry;
         h.x[10] = 0;
@@ -362,10 +363,10 @@ pub const Machine = struct {
     pub fn codePage(m: *Machine, page: u64) !?*CodePage {
         if (page < ram_base or page - ram_base >= m.ram.len) return null;
         const idx = (page - ram_base) >> 12;
-        if (m.code[idx]) |p| return p;
+        if (m.code[@intCast(idx)]) |p| return p;
         const p = m.code_free.pop() orelse try m.gpa.create(CodePage);
         @memset(p, .{ .op = .none });
-        m.code[idx] = p;
+        m.code[@intCast(idx)] = p;
         return p;
     }
 
@@ -373,7 +374,7 @@ pub const Machine = struct {
     /// decoded instructions, if any, are stale.
     pub inline fn wroteRam(m: *Machine, pa: u64) void {
         const idx = (pa -% ram_base) >> 12;
-        if (idx < m.code.len) if (m.code[idx]) |p| m.dropCode(idx, p);
+        if (idx < m.code.len) if (m.code[@intCast(idx)]) |p| m.dropCode(@intCast(idx), p);
     }
 
     fn dropCode(m: *Machine, idx: usize, p: *CodePage) void {
@@ -454,7 +455,7 @@ pub const Machine = struct {
 
     fn slotAt(m: *Machine, pa: u64) ?*virtio.Device {
         const s = (pa - virtio_base) / 0x1000;
-        return if (m.slots[s]) |*d| d else null;
+        return if (m.slots[@intCast(s)]) |*d| d else null;
     }
 
     fn console(m: *Machine, bytes: []const u8) void {
@@ -468,7 +469,7 @@ pub const Machine = struct {
         if (pa < ram_base) return null;
         const off = pa - ram_base;
         if (off + size > m.ram.len) return null;
-        return m.ram[off..][0..size];
+        return m.ram[@intCast(off)..][0..@intCast(size)];
     }
 
     pub fn ramLoad(m: *Machine, pa: u64, size: u8) ?u64 {
@@ -642,7 +643,7 @@ pub const Machine = struct {
                     if (a0 >= m.harts.len) {
                         err = sbi_invalid_param;
                     } else {
-                        const t = &m.harts[a0];
+                        const t = &m.harts[@intCast(a0)];
                         if (t.started) {
                             err = sbi_already;
                         } else {
@@ -660,7 +661,7 @@ pub const Machine = struct {
                     h.yield = true;
                 },
                 2 => {
-                    if (a0 >= m.harts.len) err = sbi_invalid_param else value = if (m.harts[a0].started) 0 else 1;
+                    if (a0 >= m.harts.len) err = sbi_invalid_param else value = if (m.harts[@intCast(a0)].started) 0 else 1;
                 },
                 else => err = sbi_not_supported,
             },

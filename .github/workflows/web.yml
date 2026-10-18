@@ -1,0 +1,65 @@
+# The web page (web/, docs/WEB.md): build it with release images, test it in
+# Chromium, and publish it to a public repository that serves it with GitHub
+# Pages. Publishing needs two settings in this repository (Settings → Secrets
+# and variables → Actions):
+#   variable PAGES_REPO        owner/name of the public repository
+#   secret   PAGES_DEPLOY_KEY  the private half of a deploy key with write
+#                              access to that repository (and nothing else)
+# Without them the site is built and tested, and kept as a workflow artifact.
+name: web
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Zig 0.17.0 (checked against its published checksum) and QEMU
+        run: sudo bash tools/setup.sh
+      - name: Host tests (with the kernel suite on grain-emu)
+        run: zig build test
+      - name: Build the site with release images
+        run: zig build web -Doptimize=ReleaseSafe --prefix out
+      - name: Test the site in Chromium
+        run: |
+          npm install -g playwright@1.56.1
+          npx playwright install --with-deps chromium
+          node tools/web_test.mjs out/web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: out/web
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.event_name != 'pull_request' && vars.PAGES_REPO != ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: site
+      - name: Publish to the Pages repository
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          deploy_key: ${{ secrets.PAGES_DEPLOY_KEY }}
+          external_repository: ${{ vars.PAGES_REPO }}
+          publish_branch: gh-pages
+          publish_dir: ./site
+          force_orphan: true
+          enable_jekyll: false
+          commit_message: "Grain OS web page from ${{ github.repository }}@${{ github.sha }}"

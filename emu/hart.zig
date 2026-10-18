@@ -208,7 +208,7 @@ pub const Hart = struct {
         const top = @as(i64, @bitCast(va)) >> 38;
         if (top != 0 and top != -1) return h.raise(fault, va);
         const vpn = (va >> 12) & ((1 << 27) - 1);
-        const e = &h.tlb[vpn % tlb_size];
+        const e = &h.tlb[@intCast(vpn % tlb_size)];
         const bit: u5 = h.perm_shift + accessBit(acc);
         if (e.tag == vpn + 1 and (e.allow >> bit) & 1 != 0) return e.page | (va & 0xfff);
         var table = (h.satp & ((1 << 44) - 1)) << 12;
@@ -271,20 +271,20 @@ pub const Hart = struct {
         if (h.satp >> 60 != 8) return null;
         if ((va & 0xfff) + size > 0x1000) return null;
         const vpn = (va >> 12) & ((1 << 27) - 1);
-        const e = &h.tlb[vpn % tlb_size];
+        const e = &h.tlb[@intCast(vpn % tlb_size)];
         if (e.tag != vpn + 1 or (e.allow >> (h.perm_shift + comptime accessBit(acc))) & 1 == 0) return null;
         if (e.host == null) return null;
         return e;
     }
 
     inline fn loadFast(h: *Hart, m: *Machine, va: u64, comptime T: type) Exception!u64 {
-        if (h.fast(va, @sizeOf(T), .load)) |e| return std.mem.readInt(T, (e.host.? + (va & 0xfff))[0..@sizeOf(T)], .little);
+        if (h.fast(va, @sizeOf(T), .load)) |e| return std.mem.readInt(T, (e.host.? + @as(usize, @intCast(va & 0xfff)))[0..@sizeOf(T)], .little);
         return h.load(m, va, @sizeOf(T));
     }
 
     inline fn storeFast(h: *Hart, m: *Machine, va: u64, comptime T: type, v: u64) Exception!void {
         if (m.reservations == 0) if (h.fast(va, @sizeOf(T), .store)) |e| {
-            std.mem.writeInt(T, (e.host.? + (va & 0xfff))[0..@sizeOf(T)], @truncate(v), .little);
+            std.mem.writeInt(T, (e.host.? + @as(usize, @intCast(va & 0xfff)))[0..@sizeOf(T)], @truncate(v), .little);
             m.wroteRam(e.page);
             return;
         };
@@ -314,7 +314,7 @@ pub const Hart = struct {
     inline fn fetch(h: *Hart, m: *Machine) Exception!*const decode.Inst {
         const pc = h.pc;
         if (pc >> 12 == h.fetch_vpn) {
-            const slot = &h.fetch_code[(pc & 0xfff) >> 1];
+            const slot = &h.fetch_code[@intCast((pc & 0xfff) >> 1)];
             if (slot.op != .none) return slot;
         }
         return h.fetchSlow(m);
@@ -322,7 +322,7 @@ pub const Hart = struct {
 
     fn fetchSlow(h: *Hart, m: *Machine) Exception!*const decode.Inst {
         const pc = h.pc;
-        const off = pc & 0xfff;
+        const off: usize = @intCast(pc & 0xfff);
         if (pc & 1 != 0) return h.raise(Cause.misaligned_fetch, pc);
         if (pc >> 12 != h.fetch_vpn) {
             const pa = try h.translate(m, pc, .fetch);

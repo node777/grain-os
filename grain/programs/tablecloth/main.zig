@@ -252,8 +252,9 @@ fn say(console: g.CPtr, text: []const u8) void {
 }
 
 /// The owner's next typed line (input.v1, polled: the driver cannot hold a
-/// reply open, so a line is either waiting or not).
-fn readLine(input: g.CPtr, out: *[128]u8) []u8 {
+/// reply open, so a line is either waiting or not). Between looks it sleeps
+/// on `nap` (an alarm), so waiting for a person costs almost nothing.
+fn readLine(input: g.CPtr, out: *[128]u8, nap: g.CPtr) []u8 {
     while (true) {
         if (idl.call(proto.input.read_line, input, .{})) |r| {
             if (r.ready) {
@@ -262,7 +263,8 @@ fn readLine(input: g.CPtr, out: *[128]u8) []u8 {
                 return out[0..t.len];
             }
         } else |_| {}
-        g.yield();
+        _ = g.alarm(nap, @max(1, g.env().timebase_hz / 50));
+        _ = g.wait(nap);
     }
 }
 
@@ -270,6 +272,7 @@ fn unlock(space: *g.Space, console: g.CPtr, input: g.CPtr, entropy: g.CPtr) !voi
     const l = cloth.sup.lock;
     const heap = try space.mapHeap(D.Layout.heap + 0x10_0000, l.m_kib / 4 + 64);
     var fba: std.heap.FixedBufferAllocator = .init(heap);
+    const nap = try space.retype(.signal, 0);
     var pass: [128]u8 = undefined;
     defer std.crypto.secureZero(u8, &pass);
     if (!cloth.passphraseSet()) {
@@ -277,9 +280,9 @@ fn unlock(space: *g.Space, console: g.CPtr, input: g.CPtr, entropy: g.CPtr) !voi
         defer std.crypto.secureZero(u8, &again);
         while (true) {
             say(console, "tablecloth: this disk is new. Choose a passphrase:\n");
-            const a = readLine(input, &pass);
+            const a = readLine(input, &pass, nap);
             say(console, "tablecloth: once more:\n");
-            const b = readLine(input, &again);
+            const b = readLine(input, &again, nap);
             if (a.len > 0 and std.mem.eql(u8, a, b)) {
                 var seed: [64]u8 = undefined;
                 defer std.crypto.secureZero(u8, &seed);
@@ -299,7 +302,7 @@ fn unlock(space: *g.Space, console: g.CPtr, input: g.CPtr, entropy: g.CPtr) !voi
     while (true) {
         tries += 1;
         say(console, "tablecloth: passphrase:\n");
-        const p = readLine(input, &pass);
+        const p = readLine(input, &pass, nap);
         fba.reset();
         if (cloth.unlock(fba.allocator(), p)) |_| {
             g.log("tablecloth_unlocked", .{ .created = false, .tries = tries });

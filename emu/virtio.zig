@@ -38,7 +38,7 @@ pub const Dma = struct {
         const off = pa - d.base;
         if (off > d.ram.len or len > d.ram.len - off) return null;
         d.written(d.ctx, pa, len);
-        return d.ram[off..][0..len];
+        return d.ram[@intCast(off)..][0..@intCast(len)];
     }
 
     fn int(d: Dma, comptime T: type, pa: u64) ?T {

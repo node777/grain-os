@@ -12,8 +12,8 @@ an audit ledger), and **loyal** (it answers to its owner only).
 RISC-V is the primary target; aarch64 runs the kernel; x86_64 follows.
 
 > Now: **Grain in a browser.** `grain-emu` (`emu/`) is an emulated RISC-V
-> machine that boots the same images as QEMU; its WebAssembly build and a
-> static site come next.
+> machine that boots the same images as QEMU; compiled to WebAssembly, it
+> runs the system in a web page (`zig build web`, docs/WEB.md).
 >
 > Status: **Phase 9: hardening.** Every way into the kernel and every
 > parser of untrusted input is fuzzed (Zig's coverage-guided fuzzer, and a
@@ -127,6 +127,7 @@ hash chain: verified  head f82b57c52ddf0fb7...
 - [docs/PLAN.md](docs/PLAN.md): phased roadmap and open questions
 - [docs/TESTING.md](docs/TESTING.md): how each layer is built, booted, tested and driven
 - [docs/MAC.md](docs/MAC.md): getting ready to run and use Grain on a Mac, safely
+- [docs/WEB.md](docs/WEB.md): Grain in a browser: the page, how it works, publishing it
 - [docs/CAPABILITY_MODEL.md](docs/CAPABILITY_MODEL.md): the capability model, written for an external reviewer
 - [docs/BRIX.md](docs/BRIX.md): Brix, the language manifests are written in
 - [docs/GLOSSARY.md](docs/GLOSSARY.md): the proposed names (Tally, Pond, Rishi, Brix, …) and what each maps to

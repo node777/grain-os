@@ -56,20 +56,20 @@ pub const Plic = struct {
     pub fn read(p: *Plic, off: u64) u32 {
         if (off < 0x1000) {
             const line = off / 4;
-            return if (line <= plic_ndev) p.priority[line] else 0;
+            return if (line <= plic_ndev) p.priority[@intCast(line)] else 0;
         }
         if (off >= 0x1000 and off < 0x1010) {
             const word = (off - 0x1000) / 4;
             return @truncate((p.level & ~p.claimed) >> @intCast(32 * word));
         }
         if (off >= 0x2000 and off < 0x2000 + 0x80 * max_contexts) {
-            const ctx = (off - 0x2000) / 0x80;
+            const ctx: usize = @intCast((off - 0x2000) / 0x80);
             const word = ((off - 0x2000) % 0x80) / 4;
             if (word >= 4) return 0;
             return @truncate(p.enable[ctx] >> @intCast(32 * word));
         }
         if (off >= 0x20_0000) {
-            const ctx = (off - 0x20_0000) / 0x1000;
+            const ctx: usize = @intCast((off - 0x20_0000) / 0x1000);
             if (ctx >= max_contexts) return 0;
             switch ((off - 0x20_0000) % 0x1000) {
                 0 => return p.threshold[ctx],
@@ -87,11 +87,11 @@ pub const Plic = struct {
     pub fn write(p: *Plic, off: u64, v: u32) void {
         if (off < 0x1000) {
             const line = off / 4;
-            if (line >= 1 and line <= plic_ndev) p.priority[line] = v & 7;
+            if (line >= 1 and line <= plic_ndev) p.priority[@intCast(line)] = v & 7;
             return;
         }
         if (off >= 0x2000 and off < 0x2000 + 0x80 * max_contexts) {
-            const ctx = (off - 0x2000) / 0x80;
+            const ctx: usize = @intCast((off - 0x2000) / 0x80);
             const word = ((off - 0x2000) % 0x80) / 4;
             if (word >= 4) return;
             const shift: u7 = @intCast(32 * word);
@@ -100,7 +100,7 @@ pub const Plic = struct {
             return;
         }
         if (off >= 0x20_0000) {
-            const ctx = (off - 0x20_0000) / 0x1000;
+            const ctx: usize = @intCast((off - 0x20_0000) / 0x1000);
             if (ctx >= max_contexts) return;
             switch ((off - 0x20_0000) % 0x1000) {
                 0 => p.threshold[ctx] = v & 7,

@@ -1102,10 +1102,27 @@ for corner cases (division by zero and overflow, high multiplies, word
 shifts), atomics, traps and `sret`, Sv39 permissions with SUM, interrupt
 masking, and code overwritten after it ran.
 
-- *Planned:* virtio-gpu and virtio-input (the desktop), virtio-net (two
-  instances in one page), the WebAssembly build and the page that hosts it
-  (a terminal, a canvas, the disk in browser storage), and a static site
-  built and published by CI.
+**In a browser** (docs/WEB.md). `emu/wasm.zig` is a second host for the
+same machine: a WebAssembly module (63 KB) that imports the console,
+entropy (`crypto.getRandomValues`), a clock and a flush notice, and exports
+start, run, input and BLAKE3. The page (`web/`) runs it in a Web Worker,
+30 ms at a time, in real time; the disk lives in the module's memory and
+its written blocks go to IndexedDB when the guest flushes. grainsh is
+ported to the page and speaks Envoy over the second console. The same
+kernel suite retires exactly the same instruction count under WebAssembly
+as natively; in Chromium it runs at 120-140 MIPS, and the release-built
+dev system reaches its passphrase prompt in about 1.5 s. `zig build
+web-test` drives the page in headless Chromium; `.github/workflows/web.yml`
+builds, tests and (once configured) publishes it with GitHub Pages.
+
+*Changed for it:* Tablecloth sleeps on an alarm between looks for the
+passphrase instead of yielding in a loop, so a system waiting for its
+owner costs a few million instructions a second rather than all of them
+(on QEMU too).
+
+- *Planned:* virtio-gpu and virtio-input (the desktop on a canvas),
+  virtio-net (two instances in one page), and an agent connected to the
+  page.
 
 ## 4. Where Grain departs from its inspirations
 

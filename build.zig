@@ -709,6 +709,36 @@ pub fn build(b: *std.Build) void {
     emu_agent.stdio = .inherit;
     emu_agent.has_side_effects = true;
     emu_agent.step.dependOn(&emu_aurora.step);
+    // The web page (web/): grain-emu as WebAssembly, the page, and the
+    // images and manifests it offers, in zig-out/web. A static site: serve
+    // that directory. -Doptimize=ReleaseSafe for the published one.
+    const wasm_emu = b.addExecutable(.{ .name = "grain-emu", .root_module = b.createModule(.{
+        .root_source_file = b.path("emu/wasm.zig"),
+        .target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding }),
+        .optimize = .ReleaseFast,
+        .strip = true,
+    }) });
+    wasm_emu.entry = .disabled;
+    wasm_emu.rdynamic = true;
+    const web = b.step("web", "Build the web page (zig-out/web): grain-emu as WebAssembly and the images it boots");
+    web.dependOn(&b.addInstallArtifact(wasm_emu, .{ .dest_dir = .{ .override = .{ .custom = "web" } } }).step);
+    web.dependOn(&b.addInstallDirectory(.{ .source_dir = b.path("web"), .install_dir = .{ .custom = "web" }, .install_subdir = "" }).step);
+    for ([_]struct { []const u8, *std.Build.Step.Compile }{ .{ "dev", kernel }, .{ "ktest", ktest }, .{ "faults", kernel_faults } }) |img| {
+        web.dependOn(&b.addInstallFileWithDir(img[1].getEmittedBin(), .{ .custom = "web" }, b.fmt("images/{s}.elf", .{img[0]})).step);
+    }
+    web.dependOn(&b.addInstallFileWithDir(b.path("system/dev.brix"), .{ .custom = "web" }, "manifests/dev.brix").step);
+    web.dependOn(&b.addInstallFileWithDir(b.path("system/tests/faults.brix"), .{ .custom = "web" }, "manifests/faults.brix").step);
+
+    // The page in headless Chromium (needs Node and Playwright): the kernel
+    // suite, the dev system with grainsh and an owner's answer, and the disk
+    // surviving a reload.
+    const web_test = b.addSystemCommand(&.{ "node", "tools/web_test.mjs" });
+    web_test.addArg("zig-out/web"); // the default prefix (with --prefix, run the script by hand)
+    web_test.step.dependOn(web);
+    web_test.stdio = .inherit;
+    web_test.has_side_effects = true;
+    b.step("web-test", "Test the web page in headless Chromium (Node and Playwright)").dependOn(&web_test.step);
+
     const etest = b.step("emu-test", "Boot the kernel suite and the system on grain-emu");
     etest.dependOn(&emu_agent.step);
 
