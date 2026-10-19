@@ -25,12 +25,17 @@ and a default number of harts.
 
 | Setup | What it is |
 |---|---|
-| The dev system | Steward, the drivers, the key-value store, Tablecloth on a disk, Kumara, the Ledger, consent and Envoy. The disk is kept in the browser. |
+| The dev system | Steward, the drivers, the key-value store, Tablecloth on a disk, Kumara, the Ledger, consent and Envoy, and the desktop (Surf and the shell). The disk is kept in the browser. |
 | The kernel test suite | The kernel with its test program as the root task; it powers off with a summary. |
 | Failure handling | The faults system: a domain that crashes until Steward stops it, and a caller that gets an error instead of hanging. |
 
 **Panels:**
 
+- **Desktop** (setups with a screen): Surf's screen on a canvas. Click it
+  to give it the keyboard (keys go by their place on the keyboard, as a
+  US layout); the pointer follows the mouse. The shell waits in the dock:
+  click it, then type `help` or `whoami`. Click outside the canvas to type
+  elsewhere again.
 - **Console**: the system's own console (the first virtio console). The
   passphrase is typed here, and so are the owner's answers to the agent's
   asks. Typing is hidden unless "show" is ticked.
@@ -48,13 +53,17 @@ and a default number of harts.
 ## How it works
 
 - `emu/wasm.zig` is the module's host: it exports `grain_start`,
-  `grain_run`, `grain_input` and a few more, and imports the console,
-  entropy (`crypto.getRandomValues`), the clock (`performance.now`) and a
-  "the disk was flushed" notice. The machine code is the same as the
+  `grain_run`, `grain_input`, `grain_key`, `grain_pointer`,
+  `grain_button`, `grain_screen` and a few more, and imports the console,
+  entropy (`crypto.getRandomValues`), the clock (`performance.now`), a
+  "the disk was flushed" notice and "this rectangle of the screen
+  changed". The machine code is the same as the
   native emulator's.
 - `web/worker.js` runs the machine in a Web Worker, a slice of about 30 ms
   at a time, so the page stays responsive; while every hart waits it
-  sleeps until the next timer or input.
+  sleeps until the next timer or input. The page hands it the desktop's
+  canvas (`transferControlToOffscreen`); after each slice it copies the
+  changed rectangles from the module's memory with `putImageData`.
 - **The disk** lives in the module's memory while the machine runs. Each
   4 KiB block written is marked; when the guest flushes, the worker saves
   the marked blocks to IndexedDB (database `grain`, one record per block),
@@ -73,8 +82,8 @@ and a default number of harts.
   workstation.
 - The disk is encrypted by Tablecloth, but it is a demonstration: keep
   secrets out of it. Clearing the site's data in the browser deletes it.
-- Not yet: the desktop (virtio-gpu and virtio-input in the emulator), two
-  instances meeting (virtio-net), and an AI agent connected to the page.
+- Not yet: two instances meeting (virtio-net), and an AI agent connected
+  to the page.
 
 ## Tests
 
@@ -82,7 +91,9 @@ and a default number of harts.
 (Node and Playwright; `tools/web_test.mjs`): the kernel suite; the dev
 system on a fresh disk, choosing a passphrase; grainsh listing capabilities
 and using the store; an ask the owner approves in the console; the audit
-chain verified in the page; `bye`; then a reload in the same browser
+chain verified in the page; the desktop (the scene, read through Envoy,
+matches the canvas's pixels; a click on the dock opens the shell; `whoami`
+typed on the canvas runs); `bye`; then a reload in the same browser
 profile, where the disk must still be there (the same identity, a wrong
 passphrase refused, the right one accepted).
 
@@ -91,21 +102,30 @@ passphrase refused, the right one accepted).
 `.github/workflows/web.yml` builds the site with release images on every
 push to `main` (and on pull requests, without publishing), runs
 `zig build test` and the browser test, and keeps the site as a workflow
-artifact. To publish it as well, to a separate public repository:
+artifact. To publish it as well, to a separate public repository (here
+`node777/grain-www`):
 
-1. Create the public repository (say `you/grain-os-web`), empty.
-2. Make a deploy key for it: `ssh-keygen -t ed25519 -N "" -f grain-pages`.
-   Add `grain-pages.pub` to the public repository (Settings → Deploy keys)
-   **with write access**.
-3. In this repository (Settings → Secrets and variables → Actions): a
-   secret `PAGES_DEPLOY_KEY` holding the private key `grain-pages`, and a
-   variable `PAGES_REPO` holding `you/grain-os-web`. Then delete the local
-   key files.
-4. Run the workflow (or push to `main`). It pushes the site to the public
-   repository's `gh-pages` branch.
-5. In the public repository: Settings → Pages → Deploy from a branch →
-   `gh-pages`, `/ (root)`. The site appears at
-   `https://you.github.io/grain-os-web/`.
+1. Make a deploy key: `ssh-keygen -t ed25519 -N "" -C grain-pages -f grain-pages`.
+2. In `node777/grain-www`: Settings → Deploy keys → Add deploy key, paste
+   `grain-pages.pub`, and tick **Allow write access**.
+3. In this repository: Settings → Secrets and variables → Actions. Under
+   *Secrets*, a secret `PAGES_DEPLOY_KEY` holding the private key (the
+   whole of `grain-pages`); under *Variables*, a variable `PAGES_REPO`
+   holding `node777/grain-www`. Then delete both key files.
+
+   With the GitHub CLI, the same from a terminal:
+   ```sh
+   gh repo deploy-key add grain-pages.pub -R node777/grain-www -t grain-pages -w
+   gh secret set PAGES_DEPLOY_KEY -R node777/grain-os < grain-pages
+   gh variable set PAGES_REPO -R node777/grain-os -b node777/grain-www
+   rm grain-pages grain-pages.pub
+   ```
+4. Run the workflow: push to `main`, or Actions → web → Run workflow (once
+   the workflow file is on the default branch). It pushes the site to
+   `node777/grain-www`'s `gh-pages` branch.
+5. In `node777/grain-www`: Settings → Pages → Build and deployment →
+   Deploy from a branch → `gh-pages`, `/ (root)`. The site appears at
+   `https://node777.github.io/grain-www/`.
 
 The deploy key can write to that one repository and nothing else; this
 repository can stay private. What gets published is the built site: the

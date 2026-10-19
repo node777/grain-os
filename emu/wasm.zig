@@ -7,6 +7,7 @@
 //!   host_entropy(ptr, len)        fill with random bytes (crypto.getRandomValues)
 //!   host_now_ms() f64             a monotonic clock (performance.now)
 //!   host_disk_flushed()           the guest flushed its disk: save what changed
+//!   host_display(x, y, w, h)      the GPU showed this rectangle of the screen
 //!
 //! The disk lives in this module's memory; the page loads it from browser
 //! storage before booting and saves the blocks `grain_dirty_next` reports.
@@ -18,6 +19,7 @@ extern "env" fn host_port(port: u32, ptr: [*]const u8, len: usize) void;
 extern "env" fn host_entropy(ptr: [*]u8, len: usize) void;
 extern "env" fn host_now_ms() f64;
 extern "env" fn host_disk_flushed() void;
+extern "env" fn host_display(x: u32, y: u32, w: u32, h: u32) void;
 
 const gpa = std.heap.wasm_allocator;
 
@@ -60,6 +62,10 @@ fn diskWrite(_: ?*anyopaque, offset: u64, bytes: []const u8) bool {
 fn diskFlush(_: ?*anyopaque) bool {
     host_disk_flushed();
     return true;
+}
+
+fn display(_: ?*anyopaque, x: u32, y: u32, w: u32, h: u32) void {
+    host_display(x, y, w, h);
 }
 
 fn nowNs(_: ?*anyopaque) u64 {
@@ -111,13 +117,20 @@ export fn grain_dirty_next(from: i32) i32 {
     return -1;
 }
 
-/// Devices, as bits: 1 entropy, 2 disk (grain_disk first), 4 console,
-/// 8 a second console (Envoy's). They take virtio slots in that order, as
-/// on QEMU. Returns 0, or a negative error.
+/// Devices, as bits: 16 a screen (virtio-gpu), 32 a keyboard, 64 a tablet,
+/// 1 entropy, 2 disk (grain_disk first), 4 console, 8 a second console
+/// (Envoy's). They take virtio slots in that order, as on QEMU. Returns 0,
+/// or a negative error.
 export fn grain_start(image: [*]const u8, image_len: usize, harts: u32, ram_mib: u32, devices: u32, realtime: bool) i32 {
     if (machine != null) return -1;
-    var specs: [4]emu.DeviceSpec = undefined;
+    var specs: [7]emu.DeviceSpec = undefined;
     var n: usize = 0;
+    for ([_]struct { u32, emu.virtio.Kind }{ .{ 16, .gpu }, .{ 32, .keyboard }, .{ 64, .tablet } }) |d| {
+        if (devices & d[0] != 0) {
+            specs[n] = .{ .kind = d[1] };
+            n += 1;
+        }
+    }
     if (devices & 1 != 0) {
         specs[n] = .{ .kind = .rng };
         n += 1;
@@ -150,6 +163,7 @@ export fn grain_start(image: [*]const u8, image_len: usize, harts: u32, ram_mib:
         .disk_write = diskWrite,
         .disk_flush = diskFlush,
         .now_ns = nowNs,
+        .display = display,
     }) catch return -3;
     const entry = m.loadElf(image[0..image_len]) catch {
         m.deinit();
@@ -200,6 +214,48 @@ export fn grain_instructions() f64 {
     var n: u64 = 0;
     for (m.harts) |*h| n += h.instret;
     return @floatFromInt(n);
+}
+
+/// The screen: RGBA pixels, `grain_screen_width` a row (0 without a GPU).
+export fn grain_screen() ?[*]const u8 {
+    const m = machine orelse return null;
+    const s = m.screen() orelse return null;
+    return s.pixels.ptr;
+}
+
+export fn grain_screen_width() u32 {
+    const m = machine orelse return 0;
+    return if (m.screen()) |s| s.width else 0;
+}
+
+export fn grain_screen_height() u32 {
+    const m = machine orelse return 0;
+    return if (m.screen()) |s| s.height else 0;
+}
+
+const ev_syn = 0;
+const ev_key = 1;
+const ev_abs = 3;
+
+/// A key (Linux key code) going down or up.
+export fn grain_key(code: u32, down: bool) bool {
+    const m = machine orelse return false;
+    return m.inputEvent(.keyboard, ev_key, @truncate(code), @intFromBool(down)) and
+        m.inputEvent(.keyboard, ev_syn, 0, 0);
+}
+
+/// The pointer at (x, y), each 0..32767 across the screen.
+export fn grain_pointer(x: u32, y: u32) bool {
+    const m = machine orelse return false;
+    return m.inputEvent(.tablet, ev_abs, 0, x) and m.inputEvent(.tablet, ev_abs, 1, y) and
+        m.inputEvent(.tablet, ev_syn, 0, 0);
+}
+
+/// A pointer button (Linux code: 0x110 left, 0x111 right) going down or up.
+export fn grain_button(code: u32, down: bool) bool {
+    const m = machine orelse return false;
+    return m.inputEvent(.tablet, ev_key, @truncate(code), @intFromBool(down)) and
+        m.inputEvent(.tablet, ev_syn, 0, 0);
 }
 
 /// BLAKE3 of `len` bytes at `ptr`, into 32 bytes at `out` (the page checks

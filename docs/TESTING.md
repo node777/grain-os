@@ -121,13 +121,17 @@ The four layers, from fastest to most real:
    emu-test`, which boots the dev system, the two-boot storage test, a boot
    through Aurora and a real-time agent session on it through the same
    harness and expectations as on QEMU (`--emu PATH`). The emulator supports
-   what those need; `--display`, NVMe and Arm are refused.
+   what those need; `--display` (driven through QEMU's monitor), NVMe and
+   Arm are refused. Its desktop devices have unit tests and are driven by
+   the web test.
 
 3e. **The web page** (`zig build web-test`, `tools/web_test.mjs`; docs/WEB.md):
    headless Chromium loads the built site from a local server and runs the
    kernel suite, then the dev system on a fresh disk (choosing a
    passphrase in the console, grainsh calls, an ask the owner approves, the
-   audit chain verified in the page, `bye`), then reloads and checks the
+   audit chain verified in the page; the desktop: the scene read through
+   Envoy held against the canvas's pixels, the shell opened by a click on
+   the dock and `whoami` typed into it; `bye`), then reloads and checks the
    disk survived (the same identity; a wrong passphrase refused). CI runs it
    on the release build (`.github/workflows/web.yml`).
 

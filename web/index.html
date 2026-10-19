@@ -26,6 +26,11 @@
 </header>
 
 <main>
+  <section id="desktop-panel" class="panel wide" hidden>
+    <h2>Desktop <span class="hint">the screen, keyboard and tablet (virtio-gpu and virtio-input): click the screen to type into it; click elsewhere to stop</span></h2>
+    <div class="screen-box"><canvas id="screen" width="1024" height="768" tabindex="0" aria-label="The desktop"></canvas></div>
+  </section>
+
   <section id="console-panel" class="panel">
     <h2>Console <span class="hint">what the system says to you; the passphrase and your answers to the agent's asks go here</span></h2>
     <pre id="console-out" class="out" aria-live="polite"></pre>

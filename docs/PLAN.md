@@ -256,9 +256,10 @@ Built:
   console, grainsh over Envoy, the system log, the disk kept in browser
   storage, three setups; tested in headless Chromium; the CI workflow that
   builds, tests and publishes it.
-- Next: the public Pages repository and its deploy key (the owner's to
-  create, docs/WEB.md); virtio-gpu and virtio-input in the emulator (the
-  desktop on a canvas).
+- Built: virtio-gpu and virtio-input in the emulator; the desktop on a
+  canvas in the page, with keyboard and pointer.
+- Next: publishing to `node777/grain-www` (its deploy key, and this
+  repository's secret and variable: the owner's to set, docs/WEB.md).
 
 ## Owner decisions
 - **Milestone:** build through Phase 2 before the next review (done); then

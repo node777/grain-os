@@ -1,7 +1,9 @@
 // The machine, in a worker: runs grain-emu (WebAssembly) a slice at a time so
 // the page stays responsive, and keeps the disk in IndexedDB.
 //
-// Messages in:  {type: 'start', config, harts}  {type: 'input', port, text}  {type: 'stop'}
+// Messages in:  {type: 'start', config, harts, canvas?}  {type: 'input', port, text}
+//               {type: 'key', code, down}  {type: 'pointer', x, y}  {type: 'button', code, down}
+//               {type: 'stop'}
 // Messages out: {type: 'output', stream: 'log'|'console'|'envoy', text}
 //               {type: 'status', state, instructions, mips}
 //               {type: 'exit', code}  {type: 'error', message}
@@ -21,6 +23,8 @@ const out = { log: '', console: '', envoy: '' };
 const pending = [[], []]; // input not yet taken by the guest, per console
 let busy = 0; // ms spent running the machine
 let lastStatus = 0;
+let canvas = null; // the desktop: an OffscreenCanvas from the page, when the setup has a screen
+let dirty = null; // the part of the screen the guest flushed since the last draw
 
 const view = (ptr, len) => new Uint8Array(x.memory.buffer, ptr, len);
 
@@ -36,6 +40,10 @@ const imports = {
     },
     host_now_ms: () => performance.now(),
     host_disk_flushed: () => { flushed = true; },
+    host_display: (x0, y0, w, h) => {
+      const r = { x0, y0, x1: x0 + w, y1: y0 + h };
+      dirty = dirty ? { x0: Math.min(dirty.x0, r.x0), y0: Math.min(dirty.y0, r.y0), x1: Math.max(dirty.x1, r.x1), y1: Math.max(dirty.y1, r.y1) } : r;
+    },
   },
 };
 
@@ -88,6 +96,20 @@ function flushOutput() {
   }
 }
 
+// Copy what the guest flushed to the canvas (the screen is RGBA in the module's memory).
+function draw() {
+  if (!dirty || !canvas) return;
+  const w = x.grain_screen_width();
+  const h = x.grain_screen_height();
+  const ptr = x.grain_screen();
+  if (!ptr || w === 0) return;
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; dirty = { x0: 0, y0: 0, x1: w, y1: h }; }
+  const img = new ImageData(new Uint8ClampedArray(x.memory.buffer, ptr, w * h * 4), w, h);
+  const r = dirty;
+  dirty = null;
+  canvas.getContext('2d').putImageData(img, 0, 0, r.x0, r.y0, Math.min(r.x1, w) - r.x0, Math.min(r.y1, h) - r.y0);
+}
+
 function feedInput() {
   for (const port of [0, 1]) {
     const q = pending[port];
@@ -121,6 +143,7 @@ function loop() {
   do { r = x.grain_run(2000000); } while (r === 3 && performance.now() - t0 < 30);
   busy += performance.now() - t0;
   flushOutput();
+  draw();
   feedInput();
   if (flushed && config.disk) saveDirty();
   if (r === 0) {
@@ -154,6 +177,10 @@ async function start(msg) {
   if (devices.includes('disk')) mask |= 2;
   if (devices.includes('console')) mask |= 4;
   if (devices.includes('envoy')) mask |= 8;
+  if (devices.includes('screen')) mask |= 16;
+  if (devices.includes('keyboard')) mask |= 32;
+  if (devices.includes('tablet')) mask |= 64;
+  canvas = msg.canvas || null;
   if (config.disk) {
     db = db || await openDb();
     const ptr = x.grain_disk(config.disk.mib * 1024 * 1024);
@@ -177,6 +204,15 @@ onmessage = (e) => {
   } else if (m.type === 'input' && x) {
     pending[m.port].push(enc.encode(m.text));
     feedInput();
+    kick();
+  } else if (m.type === 'key' && x) {
+    x.grain_key(m.code, m.down);
+    kick();
+  } else if (m.type === 'pointer' && x) {
+    x.grain_pointer(m.x, m.y);
+    kick();
+  } else if (m.type === 'button' && x) {
+    x.grain_button(m.code, m.down);
     kick();
   } else if (m.type === 'stop') {
     stopped = true;

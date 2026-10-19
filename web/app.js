@@ -15,7 +15,7 @@ let current = null;
 
 let blake3 = null;
 WebAssembly.instantiateStreaming(fetch('grain-emu.wasm'), {
-  env: { host_console() {}, host_port() {}, host_entropy() {}, host_now_ms: () => 0, host_disk_flushed() {} },
+  env: { host_console() {}, host_port() {}, host_entropy() {}, host_now_ms: () => 0, host_disk_flushed() {}, host_display() {} },
 }).then(({ instance }) => {
   const x = instance.exports;
   blake3 = (data) => {
@@ -75,6 +75,60 @@ function appendLog(text) {
 
 const shellPrint = (text) => append($('shell-out'), text + '\n');
 
+// --- The desktop: the canvas is drawn by the worker; keys and the pointer go to it.
+
+// KeyboardEvent.code to Linux input key codes (what virtio-input carries).
+const KEYS = { Escape: 1, Minus: 12, Equal: 13, Backspace: 14, Tab: 15, BracketLeft: 26, BracketRight: 27, Enter: 28,
+  ControlLeft: 29, Semicolon: 39, Quote: 40, Backquote: 41, ShiftLeft: 42, Backslash: 43, Comma: 51, Period: 52, Slash: 53,
+  ShiftRight: 54, AltLeft: 56, Space: 57, CapsLock: 58, F11: 87, F12: 88, NumpadEnter: 96, ControlRight: 97, AltRight: 100,
+  Home: 102, ArrowUp: 103, PageUp: 104, ArrowLeft: 105, ArrowRight: 106, End: 107, ArrowDown: 108, PageDown: 109,
+  Insert: 110, Delete: 111, MetaLeft: 125, MetaRight: 126 };
+'1234567890'.split('').forEach((d, i) => { KEYS[`Digit${d}`] = 2 + i; });
+for (const [row, first] of [['QWERTYUIOP', 16], ['ASDFGHJKL', 30], ['ZXCVBNM', 44]]) row.split('').forEach((k, i) => { KEYS[`Key${k}`] = first + i; });
+for (let i = 1; i <= 10; i++) KEYS[`F${i}`] = 58 + i;
+const BUTTONS = [0x110, 0x112, 0x111]; // left, middle, right
+
+const hasScreen = (c) => (c.devices || []).includes('screen');
+
+// A canvas can hand its drawing to one worker only: each boot gets a new one.
+function freshCanvas() {
+  const old = $('screen');
+  const canvas = old.cloneNode(false);
+  old.replaceWith(canvas);
+  const send = (m) => { if (worker) worker.postMessage(m); };
+  const at = (e) => {
+    const r = canvas.getBoundingClientRect();
+    const scale = (v, n) => Math.max(0, Math.min(32767, Math.round((v / n) * 32767)));
+    return { type: 'pointer', x: scale(e.clientX - r.left, r.width), y: scale(e.clientY - r.top, r.height) };
+  };
+  // At most one move per frame reaches the machine.
+  let moved = null;
+  canvas.addEventListener('pointermove', (e) => {
+    if (!moved) requestAnimationFrame(() => { if (moved) send(moved); moved = null; });
+    moved = at(e);
+  });
+  canvas.addEventListener('pointerdown', (e) => {
+    canvas.focus();
+    moved = null;
+    send(at(e)); // where the press is, before the press
+    if (BUTTONS[e.button] !== undefined) send({ type: 'button', code: BUTTONS[e.button], down: true });
+    e.preventDefault();
+  });
+  canvas.addEventListener('pointerup', (e) => {
+    if (BUTTONS[e.button] !== undefined) send({ type: 'button', code: BUTTONS[e.button], down: false });
+  });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  const key = (down) => (e) => {
+    const code = KEYS[e.code];
+    if (code === undefined) return;
+    send({ type: 'key', code, down });
+    e.preventDefault();
+  };
+  canvas.addEventListener('keydown', key(true));
+  canvas.addEventListener('keyup', key(false));
+  return canvas;
+}
+
 // --- Setup
 
 function fillConfigs() {
@@ -94,6 +148,7 @@ async function showConfig() {
   $('about').textContent = c.about;
   $('harts').value = String(params.get('harts') || c.harts);
   const devices = c.devices || [];
+  $('desktop-panel').hidden = !devices.includes('screen');
   $('console-panel').hidden = !devices.includes('console');
   $('shell-panel').hidden = !devices.includes('envoy');
   $('forget').hidden = !c.disk;
@@ -142,7 +197,13 @@ function boot() {
     }
   };
   document.body.dataset.exit = '';
-  worker.postMessage({ type: 'start', config: current, harts: Number($('harts').value) });
+  const start = { type: 'start', config: current, harts: Number($('harts').value) };
+  if (hasScreen(current)) {
+    start.canvas = freshCanvas().transferControlToOffscreen();
+    worker.postMessage(start, [start.canvas]);
+  } else {
+    worker.postMessage(start);
+  }
   setRunning(true);
   setStatus(`Booting ${current.name}…`);
   ($('console-panel').hidden ? $('shell-in') : $('console-in')).focus();

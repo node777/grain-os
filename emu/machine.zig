@@ -52,6 +52,9 @@ pub const Config = struct {
     disk_bytes: u64 = 0,
     /// Time from the host's clock (real time) instead of instruction counts.
     realtime: bool = false,
+    /// A GPU's screen.
+    display_width: u32 = 1024,
+    display_height: u32 = 768,
 };
 
 /// What the machine needs from where it runs.
@@ -68,6 +71,10 @@ pub const Host = struct {
     disk_flush: *const fn (ctx: ?*anyopaque) bool = noFlush,
     /// Nanoseconds since the machine started, for real-time machines.
     now_ns: *const fn (ctx: ?*anyopaque) u64 = noClock,
+    /// The GPU showed a rectangle of the screen (see `Machine.screen`).
+    display: *const fn (ctx: ?*anyopaque, x: u32, y: u32, w: u32, h: u32) void = noDisplay,
+
+    fn noDisplay(_: ?*anyopaque, _: u32, _: u32, _: u32, _: u32) void {}
 
     fn noPort(_: ?*anyopaque, _: u8, _: []const u8) void {}
     fn noEntropy(_: ?*anyopaque, out: []u8) void {
@@ -147,12 +154,19 @@ pub const Machine = struct {
                 consoles += 1;
             }
             if (spec.kind == .blk) d.sectors = config.disk_bytes / 512;
+            if (spec.kind == .gpu) {
+                d.screen_width = config.display_width;
+                d.screen_height = config.display_height;
+                d.screen = try gpa.alloc(u8, @as(usize, config.display_width) * config.display_height * 4);
+                @memset(d.screen, 0);
+            }
             m.slots[virtio_slots - 1 - k] = d;
         }
         return m;
     }
 
     pub fn deinit(m: *Machine) void {
+        for (&m.slots) |*slot| if (slot.*) |*d| if (d.screen.len > 0) m.gpa.free(d.screen);
         m.gpa.free(m.ram);
         m.gpa.free(m.harts);
         for (m.code) |p| if (p) |page| m.gpa.destroy(page);
@@ -429,7 +443,30 @@ pub const Machine = struct {
             .disk_read = m.host.disk_read,
             .disk_write = m.host.disk_write,
             .disk_flush = m.host.disk_flush,
+            .display = m.host.display,
         };
+    }
+
+    pub const Screen = struct { pixels: []const u8, width: u32, height: u32 };
+
+    /// The GPU's screen: RGBA, `width` pixels a row. Null without a GPU.
+    pub fn screen(m: *Machine) ?Screen {
+        for (&m.slots) |*slot| if (slot.*) |*d| if (d.kind == .gpu) {
+            return .{ .pixels = d.screen, .width = d.screen_width, .height = d.screen_height };
+        };
+        return null;
+    }
+
+    /// An input event (Linux type, code, value) for the keyboard or the
+    /// tablet. Returns false if the device is absent or full.
+    pub fn inputEvent(m: *Machine, which: virtio.Kind, kind: u16, code: u16, value: u32) bool {
+        for (&m.slots) |*slot| if (slot.*) |*d| if (d.kind == which) {
+            if (!d.event(kind, code, value)) return false;
+            d.deliver(m.dma());
+            m.updateIrqs();
+            return true;
+        };
+        return false;
     }
 
     /// Bytes from outside for virtio console `port`. Returns how many it
@@ -554,6 +591,11 @@ pub const Machine = struct {
         }
         if (inRange(pa, virtio_base, virtio_slots * 0x1000)) {
             const d = m.slotAt(pa) orelse return true;
+            const off = (pa - virtio_base) % 0x1000;
+            if (off >= 0x100) {
+                for (0..size) |i| d.configWrite(off - 0x100 + i, @truncate(v >> @intCast(8 * i)));
+                return true;
+            }
             if (size != 4) return true;
             if (d.write((pa - virtio_base) % 0x1000, @truncate(v))) |queue| d.process(queue, m.dma(), m.deviceIo());
             m.updateIrqs();

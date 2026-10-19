@@ -2,8 +2,10 @@
 //   node tools/web_test.mjs zig-out/web
 // Serves the directory, then: boots the kernel suite; boots the dev system on
 // a fresh disk (choosing a passphrase), uses grainsh through Envoy (caps, a
-// store call, an ask the owner answers in the console, the audit chain), says
-// bye; reloads in the same browser profile and checks the disk persisted (the
+// store call, an ask the owner answers in the console, the audit chain), opens
+// the shell from the desktop's dock with a click on the canvas and types a
+// command there (holding the scene, read through Envoy, against the pixels),
+// says bye; reloads in the same browser profile and checks the disk persisted (the
 // same identity, a wrong passphrase refused, the right one accepted).
 import http from 'node:http';
 import fs from 'node:fs';
@@ -43,6 +45,40 @@ async function shell(page, line, needle) {
   if (needle) await until(page, 'shell-out', needle, 120_000);
   await page.waitForFunction(() => !document.getElementById('shell-in').disabled, null, { timeout: 120_000 });
 }
+// One grainsh call; its JSON result.
+async function call(page, line) {
+  const before = (await text(page, 'shell-out')).length;
+  await shell(page, `call ${line}`);
+  const out = (await text(page, 'shell-out')).slice(before).trim().split('\n');
+  return JSON.parse(out[out.length - 1]);
+}
+async function elements(page, window) {
+  const n = (await call(page, `scene.window index=${window}`)).elements;
+  const all = [];
+  for (let i = 0; i < n; i++) all.push({ ...(await call(page, `scene.element window=${window} index=${i}`)), index: i });
+  return all;
+}
+// The canvas as the browser shows it, read back as RGBA at the machine's resolution.
+async function screenshot(page) {
+  const png = (await page.locator('#screen').screenshot()).toString('base64');
+  return page.evaluate(async (data) => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${data}`;
+    await img.decode();
+    const c = new OffscreenCanvas(1024, 768);
+    const g = c.getContext('2d');
+    g.imageSmoothingEnabled = false;
+    g.drawImage(img, 0, 0, 1024, 768);
+    return Array.from(g.getImageData(0, 0, 1024, 768).data);
+  }, png);
+}
+const pixel = (img, x, y) => { const i = (y * 1024 + x) * 4; return (img[i] << 16) | (img[i + 1] << 8) | img[i + 2]; };
+async function clickScreen(page, x, y) {
+  await page.locator('#screen').scrollIntoViewIfNeeded();
+  const box = await page.locator('#screen').boundingBox();
+  await page.mouse.click(box.x + (x + 0.5) * box.width / 1024, box.y + (y + 0.5) * box.height / 768);
+}
+
 async function typeConsole(page, line) {
   await page.fill('#console-in', line);
   await page.press('#console-in', 'Enter');
@@ -63,7 +99,7 @@ try {
   }
 
   // 2. The dev system on a fresh disk, then 3. again on the same disk.
-  const ctx = await browser.newContext();
+  const ctx = await browser.newContext({ viewport: { width: 1400, height: 1100 } });
   {
     const page = await ctx.newPage();
     page.on('pageerror', (e) => check('no_page_errors', false, e.message));
@@ -92,6 +128,37 @@ try {
     await shell(page, 'call entropy.get', '"bytes"');
     await shell(page, 'log', 'hash chain:');
     check('audit_chain_verified_in_page', (await text(page, 'shell-out')).includes('hash chain: verified'), await text(page, 'shell-out'));
+
+    // The desktop: what the scene says is on the screen is in the canvas.
+    await until(page, 'log-out', 'surf_ready');
+    check('desktop_up', /surf_ready domain=surf width=1024 height=768 screen=virtio keyboard=true pointer=true/.test(await text(page, 'log-out')), await text(page, 'log-out'));
+    const desk = await elements(page, 0);
+    const launcher = desk.find((e) => e.role === 'launcher' && e.text === 'shell');
+    check('launcher_in_scene', launcher !== undefined, JSON.stringify(desk));
+    await page.waitForTimeout(500); // the last frame drawn
+    const img = await screenshot(page);
+    const fills = desk.filter((e) => (e.kind === 'fill' || e.kind === 'panel') && e.w > 8 && e.h > 8 && !e.text);
+    const bad = [];
+    let compared = 0;
+    for (const e of fills) {
+      const px = e.x + Math.max(1, e.w >> 3), py = e.y + (e.h >> 1);
+      const top = await call(page, `scene.at x=${px} y=${py}`);
+      if (top.window !== 0 || top.element !== e.index) continue;
+      compared++;
+      if (pixel(img, px, py) !== e.color) bad.push([e.index, e.role, e.color.toString(16), pixel(img, px, py).toString(16)]);
+    }
+    check('canvas_matches_scene', compared > 0 && bad.length === 0, JSON.stringify({ compared, bad }));
+    // Open the shell from the dock, as the owner would, and type into it.
+    const shown = (await text(page, 'log-out')).length;
+    await clickScreen(page, launcher.x + (launcher.w >> 1), launcher.y + (launcher.h >> 1));
+    await page.waitForFunction((n) => /surf_window_shown [^@]*title=shell/.test(document.getElementById('log-out').textContent.slice(n)), shown, { timeout: 120_000, polling: 200 });
+    check('shell_opened', (await call(page, 'scene.window index=1')).shown === true);
+    await page.locator('#screen').focus(); // the grainsh call took the keyboard
+    await page.keyboard.type('whoami');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => /shell_ran [^@]*command=whoami ok=true/.test(document.getElementById('log-out').textContent), null, { timeout: 120_000, polling: 200 });
+    check('typed_on_canvas', true);
+
     await shell(page, 'bye', '"actions"');
     await page.waitForFunction(() => document.body.dataset.exit === '0', null, { timeout: LONG, polling: 500 });
     check('dev_powers_off_cleanly', (await text(page, 'log-out')).includes('summary') && !(await text(page, 'log-out')).includes('failed=1'));

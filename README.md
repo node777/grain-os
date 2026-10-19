@@ -13,7 +13,8 @@ RISC-V is the primary target; aarch64 runs the kernel; x86_64 follows.
 
 > Now: **Grain in a browser.** `grain-emu` (`emu/`) is an emulated RISC-V
 > machine that boots the same images as QEMU; compiled to WebAssembly, it
-> runs the system in a web page (`zig build web`, docs/WEB.md).
+> runs the system in a web page, desktop included (`zig build web`,
+> docs/WEB.md).
 >
 > Status: **Phase 9: hardening.** Every way into the kernel and every
 > parser of untrusted input is fuzzed (Zig's coverage-guided fuzzer, and a

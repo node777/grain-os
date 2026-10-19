@@ -9,12 +9,15 @@
 //!     --console-socket P    a console device, served as a Unix socket at P;
 //!                           the machine waits for a client before starting
 //!     --envoy-socket P      a second console device at P (no waiting)
+//!     --display             a screen (virtio-gpu, 1024x768), a keyboard and a tablet
+//!     --screenshot FILE     at the end, write the screen to FILE (PPM)
 //!     --realtime            time from the host's clock (default: instruction counts)
 //!     --max-seconds S       stop after S seconds of guest time
 //!     --stats               print instructions run and the rate, on stderr
 //!
-//! Devices take virtio slots in the order rng, disk, console, envoy, as the
-//! QEMU harness creates them, so manifests find them at the same instances.
+//! Devices take virtio slots in the order screen, keyboard, tablet, rng,
+//! disk, console, envoy, as the QEMU harness creates them, so manifests find
+//! them at the same instances.
 //! The serial console goes to stdout. The exit status is the guest's (the
 //! test finisher's code; 0 on power-off), 124 if --max-seconds ran out,
 //! 125 if every hart idles with nothing left to wake it.
@@ -24,7 +27,8 @@ const emu = @import("machine.zig");
 
 const usage =
     \\usage: grain-emu [--harts N] [--ram MIB] [--rng FILE|seed:N] [--disk FILE]
-    \\                 [--console-socket PATH] [--envoy-socket PATH] [--realtime]
+    \\                 [--console-socket PATH] [--envoy-socket PATH] [--display]
+    \\                 [--screenshot FILE] [--realtime]
     \\                 [--max-seconds S] KERNEL
     \\
 ;
@@ -198,6 +202,8 @@ pub fn main(init: std.process.Init) !u8 {
     var console_path: ?[]const u8 = null;
     var envoy_path: ?[]const u8 = null;
     var stats = false;
+    var display = false;
+    var screenshot: ?[]const u8 = null;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const a = args[i];
@@ -224,6 +230,11 @@ pub fn main(init: std.process.Init) !u8 {
         } else if (std.mem.eql(u8, a, "--envoy-socket") and has_value) {
             i += 1;
             envoy_path = args[i];
+        } else if (std.mem.eql(u8, a, "--display")) {
+            display = true;
+        } else if (std.mem.eql(u8, a, "--screenshot") and has_value) {
+            i += 1;
+            screenshot = args[i];
         } else if (std.mem.eql(u8, a, "--stats")) {
             stats = true;
         } else if (std.mem.eql(u8, a, "--realtime")) {
@@ -247,8 +258,14 @@ pub fn main(init: std.process.Init) !u8 {
     var host: Host = .{ .io = io, .out = &stdout.interface, .start = std.Io.Timestamp.now(io, .awake) };
     defer stdout.interface.flush() catch {};
 
-    var specs: [4]emu.DeviceSpec = undefined;
+    var specs: [7]emu.DeviceSpec = undefined;
     var nspecs: usize = 0;
+    if (display) {
+        for ([_]emu.virtio.Kind{ .gpu, .keyboard, .tablet }) |k| {
+            specs[nspecs] = .{ .kind = k };
+            nspecs += 1;
+        }
+    }
     if (rng_arg) |r| {
         if (std.mem.startsWith(u8, r, "seed:")) {
             host.rng_state = std.fmt.parseInt(u64, r[5..], 0) catch return bad(r);
@@ -339,6 +356,9 @@ pub fn main(init: std.process.Init) !u8 {
         }
     };
     stdout.interface.flush() catch {};
+    if (screenshot) |shot| if (m.screen()) |scr| {
+        writePpm(io, shot, scr) catch |e| std.debug.print("grain-emu: cannot write {s} ({s})\n", .{ shot, @errorName(e) });
+    };
     if (stats) {
         var retired: u64 = 0;
         for (m.harts) |*h| retired += h.instret;
@@ -348,6 +368,23 @@ pub fn main(init: std.process.Init) !u8 {
         });
     }
     return status;
+}
+
+/// The screen as a binary PPM (RGB).
+fn writePpm(io: std.Io, path: []const u8, scr: emu.Machine.Screen) !void {
+    const gpa = std.heap.page_allocator;
+    const header = try std.fmt.allocPrint(gpa, "P6\n{d} {d}\n255\n", .{ scr.width, scr.height });
+    defer gpa.free(header);
+    const rgb = try gpa.alloc(u8, header.len + @as(usize, scr.width) * scr.height * 3);
+    defer gpa.free(rgb);
+    @memcpy(rgb[0..header.len], header);
+    var o: usize = header.len;
+    var p: usize = 0;
+    while (p < scr.pixels.len) : (p += 4) {
+        @memcpy(rgb[o..][0..3], scr.pixels[p..][0..3]);
+        o += 3;
+    }
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = rgb });
 }
 
 fn bad(arg: []const u8) u8 {

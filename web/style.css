@@ -69,5 +69,8 @@ summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 .ev { color: var(--event); font-weight: 600; }
 .warn { color: var(--warn); }
 .typed { color: var(--muted); }
+.screen-box { display: flex; justify-content: center; }
+#screen { width: 100%; max-width: 1024px; height: auto; aspect-ratio: 4 / 3; background: #000; border-radius: 6px; outline: none; cursor: none; }
+#screen:focus { box-shadow: 0 0 0 2px var(--accent); }
 footer { margin-top: 14px; font-size: 13px; }
 code { font-family: var(--mono); font-size: 0.92em; }

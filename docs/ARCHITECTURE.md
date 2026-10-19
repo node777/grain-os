@@ -1057,7 +1057,7 @@ does not, first of all a browser. It is QEMU's RISC-V `virt` board as far
 as Caravan uses it, written in Zig: harts that execute RV64IMAC (with
 Zicsr, Zifencei and Zihintpause) in U and S mode with Sv39 paging, a PLIC,
 a 16550 UART, the SiFive test finisher, and virtio-mmio devices (entropy,
-block, console). The memory map, interrupt lines, device-tree layout and
+block, console, and for the desktop a 2D GPU, a keyboard and a tablet). The memory map, interrupt lines, device-tree layout and
 virtio slot order are QEMU's, so the same images boot on both unchanged:
 the kernel, Aurora, the dev system and its manifests.
 
@@ -1102,13 +1102,28 @@ for corner cases (division by zero and overflow, high multiplies, word
 shifts), atomics, traps and `sret`, Sv39 permissions with SUM, interrupt
 masking, and code overwritten after it ran.
 
+**The desktop.** The GPU is virtio-gpu's 2D subset as Surf's driver uses
+it: one scanout (1024x768 by default), resources whose backing is guest
+memory in pieces, and transfers that convert Surf's B8G8R8X8 to RGBA in a
+screen buffer the machine keeps; a flush tells the host which rectangle
+changed (`Host.display`). The keyboard and the tablet are virtio-input
+devices that answer the config queries Surf makes (name, event bits,
+absolute axis ranges 0..32767) and pass on Linux input events the host
+hands in (`Machine.inputEvent`). `grain-emu --display --screenshot FILE`
+boots to the desktop and writes the screen as a PPM.
+
 **In a browser** (docs/WEB.md). `emu/wasm.zig` is a second host for the
-same machine: a WebAssembly module (63 KB) that imports the console,
-entropy (`crypto.getRandomValues`), a clock and a flush notice, and exports
-start, run, input and BLAKE3. The page (`web/`) runs it in a Web Worker,
+same machine: a WebAssembly module (72 KB) that imports the console,
+entropy (`crypto.getRandomValues`), a clock, a flush notice and the
+display's changed rectangles, and exports start, run, console input, key
+and pointer events, the screen buffer and BLAKE3. The page (`web/`) runs it in a Web Worker,
 30 ms at a time, in real time; the disk lives in the module's memory and
 its written blocks go to IndexedDB when the guest flushes. grainsh is
-ported to the page and speaks Envoy over the second console. The same
+ported to the page and speaks Envoy over the second console. The desktop
+is a canvas the worker owns (`OffscreenCanvas`): after each slice it copies
+the rectangles the guest flushed straight from the module's memory, and
+the page turns keys (by physical position) and the pointer into input
+events. The same
 kernel suite retires exactly the same instruction count under WebAssembly
 as natively; in Chromium it runs at 120-140 MIPS, and the release-built
 dev system reaches its passphrase prompt in about 1.5 s. `zig build
@@ -1120,9 +1135,10 @@ passphrase instead of yielding in a loop, so a system waiting for its
 owner costs a few million instructions a second rather than all of them
 (on QEMU too).
 
-- *Planned:* virtio-gpu and virtio-input (the desktop on a canvas),
-  virtio-net (two instances in one page), and an agent connected to the
-  page.
+- *Planned:* virtio-net (two instances in one page), and an agent
+  connected to the page. The QEMU harness's display scripts drive QEMU's
+  monitor, so `--emu` still refuses `--display`; the browser test drives
+  the emulated desktop instead.
 
 ## 4. Where Grain departs from its inspirations
 
