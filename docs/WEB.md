@@ -100,7 +100,7 @@ passphrase refused, the right one accepted).
 ## Publishing it (GitHub Pages)
 
 `.github/workflows/web.yml` builds the site with release images on every
-push to `main` (and on pull requests, without publishing), runs
+push and pull request, publishing only from the default branch, runs
 `zig build test` and the browser test, and keeps the site as a workflow
 artifact. To publish it as well, to a separate public repository (here
 `node777/grain-www`):
@@ -120,9 +120,8 @@ artifact. To publish it as well, to a separate public repository (here
    gh variable set PAGES_REPO -R node777/grain-os -b node777/grain-www
    rm grain-pages grain-pages.pub
    ```
-4. Run the workflow: push to `main`, or Actions → web → Run workflow (once
-   the workflow file is on the default branch). It pushes the site to
-   `node777/grain-www`'s `gh-pages` branch.
+4. Push to the default branch, or Actions → web → Run workflow. The
+   workflow pushes the site to `node777/grain-www`'s `gh-pages` branch.
 5. In `node777/grain-www`: Settings → Pages → Build and deployment →
    Deploy from a branch → `gh-pages`, `/ (root)`. The site appears at
    `https://node777.github.io/grain-www/`.
