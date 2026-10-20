@@ -49,6 +49,22 @@
     </form>
   </section>
 
+  <section id="agent-panel" class="panel wide" hidden>
+    <h2>Agent <span class="hint">Claude, acting on the system through Envoy with the authority the manifest leases it; asks are answered in the Console</span></h2>
+    <form id="agent-settings" class="agent-settings">
+      <label>API key <input id="agent-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…" aria-label="Anthropic API key"></label>
+      <label class="show"><input id="agent-remember" type="checkbox"> remember on this device</label>
+      <label>Model <select id="agent-model"></select></label>
+      <button id="agent-clear" type="button">New conversation</button>
+    </form>
+    <p class="hint agent-note">Messages go from this browser to <code>api.anthropic.com</code> with your key and are billed to your account; nothing else leaves the page. The key stays in this tab unless "remember" is ticked (then in this browser's storage for this site).</p>
+    <div id="agent-out" class="out chat" aria-live="polite"></div>
+    <form id="agent-form" class="line">
+      <textarea id="agent-in" rows="2" spellcheck="true" placeholder="Ask the agent to do something: “what can you do here?”, “store 42 under key 7”, “what is on the screen?”" aria-label="Message to the agent"></textarea>
+      <button id="agent-send" type="submit">Send</button>
+    </form>
+  </section>
+
   <section id="log-panel" class="panel wide">
     <h2>System log <span class="hint">the serial console: <code>@caravan</code> from the kernel, <code>@grain</code> from user space</span>
       <label class="show"><input id="log-records" type="checkbox"> records only</label></h2>

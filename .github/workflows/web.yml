@@ -10,7 +10,7 @@ name: web
 
 on:
   push:
-  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -45,8 +45,8 @@ jobs:
 
   publish:
     needs: build
-    # Only what is on the default branch is published.
-    if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch && vars.PAGES_REPO != ''
+    # Only main is published (a manual run on another branch builds and tests).
+    if: github.ref_name == 'main' && vars.PAGES_REPO != ''
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4

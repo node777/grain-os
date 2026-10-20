@@ -1123,7 +1123,10 @@ ported to the page and speaks Envoy over the second console. The desktop
 is a canvas the worker owns (`OffscreenCanvas`): after each slice it copies
 the rectangles the guest flushed straight from the module's memory, and
 the page turns keys (by physical position) and the pointer into input
-events. The same
+events. An agent panel (`web/agent.js`) runs Claude in the page with the
+owner's API key: the tools are the MCP bridge's (every leased method, and
+the Envoy verbs), so the agent in the browser holds exactly the authority
+an agent connected from outside would. The same
 kernel suite retires exactly the same instruction count under WebAssembly
 as natively; in Chromium it runs at 120-140 MIPS, and the release-built
 dev system reaches its passphrase prompt in about 1.5 s. `zig build
@@ -1135,8 +1138,7 @@ passphrase instead of yielding in a loop, so a system waiting for its
 owner costs a few million instructions a second rather than all of them
 (on QEMU too).
 
-- *Planned:* virtio-net (two instances in one page), and an agent
-  connected to the page. The QEMU harness's display scripts drive QEMU's
+- *Planned:* virtio-net (two instances in one page). The QEMU harness's display scripts drive QEMU's
   monitor, so `--emu` still refuses `--display`; the browser test drives
   the emulated desktop instead.
 

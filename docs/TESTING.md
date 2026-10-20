@@ -129,7 +129,10 @@ The four layers, from fastest to most real:
    headless Chromium loads the built site from a local server and runs the
    kernel suite, then the dev system on a fresh disk (choosing a
    passphrase in the console, grainsh calls, an ask the owner approves, the
-   audit chain verified in the page; the desktop: the scene read through
+   audit chain verified in the page; the agent panel against a stand-in
+   for the Messages API (Playwright answers its requests with scripted
+   streams: a tool call that must reach the store through Envoy, then an
+   answer); the desktop: the scene read through
    Envoy held against the canvas's pixels, the shell opened by a click on
    the dock and `whoami` typed into it; `bye`), then reloads and checks the
    disk survived (the same identity; a wrong passphrase refused). CI runs it

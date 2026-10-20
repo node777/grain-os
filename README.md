@@ -13,8 +13,8 @@ RISC-V is the primary target; aarch64 runs the kernel; x86_64 follows.
 
 > Now: **Grain in a browser.** `grain-emu` (`emu/`) is an emulated RISC-V
 > machine that boots the same images as QEMU; compiled to WebAssembly, it
-> runs the system in a web page, desktop included (`zig build web`,
-> docs/WEB.md).
+> runs the system in a web page, desktop included, with an agent panel
+> where Claude acts on it through Envoy (`zig build web`, docs/WEB.md).
 >
 > Status: **Phase 9: hardening.** Every way into the kernel and every
 > parser of untrusted input is fuzzed (Zig's coverage-guided fuzzer, and a
@@ -162,4 +162,5 @@ tools/harness.py             boots QEMU, parses records, drives agent scripts, s
 tools/envoy.py               Envoy client library, grainsh, MCP bridge
 tools/agent_session.py       the agent session run by qemu-test
 tools/setup.sh               toolchain installer
+tools/vendor_sdk.sh          rebuilds web/vendor/anthropic-sdk.mjs (the agent panel's SDK, pinned)
 ```

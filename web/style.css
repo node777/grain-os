@@ -72,5 +72,21 @@ summary { cursor: pointer; font-weight: 600; font-size: 14px; }
 .screen-box { display: flex; justify-content: center; }
 #screen { width: 100%; max-width: 1024px; height: auto; aspect-ratio: 4 / 3; background: #000; border-radius: 6px; outline: none; cursor: none; }
 #screen:focus { box-shadow: 0 0 0 2px var(--accent); }
+.agent-settings { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 6px; }
+.agent-settings label { display: inline-flex; gap: 6px; align-items: center; }
+#agent-key { width: 22em; max-width: 100%; font-family: var(--mono); }
+.agent-note { margin: 0 0 8px; }
+.chat { height: 380px; white-space: normal; font-family: inherit; font-size: 14px; }
+.chat .msg { margin: 0 0 10px; white-space: pre-wrap; }
+.chat .owner { color: var(--accent); font-weight: 600; }
+.chat .owner::before { content: "you  "; color: var(--muted); font-weight: 400; font-family: var(--mono); font-size: 12px; }
+.chat .claude::before { content: "agent  "; color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.chat details { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
+.chat details summary { font-weight: 400; font-size: 13px; }
+.chat .tool { font: 12.5px/1.4 var(--mono); margin: 0 0 6px; padding: 4px 8px; border-left: 3px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat .tool.call { border-color: var(--event); }
+.chat .tool.result { border-color: var(--record); color: var(--muted); }
+.chat .tool.result.bad, .chat .error { border-color: var(--warn); color: var(--warn); }
+#agent-in { flex: 1; resize: vertical; min-height: 2.6em; font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
 footer { margin-top: 14px; font-size: 13px; }
 code { font-family: var(--mono); font-size: 0.92em; }

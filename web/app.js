@@ -1,6 +1,7 @@
 // The page: picks a setup, starts the machine in a worker, and connects the
 // console, grainsh and the system log to it.
 import * as grainsh from './grainsh.js';
+import { Agent, MODELS } from './agent.js';
 
 const $ = (id) => document.getElementById(id);
 const configs = await (await fetch('configs.json')).json();
@@ -10,6 +11,7 @@ let worker = null;
 let envoy = null;
 let shellOpen = false;
 let current = null;
+let agent = null;
 
 // --- BLAKE3, for checking Envoy's audit chain: the same module, its own instance.
 
@@ -129,6 +131,83 @@ function freshCanvas() {
   return canvas;
 }
 
+// --- The agent
+
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { /* storage may be off */ } },
+};
+
+function chatAdd(cls, text, tag = 'div') {
+  const out = $('agent-out');
+  const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 60;
+  const el = document.createElement(tag);
+  el.className = cls;
+  if (text !== undefined) el.textContent = text;
+  out.appendChild(el);
+  if (atBottom) out.scrollTop = out.scrollHeight;
+  return el;
+}
+
+const short = (text, n = 600) => (text.length > n ? `${text.slice(0, n)}…` : text);
+
+function agentUi() {
+  let reply = null; // the agent's text, as it streams
+  const scroll = () => { const out = $('agent-out'); if (out.scrollHeight - out.scrollTop - out.clientHeight < 120) out.scrollTop = out.scrollHeight; };
+  return {
+    text(delta) { if (!reply) reply = chatAdd('msg claude', ''); reply.textContent += delta; scroll(); },
+    thinking(text) {
+      const d = chatAdd('', undefined, 'details');
+      const s = document.createElement('summary');
+      s.textContent = 'thinking';
+      d.append(s, text);
+      reply = null;
+    },
+    toolCall(name, input) { chatAdd('tool call', `→ ${name} ${JSON.stringify(input)}`); reply = null; },
+    toolResult(name, text, error) { chatAdd(`tool result${error ? ' bad' : ''}`, `← ${short(text)}`); },
+    turnEnd() { reply = null; agentIdle(); },
+    error(message) { reply = null; chatAdd('msg error', message); agentIdle(); },
+  };
+}
+
+function agentIdle() {
+  $('agent-send').textContent = 'Send';
+  $('agent-in').disabled = false;
+}
+
+function fillAgent() {
+  for (const m of MODELS) $('agent-model').add(new Option(m.name, m.id));
+  const key = store.get('grain.agent.key');
+  if (key) { $('agent-key').value = key; $('agent-remember').checked = true; }
+  $('agent-model').value = store.get('grain.agent.model') || MODELS[0].id;
+}
+
+$('agent-remember').addEventListener('change', (e) => store.set('grain.agent.key', e.target.checked && $('agent-key').value ? $('agent-key').value : null));
+$('agent-key').addEventListener('change', () => { if ($('agent-remember').checked) store.set('grain.agent.key', $('agent-key').value || null); });
+$('agent-model').addEventListener('change', (e) => store.set('grain.agent.model', e.target.value));
+$('agent-settings').addEventListener('submit', (e) => e.preventDefault());
+$('agent-clear').addEventListener('click', () => {
+  if (agent) agent.reset();
+  $('agent-out').textContent = '';
+});
+$('agent-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  if (agent && agent.busy) { agent.stop(); return; }
+  const text = $('agent-in').value.trim();
+  if (!text) return;
+  if (!agent || !shellOpen) { chatAdd('msg error', 'Boot a setup with Envoy first (the dev system).'); return; }
+  const key = $('agent-key').value.trim();
+  if (!key) { chatAdd('msg error', 'Enter an Anthropic API key first.'); $('agent-key').focus(); return; }
+  $('agent-in').value = '';
+  chatAdd('msg owner', text);
+  $('agent-send').textContent = 'Stop';
+  $('agent-in').disabled = true;
+  agent.send(text, { key, model: $('agent-model').value });
+});
+$('agent-in').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('agent-form').requestSubmit(); }
+});
+
 // --- Setup
 
 function fillConfigs() {
@@ -151,6 +230,7 @@ async function showConfig() {
   $('desktop-panel').hidden = !devices.includes('screen');
   $('console-panel').hidden = !devices.includes('console');
   $('shell-panel').hidden = !devices.includes('envoy');
+  $('agent-panel').hidden = !devices.includes('envoy');
   $('forget').hidden = !c.disk;
   $('manifest').textContent = c.manifest ? await (await fetch(c.manifest)).text() : '(this setup has no manifest: it is the kernel and its test program)';
 }
@@ -175,6 +255,10 @@ function boot() {
   logRest = '';
   worker = new Worker('worker.js');
   envoy = new grainsh.Envoy((text) => worker.postMessage({ type: 'input', port: 1, text }));
+  if (agent) agent.stop();
+  agent = new Agent(envoy, agentUi());
+  $('agent-out').textContent = '';
+  agentIdle();
   shellOpen = (current.devices || []).includes('envoy');
   if (shellOpen) shellPrint("grainsh: talking to Envoy. 'help' lists commands.");
   worker.onmessage = (e) => {
@@ -264,5 +348,6 @@ $('shell-in').addEventListener('keydown', (e) => {
   if (e.key === 'ArrowDown' && historyAt < history.length) { historyAt++; e.target.value = history[historyAt] || ''; e.preventDefault(); }
 });
 
+fillAgent();
 fillConfigs();
 if (params.get('autostart') === '1') boot();

@@ -43,6 +43,16 @@ and a default number of harts.
   (`web/grainsh.js`). It talks Envoy's JSON-lines protocol over the second
   virtio console, with the same commands and output, and checks the audit
   chain with BLAKE3 from the WebAssembly module.
+- **Agent**: Claude, with your Anthropic API key, acting on the system
+  through Envoy. Its tools are what the MCP bridge of `tools/envoy.py`
+  offers: each method of each capability the manifest leases to the agent
+  (`store__put`, `scene__windows`, ...) and the Envoy verbs (`grain_ask`,
+  `grain_plan`, `grain_apply`, `grain_undo`, `grain_observe`). It has that
+  authority and no more: it cannot type at the console or on the desktop,
+  and when it asks for an askable capability, you answer in the Console.
+  Everything it does is in its audit log (`log` in grainsh) and the Ledger.
+  Choose the model (Claude Opus 5.5 by default, Sonnet 5.5 or Haiku 5.5);
+  its thinking is shown folded, its tool calls and their results in full.
 - **System log**: the serial console, with `@caravan`/`@grain` records
   highlighted ("records only" hides the rest).
 - **The manifest** of the setup, as written in Brix.
@@ -59,6 +69,15 @@ and a default number of harts.
   "the disk was flushed" notice and "this rectangle of the screen
   changed". The machine code is the same as the
   native emulator's.
+- `web/agent.js` is the agent: the Anthropic TypeScript SDK
+  (`web/vendor/anthropic-sdk.mjs`, a pinned copy bundled by
+  `tools/vendor_sdk.sh`, so no third party's script runs in a page that
+  holds the key), a streaming tool loop, tools rebuilt from `discover` and
+  `describe` for every message (grants and leases change), and each tool
+  input checked against its schema before it reaches Envoy. Server-side
+  fallback is on for Opus and Sonnet, so a declined request is retried on
+  the model Anthropic recommends; an exchange that fails part-way is
+  dropped from the conversation (what its tools did stays in the log).
 - `web/worker.js` runs the machine in a Web Worker, a slice of about 30 ms
   at a time, so the page stays responsive; while every hart waits it
   sleeps until the next timer or input. The page hands it the desktop's
@@ -77,13 +96,18 @@ and a default number of harts.
 ## What it is, and is not
 
 - Everything runs in the tab. Nothing is sent anywhere: there is no
-  network device, and the page makes no requests after loading its files.
+  network device, and the page makes no requests after loading its files,
+  except the agent panel's, when you use it: those go from your browser to
+  `api.anthropic.com` with your key (billed to your account), carrying
+  your messages and what the tools return. The key stays in the tab unless
+  you tick "remember", which keeps it in this site's storage in your
+  browser; anyone who can run script on the page could read it there, so
+  on a shared computer leave it unticked.
 - The browser's sandbox is the outer boundary, stronger than QEMU's on a
   workstation.
 - The disk is encrypted by Tablecloth, but it is a demonstration: keep
   secrets out of it. Clearing the site's data in the browser deletes it.
-- Not yet: two instances meeting (virtio-net), and an AI agent connected
-  to the page.
+- Not yet: two instances meeting (virtio-net).
 
 ## Tests
 
@@ -91,7 +115,10 @@ and a default number of harts.
 (Node and Playwright; `tools/web_test.mjs`): the kernel suite; the dev
 system on a fresh disk, choosing a passphrase; grainsh listing capabilities
 and using the store; an ask the owner approves in the console; the audit
-chain verified in the page; the desktop (the scene, read through Envoy,
+chain verified in the page; the agent panel against a stand-in for the
+API (its request carries the key, the model and the tools; the tool call
+it asks for changes the store through Envoy; the thinking block goes back
+unchanged); the desktop (the scene, read through Envoy,
 matches the canvas's pixels; a click on the dock opens the shell; `whoami`
 typed on the canvas runs); `bye`; then a reload in the same browser
 profile, where the disk must still be there (the same identity, a wrong
@@ -100,7 +127,8 @@ passphrase refused, the right one accepted).
 ## Publishing it (GitHub Pages)
 
 `.github/workflows/web.yml` builds the site with release images on every
-push and pull request, publishing only from the default branch, runs
+push to `main` (or when run by hand from Actions, on any branch; only
+`main` is published), runs
 `zig build test` and the browser test, and keeps the site as a workflow
 artifact. To publish it as well, to a separate public repository (here
 `node777/grain-www`):
@@ -120,7 +148,7 @@ artifact. To publish it as well, to a separate public repository (here
    gh variable set PAGES_REPO -R node777/grain-os -b node777/grain-www
    rm grain-pages grain-pages.pub
    ```
-4. Push to the default branch, or Actions → web → Run workflow. The
+4. Push to `main`, or Actions → web → Run workflow on `main`. The
    workflow pushes the site to `node777/grain-www`'s `gh-pages` branch.
 5. In `node777/grain-www`: Settings → Pages → Build and deployment →
    Deploy from a branch → `gh-pages`, `/ (root)`. The site appears at

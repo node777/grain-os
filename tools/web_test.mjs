@@ -2,7 +2,8 @@
 //   node tools/web_test.mjs zig-out/web
 // Serves the directory, then: boots the kernel suite; boots the dev system on
 // a fresh disk (choosing a passphrase), uses grainsh through Envoy (caps, a
-// store call, an ask the owner answers in the console, the audit chain), opens
+// store call, an ask the owner answers in the console, the audit chain), has
+// the agent panel act through Envoy (against a stand-in for the API), opens
 // the shell from the desktop's dock with a click on the canvas and types a
 // command there (holding the scene, read through Envoy, against the pixels),
 // says bye; reloads in the same browser profile and checks the disk persisted (the
@@ -17,7 +18,7 @@ const root = path.resolve(process.argv[2] || 'zig-out/web');
 const require = createRequire(import.meta.url);
 const { chromium } = require(path.join(execSync('npm root -g').toString().trim(), 'playwright'));
 
-const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.wasm': 'application/wasm', '.brix': 'text/plain', '.elf': 'application/octet-stream' };
+const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.wasm': 'application/wasm', '.brix': 'text/plain', '.elf': 'application/octet-stream' };
 const server = http.createServer((req, res) => {
   const p = path.join(root, decodeURIComponent(new URL(req.url, 'http://x').pathname));
   const file = p.endsWith('/') ? path.join(p, 'index.html') : p;
@@ -79,6 +80,41 @@ async function clickScreen(page, x, y) {
   await page.mouse.click(box.x + (x + 0.5) * box.width / 1024, box.y + (y + 0.5) * box.height / 768);
 }
 
+// A stand-in for the Messages API: each call answers with the next scripted
+// turn, as a server-sent event stream.
+function sseTurn(blocks, stop) {
+  const ev = [{ type: 'message_start', message: { id: 'msg_test', type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } }];
+  blocks.forEach((b, index) => {
+    if (b.type === 'thinking') {
+      ev.push({ type: 'content_block_start', index, content_block: { type: 'thinking', thinking: '', signature: '' } });
+      ev.push({ type: 'content_block_delta', index, delta: { type: 'thinking_delta', thinking: b.thinking } });
+      ev.push({ type: 'content_block_delta', index, delta: { type: 'signature_delta', signature: b.signature } });
+    } else if (b.type === 'text') {
+      ev.push({ type: 'content_block_start', index, content_block: { type: 'text', text: '' } });
+      ev.push({ type: 'content_block_delta', index, delta: { type: 'text_delta', text: b.text } });
+    } else {
+      ev.push({ type: 'content_block_start', index, content_block: { type: 'tool_use', id: b.id, name: b.name, input: {} } });
+      ev.push({ type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(b.input) } });
+    }
+    ev.push({ type: 'content_block_stop', index });
+  });
+  ev.push({ type: 'message_delta', delta: { stop_reason: stop, stop_sequence: null }, usage: { output_tokens: 5 } });
+  ev.push({ type: 'message_stop' });
+  return ev.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join('');
+}
+async function fakeApi(page, turns) {
+  const seen = [];
+  const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': 'POST, OPTIONS' };
+  await page.route('https://api.anthropic.com/**', async (route) => {
+    const req = route.request();
+    if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
+    seen.push({ headers: req.headers(), body: req.postDataJSON() });
+    const turn = turns[Math.min(seen.length - 1, turns.length - 1)];
+    await route.fulfill({ status: 200, headers: { ...cors, 'content-type': 'text/event-stream' }, body: turn });
+  });
+  return seen;
+}
+
 async function typeConsole(page, line) {
   await page.fill('#console-in', line);
   await page.press('#console-in', 'Enter');
@@ -128,6 +164,31 @@ try {
     await shell(page, 'call entropy.get', '"bytes"');
     await shell(page, 'log', 'hash chain:');
     check('audit_chain_verified_in_page', (await text(page, 'shell-out')).includes('hash chain: verified'), await text(page, 'shell-out'));
+
+    // The agent panel, against a stand-in for the API: it asks for a store
+    // call, Envoy runs it, and the result goes back with the thinking block
+    // unchanged.
+    const api = await fakeApi(page, [
+      sseTurn([{ type: 'thinking', thinking: 'The owner wants 7 stored under key 3.', signature: 'sig-1' },
+        { type: 'tool_use', id: 'toolu_1', name: 'store__put', input: { key: 3, value: 7 } }], 'tool_use'),
+      sseTurn([{ type: 'text', text: 'Stored 7 under key 3.' }], 'end_turn'),
+    ]);
+    await page.fill('#agent-key', 'sk-ant-test-key');
+    await page.fill('#agent-in', 'store 7 under key 3');
+    await page.press('#agent-in', 'Enter');
+    await until(page, 'agent-out', 'Stored 7 under key 3.', 120_000);
+    const first = api[0], second = api[1];
+    check('agent_request', first && first.headers['x-api-key'] === 'sk-ant-test-key' && first.headers['anthropic-dangerous-direct-browser-access'] === 'true'
+      && first.body.model === 'claude-opus-5-5' && first.body.tools.some((t) => t.name === 'store__put') && first.body.tools.some((t) => t.name === 'grain_ask')
+      && !first.body.tools.some((t) => t.name === 'grain_bye'), JSON.stringify(first && { headers: first.headers, model: first.body.model, tools: first.body.tools.map((t) => t.name) }));
+    const back = second && second.body.messages;
+    const toolResult = back && back[2] && back[2].content[0];
+    check('agent_tool_ran', api.length === 2 && toolResult.tool_use_id === 'toolu_1' && !toolResult.is_error && toolResult.content.includes('had'), JSON.stringify(back));
+    check('agent_thinking_kept', back && back[1].content[0].type === 'thinking' && back[1].content[0].signature === 'sig-1', JSON.stringify(back && back[1]));
+    await shell(page, 'call store.get key=3', '"value":7');
+    check('agent_changed_the_store', true);
+    check('agent_shown', (await text(page, 'agent-out')).includes('→ store__put'), await text(page, 'agent-out'));
+    await page.unroute('https://api.anthropic.com/**');
 
     // The desktop: what the scene says is on the screen is in the canvas.
     await until(page, 'log-out', 'surf_ready');

@@ -246,7 +246,7 @@ Built:
   work was done in instructions retired under QEMU and in a callgrind
   profile of the core); a hardware root for measured boot.
 
-## Next: Grain in a browser (in progress)
+## Grain in a browser (done, except networking)
 - A static site (GitHub Pages) where the system runs in the page, with a
   choice of manifests and machine settings, built and published by CI.
 - Built: `grain-emu` (`emu/`, ARCHITECTURE §3.10), an emulated RISC-V
@@ -258,8 +258,65 @@ Built:
   builds, tests and publishes it.
 - Built: virtio-gpu and virtio-input in the emulator; the desktop on a
   canvas in the page, with keyboard and pointer.
-- Next: publishing to `node777/grain-www` (its deploy key, and this
-  repository's secret and variable: the owner's to set, docs/WEB.md).
+- Built: publishing to `node777/grain-www` from `main`
+  (https://node777.github.io/grain-www/); an agent panel in the page
+  (Claude with the owner's API key, acting through Envoy with the tools of
+  the MCP bridge).
+- Later: virtio-net in the emulator, once the networking layer is chosen
+  (the owner has a separate project in mind for it).
+
+## Next: the platform (proposed, in this order)
+Five aims from the owner: applications and drivers that ship with Grain,
+performance with benchmarks, more boot images, more commands and a
+language of Grain's own, and a better web interface. The order puts the
+measuring first (so every later step is measured), the cheap visible
+wins next, and the language before the applications (so each application
+is born scriptable).
+
+1. **Benchmarks that gate.** Under `-icount` and on grain-emu, instruction
+   counts are exact and repeatable, so a regression is a number, not a
+   noise band. A `zig build bench-check` that runs a suite (boot to ready
+   per system, IPC round trip, a Tablecloth commit, an Envoy call, a full
+   Surf frame, a key press to its pixels) and compares with committed
+   baselines; CI fails on a rise beyond a small tolerance, and a deliberate
+   change updates the baseline in the same commit. A benchmark setup in
+   the page shows the same numbers and the browser's MIPS.
+2. **The web interface.** Full screen for the desktop (the Fullscreen API,
+   optional pointer lock, integer scaling), panels as a side drawer around
+   it; the screen size as a setting; keys by layout as well as position;
+   paste into the console; export and import of a disk; machine snapshots
+   (RAM and devices to IndexedDB: resume where you left off); the agent's
+   token use and cost shown per conversation.
+3. **A command language.** Grain's shells speak typed values, not text, so
+   the language is pipelines over capabilities: `store.get key=3 | .value`
+   style calls, variables, and `plan { ... }` / `apply { ... }` blocks that
+   go to Envoy as one all-or-nothing step list. One implementation in Zig
+   (`grain/lib/`), used by the desktop shell, by grainsh (in the page,
+   compiled to WebAssembly, replacing the JavaScript port) and by the
+   agent (a `grain_run` tool: a script is one audited plan). Brix stays the
+   manifest language; the two share the lexer and the value types. New
+   shell commands come as capabilities first (`ps`, `ls`, `ledger`,
+   `generations`, `passwd`), so the agent and scripts get them too.
+4. **Applications, and what they need.** First the frame: an application
+   declared in a manifest gets a dock entry, a window, its own subtree of
+   the content store and nothing else; the toolkit grows text fields,
+   lists and scrolling; Surf gets a clipboard. Every application publishes
+   a protocol, so the language and the agent drive it as data. Then: notes
+   (text in Tablecloth), files (browse and share the content store),
+   settings (passphrase, generations and rollback, leases granted), a
+   Ledger viewer (the audit trail, verified), and a system monitor
+   (domains, restarts, budgets; needs a read-only Steward protocol).
+   Drivers that serve them: the virt board's real-time clock (goldfish
+   RTC: wall-clock time for the clock and the Ledger), and virtio-sound
+   (with a Web Audio host in the page) when an application needs sound.
+5. **Boot images.** Each application lands with a manifest that shows it
+   off; beside them: a minimal system (console and shell), a headless
+   agent server (store, Envoy, no desktop), a locked-down agent sandbox
+   (short leases, everything askable), and a chaos system (domains that
+   fail on a schedule). Brix gains overlays, so a variant is a few lines on
+   a base. In the page: edit a manifest and boot it, with Brix and
+   grain-pack compiled to WebAssembly and the program ELFs shipped
+   alongside.
 
 ## Owner decisions
 - **Milestone:** build through Phase 2 before the next review (done); then
