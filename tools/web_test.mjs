@@ -80,6 +80,21 @@ async function screenshot(page) {
   }, png);
 }
 const pixel = (img, x, y) => { const i = (y * 1024 + x) * 4; return (img[i] << 16) | (img[i + 1] << 8) | img[i + 2]; };
+async function toScreen(page, x, y) {
+  const box = await page.locator('#screen').boundingBox();
+  return [box.x + (x + 0.5) * box.width / 1024, box.y + (y + 0.5) * box.height / 768];
+}
+/// Press at one screen point, move to another, release: a drag.
+async function dragScreen(page, x0, y0, x1, y1) {
+  await page.locator('#screen').scrollIntoViewIfNeeded();
+  await page.mouse.move(...await toScreen(page, x0, y0));
+  await page.mouse.down();
+  await page.mouse.move(...await toScreen(page, x1, y1), { steps: 6 });
+  await page.mouse.up();
+}
+const logSince = (page, n, re) => page.waitForFunction(([n, src]) => new RegExp(src).test(document.getElementById('log-out').textContent.slice(n)), [n, re.source], { timeout: 120_000, polling: 200 });
+const logLength = async (page) => (await text(page, 'log-out')).length;
+
 async function clickScreen(page, x, y) {
   await page.locator('#screen').scrollIntoViewIfNeeded();
   const box = await page.locator('#screen').boundingBox();
@@ -237,6 +252,34 @@ try {
     await page.waitForFunction(() => /shell_ran [^@]*command=echo ok=true/.test(document.getElementById('log-out').textContent), null, { timeout: 120_000, polling: 200 });
     const echoed = (await elements(page, 1)).some((e) => e.text === 'Pasted, with CAPS & symbols!');
     check('pasted_on_canvas', echoed);
+
+    // Windows: drag by the title bar, resize from the corner, minimize, close.
+    let f = await call(page, 'scene.window index=1');
+    let n = await logLength(page);
+    await dragScreen(page, f.x + 60, f.y + 12, f.x + 160, f.y + 62);
+    await logSince(page, n, /surf_window_moved [^@]*owner=shell/);
+    let g = await call(page, 'scene.window index=1');
+    check('window_dragged', g.x === f.x + 100 && g.y === f.y + 50 && g.w === f.w, JSON.stringify([f, g]));
+    n = await logLength(page);
+    await dragScreen(page, g.x + g.w - 5, g.y + g.h - 5, g.x + g.w + 75, g.y + g.h + 35);
+    await logSince(page, n, /surf_window_resized [^@]*owner=shell width=720 height=444/);
+    await logSince(page, n, /surf_presented [^@]*owner=shell/);
+    f = await call(page, 'scene.window index=1');
+    const prompt = (await elements(page, 1)).find((e) => e.role === 'prompt');
+    check('window_resized', f.w === g.w + 80 && f.h === g.h + 40 && prompt && prompt.y > f.y + f.h - 60, JSON.stringify([g, f, prompt]));
+    n = await logLength(page);
+    await clickScreen(page, f.x + f.w - 6 - 4 - 16 - 6 - 8, f.y + 15); // "-"
+    await logSince(page, n, /surf_window_hidden [^@]*title=shell/);
+    check('window_minimized', !(await call(page, 'scene.window index=1')).shown);
+    n = await logLength(page);
+    await clickScreen(page, launcher.x + (launcher.w >> 1), launcher.y + (launcher.h >> 1));
+    await logSince(page, n, /surf_window_shown [^@]*title=shell/);
+    f = await call(page, 'scene.window index=1');
+    check('window_restored_in_place', f.shown && f.x === g.x && f.w === g.w + 80, JSON.stringify(f));
+    n = await logLength(page);
+    await clickScreen(page, f.x + f.w - 6 - 4 - 8, f.y + 15); // "x"
+    await logSince(page, n, /surf_window_closed [^@]*title=shell/);
+    check('window_closed', !(await call(page, 'scene.window index=1')).shown);
 
     await shell(page, 'bye', '"actions"');
     await page.waitForFunction(() => document.body.dataset.exit === '0', null, { timeout: LONG, polling: 500 });

@@ -988,7 +988,8 @@ system cannot use it. Both are *planned*, with real boards.
 > **Status (Phase 6, Phase 8):** built: `grain/programs/surf` (the compositor),
 > `grain/programs/shell` (the first application), `surf.v1` and `scene.v1`,
 > `grain/lib/paint.zig` with the Grain Mono font, and the desktop QEMU test;
-> in Phase 8, the same desktop on a PCI framebuffer with USB input.
+> in Phase 8, the same desktop on a PCI framebuffer with USB input; after
+> Phase 9, window management and the toolkit (`grain/lib/ui.zig`).
 > Surf and Brushstroke are the owner's names (GLOSSARY.md).
 
 ![The desktop in the QEMU test: the shell, opened from the dock, has answered whoami](images/desktop.png)
@@ -1024,12 +1025,42 @@ devices raise one signal bound to Surf's thread
 comes first, with no polling and no second thread. Keys go to the focused
 window; a click focuses and raises a window and is reported with the
 element under the pointer; a launcher opens its window, or puts it away if
-it is in front. Each window has an event queue; an application gives Surf
-a send-only signal (`listen`, an `idl.Cap`) and Surf raises it when events
-wait, so Surf never blocks on an application.
+it is in front. Each window has an event queue (128 events: Surf runs above
+its applications, so a burst of keys lands there before the app reads any);
+an application gives Surf a send-only signal (`listen`, an `idl.Cap`) and
+Surf raises it when events wait, so Surf never blocks on an application.
 
-**The shell** opens a hidden window, appears in the dock, and when opened
-takes typed commands (`whoami`, `store`, `ledger`, `get`/`put`, `echo`,
+**Windows.** The frame around a window is Surf's, not the application's:
+the owner drags it by the title bar (kept below the top bar and on the
+screen), puts it away with "-" (the app hears `hidden`; the dock brings it
+back where it was), closes it with "x" (the app hears `close`, and may tidy
+up), and moves between windows with Alt+Tab. An application that gives
+`open` a minimum size gets a grip in the corner: the owner resizes it, and
+on release the app hears `resized` with its new size and lays itself out
+again (until then its strokes are clipped to the growing frame). Pointer
+motion is taken a batch at a time, so a drag repaints once per batch, not
+once per motion event. Up to twelve windows, 192 strokes each; the dock's
+launchers shrink to fit. The frame's buttons are not strokes (they are
+Surf's own and the same on every window), so the scene does not list them.
+
+**The toolkit** (`grain/lib/ui.zig`). Immediate-mode widgets drawn as
+strokes: headings, labels, label/value pairs, buttons, text fields (Enter
+submits, Tab moves on, a secret field shows dots), tabs, toggles, meters
+and tables (select by click or Up/Down, page with Page Up/Down or the
+buttons under them). An application describes its window from its own
+state on every frame; each event runs that description twice, first with
+the event and nothing drawn (the widgets consume it and the state
+changes), then to draw. Ids are handed out in order, so the frame on the
+screen and the next pass agree on which widget a click meant. Every
+widget's strokes carry a role (`button`, `input`, `row`, `cell`, `tab`,
+...), so the scene reads a window the way the owner sees it. `ui.zig` draws
+through a sink and knows nothing of IPC (its tests run on the host);
+`surf.App` (in `proto/surf.zig`) is the window and the loop: open, listen,
+an optional periodic tick (an alarm on the same signal, badge 2), events
+to the widgets, one redraw for everything that came.
+
+**The shell** is built on the toolkit. It opens a hidden, resizable window,
+appears in the dock, and when opened takes typed commands (`whoami`, `store`, `ledger`, `get`/`put`, `echo`,
 `clear`) over the services the manifest gives it; its answers are `answer`
 strokes anyone with the scene can read. Without a screen Surf is skipped
 (its devices are optional) and the shell rests.
@@ -1040,12 +1071,15 @@ screendumps, typed keys (paced like a person: the device lends the guest
 sixteen event buffers and drops a burst beyond them, as hardware does) and
 pointer clicks. The session finds the shell's launcher in the scene, clicks
 it, types `whoami`, finds the identity among the shell's answers, clicks
-its `clear` button, puts it away from the dock, and checks scene against
-screen at each step. The same session runs again on `--display=native`:
+its `clear` button, drags the window by its title bar and resizes it from
+the corner (the shell's prompt must follow the new bottom edge), puts it
+away from the dock, and checks scene against screen at each step. The web
+test (docs/WEB.md) does the same moves on the emulated machine, and
+minimizes and closes the window too. The same session runs again on `--display=native`:
 bochs-display, and the keyboard and tablet on USB behind xHCI.
 
-- *Planned:* moving and resizing windows, a hardware cursor, more than one
-  window per application, shared-memory surfaces for applications that do
+- *Planned:* a hardware cursor, more than one window per application, live
+  relayout while resizing, shared-memory surfaces for applications that do
   need pixels (images, video), Rishi as the shell's name if the owner wants
   it, and a GPU display path on hardware (the PCI framebuffer of Phase 8
   is enough for QEMU and firmware-set modes, not for a real GPU).

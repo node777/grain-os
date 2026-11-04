@@ -133,7 +133,10 @@ API (its request carries the key, the model and the tools; the tool call
 it asks for changes the store through Envoy; the thinking block goes back
 unchanged); the desktop (the scene, read through Envoy,
 matches the canvas's pixels; a click on the dock opens the shell; `whoami`
-typed on the canvas runs; text pasted onto it arrives as keystrokes);
+typed on the canvas runs; text pasted onto it arrives as keystrokes; the
+window dragged by its title bar, resized from the corner (the shell lays
+itself out again), minimized, brought back from the dock where it was, and
+closed);
 `bye`; then a reload in the same browser profile, where the disk
 must still be there (the same identity, a wrong passphrase refused, the
 right one accepted); the disk exported, forgotten and imported again (the

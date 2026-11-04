@@ -91,6 +91,23 @@ def run(s, check, screen):
     check("frame_where_scene_says", screen.pixel(img, frame["x"] + frame["w"] // 2, frame["y"] + 2) in (0xfaf4ea, 0xf3ece2),
           hex(screen.pixel(img, frame["x"] + frame["w"] // 2, frame["y"] + 2)))
 
+    # Surf's frame: drag the window by its title bar, then resize it from
+    # the corner; the shell lays itself out again for its new size.
+    m = screen.mark()
+    screen.drag(frame["x"] + 60, frame["y"] + 12, frame["x"] + 140, frame["y"] + 52)
+    screen.wait("surf_window_moved owner=shell", after=m)
+    moved = s.call("scene", "window", index=1)
+    check("window_dragged", moved["x"] == frame["x"] + 80 and moved["y"] == frame["y"] + 40, (frame, moved))
+    m = screen.mark()
+    screen.drag(moved["x"] + moved["w"] - 5, moved["y"] + moved["h"] - 5, moved["x"] + moved["w"] + 55, moved["y"] + moved["h"] + 25)
+    screen.wait("surf_window_resized owner=shell", after=m)
+    screen.wait("surf_presented owner=shell", after=m)
+    grown = s.call("scene", "window", index=1)
+    prompt = next(e for e in elements(s, 1) if e["role"] == "prompt")
+    check("window_resized", grown["w"] == moved["w"] + 60 and grown["h"] == moved["h"] + 30
+          and prompt["y"] > grown["y"] + grown["h"] - 60, (moved, grown, prompt))
+    scene_matches_screen(s, screen, check, "resized_matches_scene")
+
     # Clicking an element reaches the application: clear the page.
     clear = next(e for e in elements(s, 1) if e["role"] == "button" and e["text"] == "clear")
     m = screen.mark()

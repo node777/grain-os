@@ -326,9 +326,8 @@ is born scriptable).
   host applications and connect with other people's instances (inspired by
   Urbit); sharing between people first.
 - **Compatibility:** none. No Linux guest and no POSIX layer.
+- **License:** MIT (`LICENSE`, chosen by the owner).
 
 ## Still open
 - **Assurance:** simulation and testing (planned), or aiming for formal
   verification (needs a different process and much more time).
-- **License:** none is chosen yet; it should be settled before outside
-  contributions.

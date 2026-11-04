@@ -243,6 +243,15 @@ class Screen:
         for down in (True, False):
             self._qmp("input-send-event", events=[{"type": "btn", "data": {"down": down, "button": "left"}}])
 
+    def drag(self, x0, y0, x1, y1, steps=6):
+        """Press at one point, move to another in steps, release."""
+        self.move(x0, y0)
+        self._qmp("input-send-event", events=[{"type": "btn", "data": {"down": True, "button": "left"}}])
+        for k in range(1, steps + 1):
+            time.sleep(0.03)
+            self.move(x0 + (x1 - x0) * k // steps, y0 + (y1 - y0) * k // steps)
+        self._qmp("input-send-event", events=[{"type": "btn", "data": {"down": False, "button": "left"}}])
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

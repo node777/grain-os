@@ -796,6 +796,7 @@ pub fn build(b: *std.Build) void {
     const tablecloth_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/tablecloth.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(tablecloth_tests).step);
     const paint_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/paint.zig"), .target = host, .optimize = optimize }) });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/ui.zig"), .target = host, .optimize = optimize }) })).step);
     test_step.dependOn(&b.addRunArtifact(paint_tests).step);
     const input_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/virtio_input.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(input_tests).step);
