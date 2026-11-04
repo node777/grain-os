@@ -7,10 +7,12 @@
 // the shell from the desktop's dock with a click on the canvas and types a
 // command there (holding the scene, read through Envoy, against the pixels),
 // says bye; reloads in the same browser profile and checks the disk persisted (the
-// same identity, a wrong passphrase refused, the right one accepted).
+// same identity, a wrong passphrase refused, the right one accepted); exports the
+// disk, forgets it and imports it back; boots with a larger screen.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { execSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 
@@ -40,7 +42,11 @@ const text = (page, id) => page.$eval(`#${id}`, (e) => e.textContent);
 async function until(page, id, needle, timeout = LONG) {
   await page.waitForFunction(([i, n]) => document.getElementById(i).textContent.includes(n), [id, needle], { timeout, polling: 200 });
 }
+async function tab(page, name) {
+  if (await page.$eval(`#${name}-panel`, (e) => e.hidden)) await page.click(`#tab-${name}`);
+}
 async function shell(page, line, needle) {
+  await tab(page, 'shell');
   await page.fill('#shell-in', line);
   await page.press('#shell-in', 'Enter');
   if (needle) await until(page, 'shell-out', needle, 120_000);
@@ -116,6 +122,7 @@ async function fakeApi(page, turns) {
 }
 
 async function typeConsole(page, line) {
+  await tab(page, 'console');
   await page.fill('#console-in', line);
   await page.press('#console-in', 'Enter');
 }
@@ -135,11 +142,11 @@ try {
   }
 
   // 2. The dev system on a fresh disk, then 3. again on the same disk.
-  const ctx = await browser.newContext({ viewport: { width: 1400, height: 1100 } });
+  const ctx = await browser.newContext({ viewport: { width: 1600, height: 1100 }, acceptDownloads: true });
   {
     const page = await ctx.newPage();
     page.on('pageerror', (e) => check('no_page_errors', false, e.message));
-    await page.goto(`${base}?config=dev&autostart=1`);
+    await page.goto(`${base}?config=dev&autostart=1&scale=actual`);
     await until(page, 'console-out', 'Choose a passphrase');
     await typeConsole(page, 'open sesame');
     await until(page, 'console-out', 'once more');
@@ -154,6 +161,7 @@ try {
     await shell(page, 'call store.get key=9', '"value":90');
     check('grainsh_store', true);
     // An ask: the owner answers yes in the console.
+    await tab(page, 'shell');
     await page.fill('#shell-in', 'ask entropy for a nonce');
     await page.press('#shell-in', 'Enter');
     await until(page, 'console-out', "asks for 'entropy'", 120_000);
@@ -173,6 +181,7 @@ try {
         { type: 'tool_use', id: 'toolu_1', name: 'store__put', input: { key: 3, value: 7 } }], 'tool_use'),
       sseTurn([{ type: 'text', text: 'Stored 7 under key 3.' }], 'end_turn'),
     ]);
+    await tab(page, 'agent');
     await page.fill('#agent-key', 'sk-ant-test-key');
     await page.fill('#agent-in', 'store 7 under key 3');
     await page.press('#agent-in', 'Enter');
@@ -219,6 +228,15 @@ try {
     await page.keyboard.press('Enter');
     await page.waitForFunction(() => /shell_ran [^@]*command=whoami ok=true/.test(document.getElementById('log-out').textContent), null, { timeout: 120_000, polling: 200 });
     check('typed_on_canvas', true);
+    // Text pasted onto the desktop arrives as keystrokes, shifted ones too.
+    await page.$eval('#screen', (c) => {
+      const data = new DataTransfer();
+      data.setData('text/plain', 'echo Pasted, with CAPS & symbols!\n');
+      c.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    });
+    await page.waitForFunction(() => /shell_ran [^@]*command=echo ok=true/.test(document.getElementById('log-out').textContent), null, { timeout: 120_000, polling: 200 });
+    const echoed = (await elements(page, 1)).some((e) => e.text === 'Pasted, with CAPS & symbols!');
+    check('pasted_on_canvas', echoed);
 
     await shell(page, 'bye', '"actions"');
     await page.waitForFunction(() => document.body.dataset.exit === '0', null, { timeout: LONG, polling: 500 });
@@ -242,9 +260,45 @@ try {
     await shell(page, 'call store.get key=9', '"value"');
     await shell(page, 'bye', '"actions"');
     await page.waitForFunction(() => document.body.dataset.exit === '0', null, { timeout: LONG, polling: 500 });
+
+    // 4. Export the disk, forget it, import it back: the same instance.
+    page.on('dialog', (d) => d.accept());
+    await page.click('#open-settings');
+    const [download] = await Promise.all([page.waitForEvent('download'), page.click('#disk-export')]);
+    const saved = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'grain-web-')), 'grain-dev.img');
+    await download.saveAs(saved);
+    const bytes = fs.readFileSync(saved);
+    check('disk_exported', download.suggestedFilename() === 'grain-dev.img' && bytes.length === 64 * 1024 * 1024 && bytes.some((b) => b !== 0), bytes.length);
+    await page.click('#forget');
+    await page.setInputFiles('#disk-file', saved);
+    await until(page, 'status', 'Imported grain-dev.img', 60_000);
+    fs.rmSync(path.dirname(saved), { recursive: true, force: true });
+    await page.click('#settings button.primary');
+    await page.close();
+  }
+  {
+    const page = await ctx.newPage();
+    await page.goto(`${base}?config=dev&autostart=1`);
+    await until(page, 'console-out', 'passphrase');
+    await typeConsole(page, 'open sesame');
+    await until(page, 'log-out', 'kumara_ready');
+    check('disk_imported_same_identity', (await text(page, 'log-out')).includes(`name=${identity} `), await text(page, 'log-out'));
+    await shell(page, 'bye', '"actions"');
+    await page.waitForFunction(() => document.body.dataset.exit === '0', null, { timeout: LONG, polling: 500 });
     await page.close();
   }
   await ctx.close();
+
+  // 5. A larger screen, chosen in the settings (here by the URL).
+  {
+    const big = await browser.newContext({ viewport: { width: 1600, height: 1100 } });
+    const page = await big.newPage();
+    page.on('pageerror', (e) => check('no_page_errors', false, e.message));
+    await page.goto(`${base}?config=dev&autostart=1&size=1280x800`);
+    await until(page, 'log-out', 'surf_ready');
+    check('screen_1280x800', /surf_ready domain=surf width=1280 height=800 /.test(await text(page, 'log-out')), await text(page, 'log-out'));
+    await big.close();
+  }
 } catch (e) {
   check('exception', false, e.stack || e);
 } finally {

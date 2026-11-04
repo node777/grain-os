@@ -117,6 +117,18 @@ export fn grain_dirty_next(from: i32) i32 {
     return -1;
 }
 
+var display_width: u32 = 1024;
+var display_height: u32 = 768;
+
+/// The screen's size for the next grain_start (default 1024x768). Returns
+/// false for a size no screen can be.
+export fn grain_display_size(width: u32, height: u32) bool {
+    if (width < 320 or height < 240 or width > 4096 or height > 4096) return false;
+    display_width = width;
+    display_height = height;
+    return true;
+}
+
 /// Devices, as bits: 16 a screen (virtio-gpu), 32 a keyboard, 64 a tablet,
 /// 1 entropy, 2 disk (grain_disk first), 4 console, 8 a second console
 /// (Envoy's). They take virtio slots in that order, as on QEMU. Returns 0,
@@ -155,6 +167,8 @@ export fn grain_start(image: [*]const u8, image_len: usize, harts: u32, ram_mib:
         .devices = specs[0..n],
         .disk_bytes = disk.len,
         .realtime = realtime,
+        .display_width = display_width,
+        .display_height = display_height,
     }, .{
         .console = console,
         .port_write = portWrite,

@@ -1,8 +1,9 @@
 // The machine, in a worker: runs grain-emu (WebAssembly) a slice at a time so
 // the page stays responsive, and keeps the disk in IndexedDB.
 //
-// Messages in:  {type: 'start', config, harts, canvas?}  {type: 'input', port, text}
+// Messages in:  {type: 'start', config, harts, width, height, canvas?}  {type: 'input', port, text}
 //               {type: 'key', code, down}  {type: 'pointer', x, y}  {type: 'button', code, down}
+//               {type: 'type', keys: [[code, shift], ...]}
 //               {type: 'stop'}
 // Messages out: {type: 'output', stream: 'log'|'console'|'envoy', text}
 //               {type: 'status', state, instructions, mips}
@@ -25,6 +26,8 @@ let busy = 0; // ms spent running the machine
 let lastStatus = 0;
 let canvas = null; // the desktop: an OffscreenCanvas from the page, when the setup has a screen
 let dirty = null; // the part of the screen the guest flushed since the last draw
+const typing = []; // keys still to press for text being typed: [code, shift]
+const SHIFT = 42;
 
 const view = (ptr, len) => new Uint8Array(x.memory.buffer, ptr, len);
 
@@ -110,6 +113,18 @@ function draw() {
   canvas.getContext('2d').putImageData(img, 0, 0, r.x0, r.y0, Math.min(r.x1, w) - r.x0, Math.min(r.y1, h) - r.y0);
 }
 
+// Press a few typed keys per slice: the queues on the way (the keyboard's,
+// then the window's in Surf) are finite, and the app reads at its own pace.
+function feedTyping() {
+  for (let n = 0; n < 16 && typing.length > 0; n++) {
+    const [code, shift] = typing.shift();
+    if (shift) x.grain_key(SHIFT, true);
+    x.grain_key(code, true);
+    x.grain_key(code, false);
+    if (shift) x.grain_key(SHIFT, false);
+  }
+}
+
 function feedInput() {
   for (const port of [0, 1]) {
     const q = pending[port];
@@ -145,6 +160,7 @@ function loop() {
   flushOutput();
   draw();
   feedInput();
+  if (typing.length) feedTyping();
   if (flushed && config.disk) saveDirty();
   if (r === 0) {
     if (config.disk) saveDirty();
@@ -154,7 +170,8 @@ function loop() {
     return;
   }
   if (performance.now() - lastStatus > 500) { status('running'); lastStatus = performance.now(); }
-  if (r === 2) schedule(Math.min(Math.max(x.grain_wake_ms(), 0), 50));
+  if (typing.length) schedule(0);
+  else if (r === 2) schedule(Math.min(Math.max(x.grain_wake_ms(), 0), 50));
   else if (r === 1) schedule(50);
   else schedule(0);
 }
@@ -181,6 +198,7 @@ async function start(msg) {
   if (devices.includes('keyboard')) mask |= 32;
   if (devices.includes('tablet')) mask |= 64;
   canvas = msg.canvas || null;
+  if (msg.width && !x.grain_display_size(msg.width, msg.height)) throw new Error(`no screen can be ${msg.width}x${msg.height}`);
   if (config.disk) {
     db = db || await openDb();
     const ptr = x.grain_disk(config.disk.mib * 1024 * 1024);
@@ -210,6 +228,9 @@ onmessage = (e) => {
     kick();
   } else if (m.type === 'pointer' && x) {
     x.grain_pointer(m.x, m.y);
+    kick();
+  } else if (m.type === 'type' && x) {
+    typing.push(...m.keys);
     kick();
   } else if (m.type === 'button' && x) {
     x.grain_button(m.code, m.down);

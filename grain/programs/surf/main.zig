@@ -104,7 +104,9 @@ const Window = struct {
     strokes: [P.max_strokes]Stroke = undefined,
     n: u16 = 0,
     staged: [P.max_strokes]Stroke = undefined,
-    events: [32]Event = undefined,
+    /// Waiting events. Surf runs above its clients, so a burst of keys (a
+    /// paste) lands here before the app reads any.
+    events: [128]Event = undefined,
     ev_head: u8 = 0,
     ev_len: u8 = 0,
     /// The signal to raise when events wait (0 = the app polls).

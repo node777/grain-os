@@ -1,5 +1,5 @@
 // The page: picks a setup, starts the machine in a worker, and connects the
-// console, grainsh and the system log to it.
+// desktop, the console, grainsh, the agent and the system log to it.
 import * as grainsh from './grainsh.js';
 import { Agent, MODELS } from './agent.js';
 
@@ -12,6 +12,40 @@ let envoy = null;
 let shellOpen = false;
 let current = null;
 let agent = null;
+let running = false;
+
+// --- Page settings, kept in this browser (each read and write may fail).
+
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { /* storage may be off */ } },
+};
+const SIZES = ['1024x768', '1280x800', '1440x900', '1920x1080'];
+const settings = Object.assign({ size: '1024x768', scale: 'fit', theme: 'system' }, (() => {
+  try { return JSON.parse(store.get('grain.settings') || '{}'); } catch { return {}; }
+})());
+if (params.get('size') && SIZES.includes(params.get('size'))) settings.size = params.get('size');
+if (params.get('scale')) settings.scale = params.get('scale') === 'actual' ? 'actual' : 'fit';
+const saveSettings = () => store.set('grain.settings', JSON.stringify(settings));
+const screenSize = () => settings.size.split('x').map(Number);
+
+function applySettings() {
+  if (settings.theme === 'system') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = settings.theme;
+  $('screen-box').classList.toggle('actual', settings.scale === 'actual');
+  $('stage').classList.toggle('actual', settings.scale === 'actual');
+}
+
+// --- The drawer's tabs
+
+function showTab(name) {
+  for (const b of document.querySelectorAll('.tabs button')) b.setAttribute('aria-selected', String(b.dataset.tab === name));
+  for (const p of document.querySelectorAll('[data-panel]')) p.hidden = p.dataset.panel !== name;
+  if (name === 'console') $('tab-console').querySelector('.dot').hidden = true;
+  store.set('grain.tab', name);
+}
+for (const b of document.querySelectorAll('.tabs button')) b.addEventListener('click', () => showTab(b.dataset.tab));
+const tabShown = (name) => !$(`${name}-panel`).hidden;
 
 // --- BLAKE3, for checking Envoy's audit chain: the same module, its own instance.
 
@@ -90,6 +124,26 @@ for (const [row, first] of [['QWERTYUIOP', 16], ['ASDFGHJKL', 30], ['ZXCVBNM', 4
 for (let i = 1; i <= 10; i++) KEYS[`F${i}`] = 58 + i;
 const BUTTONS = [0x110, 0x112, 0x111]; // left, middle, right
 
+// Characters to (key code, shift), from the same table the guest reads keys
+// with (grain/lib/virtio_input.zig), so what is typed is what arrives.
+const CHARS = new Map();
+{
+  const plain = '\x00\x1b1234567890-=\x08\tqwertyuiop[]\n\x00asdfghjkl;\'`\x00\\zxcvbnm,./\x00*\x00 ';
+  const shifted = '\x00\x1b!@#$%^&*()_+\x08\tQWERTYUIOP{}\n\x00ASDFGHJKL:"~\x00|ZXCVBNM<>?\x00*\x00 ';
+  for (let code = plain.length - 1; code > 0; code--) {
+    if (plain[code] !== '\x00') CHARS.set(plain[code], [code, false]);
+    if (shifted[code] !== '\x00' && !CHARS.has(shifted[code])) CHARS.set(shifted[code], [code, true]);
+  }
+}
+
+/// Type text into the desktop as key presses (what has no key is skipped).
+function typeText(text) {
+  if (!worker || !hasScreen(current)) return;
+  const keys = [];
+  for (const ch of text.replace(/\r\n?/g, '\n')) { const k = CHARS.get(ch); if (k) keys.push(k); }
+  if (keys.length) worker.postMessage({ type: 'type', keys });
+}
+
 const hasScreen = (c) => (c.devices || []).includes('screen');
 
 // A canvas can hand its drawing to one worker only: each boot gets a new one.
@@ -99,9 +153,13 @@ function freshCanvas() {
   old.replaceWith(canvas);
   const send = (m) => { if (worker) worker.postMessage(m); };
   const at = (e) => {
+    // The picture is letterboxed inside the element when it is fitted.
     const r = canvas.getBoundingClientRect();
+    const [w, h] = screenSize();
+    const k = Math.min(r.width / w, r.height / h);
+    const ox = (r.width - w * k) / 2, oy = (r.height - h * k) / 2;
     const scale = (v, n) => Math.max(0, Math.min(32767, Math.round((v / n) * 32767)));
-    return { type: 'pointer', x: scale(e.clientX - r.left, r.width), y: scale(e.clientY - r.top, r.height) };
+    return { type: 'pointer', x: scale(e.clientX - r.left - ox, w * k), y: scale(e.clientY - r.top - oy, h * k) };
   };
   // At most one move per frame reaches the machine.
   let moved = null;
@@ -121,6 +179,7 @@ function freshCanvas() {
   });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   const key = (down) => (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.code === 'KeyV') return; // the browser pastes: see below
     const code = KEYS[e.code];
     if (code === undefined) return;
     send({ type: 'key', code, down });
@@ -128,15 +187,14 @@ function freshCanvas() {
   };
   canvas.addEventListener('keydown', key(true));
   canvas.addEventListener('keyup', key(false));
+  canvas.addEventListener('paste', (e) => { typeText(e.clipboardData.getData('text')); e.preventDefault(); });
+  const [w, h] = screenSize();
+  canvas.width = w;
+  canvas.height = h;
   return canvas;
 }
 
 // --- The agent
-
-const store = {
-  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
-  set(k, v) { try { if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { /* storage may be off */ } },
-};
 
 function chatAdd(cls, text, tag = 'div') {
   const out = $('agent-out');
@@ -227,11 +285,18 @@ async function showConfig() {
   $('about').textContent = c.about;
   $('harts').value = String(params.get('harts') || c.harts);
   const devices = c.devices || [];
-  $('desktop-panel').hidden = !devices.includes('screen');
-  $('console-panel').hidden = !devices.includes('console');
-  $('shell-panel').hidden = !devices.includes('envoy');
-  $('agent-panel').hidden = !devices.includes('envoy');
-  $('forget').hidden = !c.disk;
+  const screen = devices.includes('screen');
+  $('screen-box').hidden = !screen;
+  $('no-screen').hidden = screen;
+  $('fullscreen').hidden = !screen;
+  $('type-text').hidden = !screen;
+  $('tab-console').hidden = !devices.includes('console');
+  $('tab-shell').hidden = !devices.includes('envoy');
+  $('tab-agent').hidden = !devices.includes('envoy');
+  const tab = store.get('grain.tab');
+  showTab(tab && !$(`tab-${tab}`).hidden ? tab : devices.includes('console') ? 'console' : 'log');
+  $('disk-about').textContent = c.disk ? `“${c.name}” keeps a ${c.disk.mib} MiB disk in this browser.` : 'This setup has no disk.';
+  for (const id of ['disk-export', 'disk-import', 'forget']) $(id).disabled = !c.disk;
   $('manifest').textContent = c.manifest ? await (await fetch(c.manifest)).text() : '(this setup has no manifest: it is the kernel and its test program)';
 }
 
@@ -241,8 +306,8 @@ function setStatus(text, warn) {
 }
 
 function setRunning(on) {
+  running = on;
   $('stop').disabled = !on;
-  $('forget').disabled = on;
   $('config').disabled = on;
   $('harts').disabled = on;
   $('boot').textContent = on ? 'Reboot' : 'Boot';
@@ -265,12 +330,16 @@ function boot() {
     const m = e.data;
     if (m.type === 'output') {
       if (m.stream === 'log') appendLog(m.text);
-      else if (m.stream === 'console') append($('console-out'), m.text);
+      else if (m.stream === 'console') {
+        append($('console-out'), m.text);
+        if (!tabShown('console')) $('tab-console').querySelector('.dot').hidden = false;
+      }
       else envoy.receive(m.text);
     } else if (m.type === 'status') {
       const n = m.instructions;
       const count = n >= 1e9 ? `${(n / 1e9).toFixed(2)} billion` : `${(n / 1e6).toFixed(1)} million`;
       setStatus(`${m.state === 'running' ? 'Running' : m.state === 'off' ? 'Powered off' : 'Stopped'} · ${current.name} · ${$('harts').value} harts · ${count} instructions · ${m.mips.toFixed(0)} MIPS`);
+      if (m.state !== 'running') setRunning(false);
     } else if (m.type === 'exit') {
       appendLog(`\n[page] the machine powered off (exit code ${m.code})\n`);
       setRunning(false);
@@ -281,7 +350,8 @@ function boot() {
     }
   };
   document.body.dataset.exit = '';
-  const start = { type: 'start', config: current, harts: Number($('harts').value) };
+  const [width, height] = screenSize();
+  const start = { type: 'start', config: current, harts: Number($('harts').value), width, height };
   if (hasScreen(current)) {
     start.canvas = freshCanvas().transferControlToOffscreen();
     worker.postMessage(start, [start.canvas]);
@@ -290,7 +360,7 @@ function boot() {
   }
   setRunning(true);
   setStatus(`Booting ${current.name}…`);
-  ($('console-panel').hidden ? $('shell-in') : $('console-in')).focus();
+  if (!$('tab-console').hidden) { showTab('console'); $('console-in').focus(); }
 }
 
 $('setup').addEventListener('submit', (e) => { e.preventDefault(); boot(); });
@@ -300,16 +370,103 @@ $('stop').addEventListener('click', () => {
   worker.postMessage({ type: 'stop' });
   setRunning(false);
 });
-$('forget').addEventListener('click', () => {
+// --- Disks, in IndexedDB: one record per 4 KiB block written (web/worker.js).
+
+const BLOCK = 4096;
+function blocksDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('grain', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('blocks');
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+const diskRange = (name) => IDBKeyRange.bound([name, 0], [name, Infinity]);
+const done = (tx) => new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error); });
+
+function needStopped() {
+  if (!running) return true;
+  alert('Power the machine off first: its disk is in use.');
+  return false;
+}
+
+$('forget').addEventListener('click', async () => {
   const c = selected();
-  if (!c.disk || !confirm(`Delete the disk of "${c.name}" from this browser? Its identity, passphrase and everything stored go with it.`)) return;
-  const req = indexedDB.open('grain', 1);
-  req.onupgradeneeded = () => req.result.createObjectStore('blocks');
-  req.onsuccess = () => {
-    const tx = req.result.transaction('blocks', 'readwrite');
-    tx.objectStore('blocks').delete(IDBKeyRange.bound([c.disk.name, 0], [c.disk.name, Infinity]));
-    tx.oncomplete = () => setStatus(`The disk of ${c.name} is gone: the next boot starts afresh.`);
-  };
+  if (!c.disk || !needStopped() || !confirm(`Delete the disk of "${c.name}" from this browser? Its identity, passphrase and everything stored go with it.`)) return;
+  const db = await blocksDb();
+  const tx = db.transaction('blocks', 'readwrite');
+  tx.objectStore('blocks').delete(diskRange(c.disk.name));
+  await done(tx);
+  setStatus(`The disk of ${c.name} is gone: the next boot starts afresh.`);
+});
+
+$('disk-export').addEventListener('click', async () => {
+  const c = selected();
+  if (!c.disk || !needStopped()) return;
+  const image = new Uint8Array(c.disk.mib * 1024 * 1024);
+  const db = await blocksDb();
+  const tx = db.transaction('blocks', 'readonly');
+  let n = 0;
+  await new Promise((resolve, reject) => {
+    const req = tx.objectStore('blocks').openCursor(diskRange(c.disk.name));
+    req.onsuccess = () => {
+      const cur = req.result;
+      if (!cur) return resolve();
+      image.set(new Uint8Array(cur.value), cur.key[1] * BLOCK);
+      n++;
+      cur.continue();
+    };
+    req.onerror = () => reject(req.error);
+  });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([image], { type: 'application/octet-stream' }));
+  a.download = `grain-${c.disk.name}.img`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+  setStatus(`Exported the disk of ${c.name}: ${n} blocks in use, ${c.disk.mib} MiB in all.`);
+});
+
+$('disk-import').addEventListener('click', () => { if (selected().disk && needStopped()) $('disk-file').click(); });
+$('disk-file').addEventListener('change', async (e) => {
+  const c = selected();
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file || !c.disk) return;
+  const bytes = c.disk.mib * 1024 * 1024;
+  if (file.size > bytes || file.size % BLOCK !== 0) { alert(`That image is ${file.size} bytes; this setup's disk is ${bytes} bytes (in 4 KiB blocks).`); return; }
+  if (!confirm(`Replace the disk of "${c.name}" with ${file.name}? What is on it now is lost.`)) return;
+  const data = new Uint8Array(await file.arrayBuffer());
+  const db = await blocksDb();
+  const tx = db.transaction('blocks', 'readwrite');
+  const st = tx.objectStore('blocks');
+  st.delete(diskRange(c.disk.name));
+  let n = 0;
+  for (let b = 0; b * BLOCK < data.length; b++) {
+    const block = data.subarray(b * BLOCK, (b + 1) * BLOCK);
+    if (block.some((v) => v !== 0)) { st.put(block.slice().buffer, [c.disk.name, b]); n++; }
+  }
+  await done(tx);
+  setStatus(`Imported ${file.name} as the disk of ${c.name}: ${n} blocks in use.`);
+});
+
+// --- Settings, full screen, typing
+
+$('open-settings').addEventListener('click', () => {
+  $('set-size').value = settings.size;
+  $('set-scale').value = settings.scale;
+  $('set-theme').value = settings.theme;
+  $('settings').showModal();
+});
+for (const [id, key] of [['set-size', 'size'], ['set-scale', 'scale'], ['set-theme', 'theme']]) {
+  $(id).addEventListener('change', (e) => { settings[key] = e.target.value; saveSettings(); applySettings(); });
+}
+$('fullscreen').addEventListener('click', async () => {
+  try { await $('stage').requestFullscreen(); } catch { return; }
+  $('screen').focus();
+});
+$('type-text').addEventListener('click', () => {
+  const text = prompt('Text to type into the desktop (as keystrokes, to the window that has the keyboard):');
+  if (text) { typeText(text); $('screen').focus(); }
 });
 
 // The console: hidden typing by default (the passphrase is typed here).
@@ -348,6 +505,7 @@ $('shell-in').addEventListener('keydown', (e) => {
   if (e.key === 'ArrowDown' && historyAt < history.length) { historyAt++; e.target.value = history[historyAt] || ''; e.preventDefault(); }
 });
 
+applySettings();
 fillAgent();
 fillConfigs();
 if (params.get('autostart') === '1') boot();

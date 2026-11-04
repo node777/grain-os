@@ -1110,7 +1110,9 @@ changed (`Host.display`). The keyboard and the tablet are virtio-input
 devices that answer the config queries Surf makes (name, event bits,
 absolute axis ranges 0..32767) and pass on Linux input events the host
 hands in (`Machine.inputEvent`). `grain-emu --display --screenshot FILE`
-boots to the desktop and writes the screen as a PPM.
+boots to the desktop and writes the screen as a PPM; `--display-size WxH`
+(and `grain_display_size` in the browser) picks another screen size, up to
+what Surf's framebuffer holds (8 MiB: 1920×1080).
 
 **In a browser** (docs/WEB.md). `emu/wasm.zig` is a second host for the
 same machine: a WebAssembly module (72 KB) that imports the console,

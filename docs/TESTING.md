@@ -134,8 +134,10 @@ The four layers, from fastest to most real:
    streams: a tool call that must reach the store through Envoy, then an
    answer); the desktop: the scene read through
    Envoy held against the canvas's pixels, the shell opened by a click on
-   the dock and `whoami` typed into it; `bye`), then reloads and checks the
-   disk survived (the same identity; a wrong passphrase refused). CI runs it
+   the dock, `whoami` typed into it and text pasted onto it; `bye`), then
+   reloads and checks the disk survived (the same identity; a wrong
+   passphrase refused), exports the disk, forgets it and imports it back,
+   and boots with a 1280×800 screen. CI runs it
    on the release build (`.github/workflows/web.yml`).
 
 4. **QEMU, kernel suite** (`caravan-ktest`): the kernel test program runs as
