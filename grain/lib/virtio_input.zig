@@ -75,6 +75,9 @@ pub fn char(code: u16, shift: bool) u8 {
 
 pub const key_left_shift: u16 = 42;
 pub const key_right_shift: u16 = 54;
+pub const key_left_alt: u16 = 56;
+pub const key_right_alt: u16 = 100;
+pub const key_tab: u16 = 15;
 
 test "key codes type US characters" {
     try std.testing.expectEqual(@as(u8, 'a'), char(30, false));

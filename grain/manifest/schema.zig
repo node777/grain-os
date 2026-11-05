@@ -185,12 +185,29 @@ pub fn findDomain(m: Manifest, name: []const u8) ?usize {
 
 pub const Target = struct { domain: usize, service: usize };
 
-/// Resolve "<domain>.<service>".
+/// Services Steward serves itself, named "steward.<service>". No domain may
+/// be called "steward".
+pub const steward_name = "steward";
+pub const steward_services = [_]Provide{.{ .name = "domains", .protocol = "steward.v1" }};
+/// The `domain` of a Target that Steward serves.
+pub const steward_domain = std.math.maxInt(usize);
+
+/// Resolve "<domain>.<service>" (or "steward.<service>").
 pub fn resolveUse(m: Manifest, from: []const u8) ?Target {
     const dot = std.mem.indexOfScalar(u8, from, '.') orelse return null;
+    if (std.mem.eql(u8, from[0..dot], steward_name)) {
+        for (steward_services, 0..) |p, si| if (std.mem.eql(u8, p.name, from[dot + 1 ..])) return .{ .domain = steward_domain, .service = si };
+        return null;
+    }
     const di = findDomain(m, from[0..dot]) orelse return null;
     for (m.domains[di].provides, 0..) |p, pi| if (std.mem.eql(u8, p.name, from[dot + 1 ..])) return .{ .domain = di, .service = pi };
     return null;
+}
+
+/// The service a Target names.
+pub fn provided(m: Manifest, t: Target) Provide {
+    if (t.domain == steward_domain) return steward_services[t.service];
+    return m.domains[t.domain].provides[t.service];
 }
 
 /// Check a manifest. Returns null if it is sound, else one sentence (in
@@ -206,6 +223,7 @@ pub fn validate(m: Manifest, buf: []u8) ?[]const u8 {
     for (m.domains, 0..) |d, i| {
         if (!isName(d.name)) return f.msg("domain name '{s}' must be 1-{d} characters of a-z, 0-9 and _", .{ d.name, max_name });
         for (m.domains[0..i]) |e| if (std.mem.eql(u8, e.name, d.name)) return f.msg("two domains are named '{s}'", .{d.name});
+        if (std.mem.eql(u8, d.name, steward_name)) return f.msg("no domain may be named 'steward': the name is Steward's own (its services are steward.domains)", .{});
         if (!isName(d.program)) return f.msg("domain '{s}': program name '{s}' must be 1-{d} characters of a-z, 0-9 and _", .{ d.name, d.program, max_name });
         if (d.priority == 0 or d.priority == 255) return f.msg("domain '{s}': priority {d} is outside 1..254 (255 is Steward's)", .{ d.name, d.priority });
         if (d.hart >= 16) return f.msg("domain '{s}': hart {d} does not exist (at most 16 harts)", .{ d.name, d.hart });
@@ -235,9 +253,9 @@ pub fn validate(m: Manifest, buf: []u8) ?[]const u8 {
             const target = resolveUse(m, u.from) orelse
                 return f.msg("domain '{s}' uses '{s}', but no domain provides it (write it as \"<domain>.<service>\")", .{ d.name, u.from });
             if (target.domain == i) return f.msg("domain '{s}' uses its own service '{s}'", .{ d.name, u.from });
-            const provided = m.domains[target.domain].provides[target.service];
-            if (!std.mem.eql(u8, provided.protocol, u.protocol))
-                return f.msg("domain '{s}' expects '{s}' to speak {s}, but it speaks {s}", .{ d.name, u.from, u.protocol, provided.protocol });
+            const service = provided(m, target);
+            if (!std.mem.eql(u8, service.protocol, u.protocol))
+                return f.msg("domain '{s}' expects '{s}' to speak {s}, but it speaks {s}", .{ d.name, u.from, u.protocol, service.protocol });
         }
 
         if (d.devices.len > max_devices) return f.msg("domain '{s}' asks for {d} devices; at most {d}", .{ d.name, d.devices.len, max_devices });
@@ -307,9 +325,9 @@ pub fn validate(m: Manifest, buf: []u8) ?[]const u8 {
                 if (std.mem.eql(u8, h.name, g.name)) return f.msg("the agent has two services named '{s}'", .{g.name});
             };
             const t = resolveUse(m, g.from) orelse return f.msg("agent {s} '{s}' comes from '{s}', but no domain provides it", .{ what, g.name, g.from });
-            const provided = m.domains[t.domain].provides[t.service];
-            if (!std.mem.eql(u8, provided.protocol, g.protocol))
-                return f.msg("agent {s} '{s}' expects {s}, but '{s}' speaks {s}", .{ what, g.name, g.protocol, g.from, provided.protocol });
+            const service = provided(m, t);
+            if (!std.mem.eql(u8, service.protocol, g.protocol))
+                return f.msg("agent {s} '{s}' expects {s}, but '{s}' speaks {s}", .{ what, g.name, g.protocol, g.from, service.protocol });
         };
     }
 
@@ -322,6 +340,7 @@ fn findCycle(m: Manifest, at: usize, path: *[max_domains]usize, depth: usize) ?u
     path[depth] = at;
     for (m.domains[at].uses) |u| {
         const t = resolveUse(m, u.from) orelse continue;
+        if (t.domain == steward_domain) continue; // Steward waits on nobody
         if (t.domain == path[0]) return depth + 1;
         const seen = for (path[0 .. depth + 1]) |p| {
             if (p == t.domain) break true;
@@ -384,6 +403,11 @@ test "each mistake gets its own explanation" {
         .{ .name = "b", .program = "x", .budget_us = 4_000, .period_us = 10_000 },
     } }, "hart 0 is overcommitted: its domains ask for 100.0%");
     try expectError(.{ .name = "t", .halt_when_tasks_finish = true, .domains = &.{console} }, "no domain is a task");
+    try expectError(.{ .name = "t", .domains = &.{.{ .name = "steward", .program = "x" }} }, "no domain may be named 'steward'");
+    try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .uses = &.{.{ .name = "s", .from = "steward.tasks", .protocol = "steward.v1" }} }} }, "uses 'steward.tasks', but no domain provides it");
+    try expectError(.{ .name = "t", .domains = &.{.{ .name = "a", .program = "x", .uses = &.{.{ .name = "s", .from = "steward.domains", .protocol = "kv.v1" }} }} }, "expects 'steward.domains' to speak kv.v1, but it speaks steward.v1");
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), validate(.{ .name = "t", .domains = &.{.{ .name = "tasks", .program = "x", .uses = &.{.{ .name = "steward", .from = "steward.domains", .protocol = "steward.v1" }} }} }, &buf));
 }
 
 test "agent grants and device claims are checked" {

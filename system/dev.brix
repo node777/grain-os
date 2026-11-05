@@ -161,6 +161,8 @@ domain surf like dev {
     provides surf { protocol = surf.v1 }
     # What is on the screen, read back as data.
     provides scene { protocol = scene.v1 }
+    # The desktop's style, for the settings application.
+    provides desktop { protocol = desktop.v1 }
 }
 
 # The first application: a shell the owner opens from the dock.
@@ -173,6 +175,39 @@ domain shell like light {
     uses tablecloth { from = tablecloth.tablecloth, protocol = tablecloth.v1 }
     uses ledger { from = ledger.ledger, protocol = ledger.v1 }
     uses kv { from = store.kv, protocol = kv.v1 }
+}
+
+# The task manager: what Steward runs, how much time each domain uses, and
+# the owner's restart and stop. Steward serves steward.domains itself.
+domain tasks like light {
+    program = taskman
+    hart = 0
+    priority = 90
+    # A refresh a second is cheap: 2% of hart 0.
+    budget = 200us
+    stack = 32KiB
+    memory = 128KiB
+    uses surf { from = surf.surf, protocol = surf.v1 }
+    uses steward { from = steward.domains, protocol = steward.v1 }
+}
+
+# The owner's settings: the system, the desktop's style, storage and
+# generations, the passphrase. Tablecloth lets only this domain change the
+# passphrase.
+domain settings like light {
+    program = settings
+    hart = 0
+    priority = 90
+    # Mostly idle: 1% of hart 0.
+    budget = 100us
+    stack = 32KiB
+    memory = 128KiB
+    uses surf { from = surf.surf, protocol = surf.v1 }
+    uses desktop { from = surf.desktop, protocol = desktop.v1 }
+    uses steward { from = steward.domains, protocol = steward.v1 }
+    uses kumara { from = kumara.kumara, protocol = kumara.v1 }
+    uses ledger { from = ledger.ledger, protocol = ledger.v1 }
+    uses tablecloth { from = tablecloth.tablecloth, protocol = tablecloth.v1 }
 }
 
 # The network below Comlink: the network device, and datagrams between

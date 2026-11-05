@@ -441,10 +441,16 @@ fn testBudgets() !void {
     _ = g.invoke(b.thread, abi.ThreadMethod.suspend_thread, .{});
     const ca = @as(*volatile u64, &counters[0]).*;
     const cb = @as(*volatile u64, &counters[1]).*;
-    g.record("budget_share", .{ .spinner_a = ca, .spinner_b = cb, .elapsed_ticks = elapsed });
+    // What the kernel charged each: at least one budget, and well under half
+    // the window (their share is 30%; a host clock that is not counted in
+    // instructions, like the browser's, delivers timers a little late).
+    const used_a = g.invoke(a.sc, abi.SchedContextMethod.info, .{}).w[2];
+    const used_b = g.invoke(b.sc, abi.SchedContextMethod.info, .{}).w[2];
+    g.record("budget_share", .{ .spinner_a = ca, .spinner_b = cb, .elapsed_ticks = elapsed, .charged_a = used_a, .charged_b = used_b });
     try check(ca > 0 and cb > 0);
     // Equal budgets: within a factor of two of each other.
     try check(ca < 2 * cb and cb < 2 * ca);
+    for ([_]u64{ used_a, used_b }) |used| try check(used >= ticks(3_000) and used <= elapsed / 2);
 }
 
 fn testUntypedReset() !void {

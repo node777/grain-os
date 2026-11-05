@@ -18,8 +18,10 @@ pub const mycelium = @import("mycelium.zig");
 pub const comlink = @import("comlink.zig");
 pub const guestbook = @import("guestbook.zig");
 pub const attest = @import("attest.zig");
+pub const steward = @import("steward.zig");
+pub const desktop = @import("desktop.zig");
 
-pub const all = .{ console, entropy, echo, kv, registry, tablecloth, kumara, ledger, input, surf, scene, mycelium, comlink, guestbook, attest };
+pub const all = .{ console, entropy, echo, kv, registry, tablecloth, kumara, ledger, input, surf, scene, mycelium, comlink, guestbook, attest, steward, desktop };
 
 comptime {
     for (all) |P| idl.check(P);

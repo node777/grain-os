@@ -58,13 +58,17 @@ The four layers, from fastest to most real:
    captured QEMU DTBs, the ELF reader, the record formatter, Sv39 encoding,
    the IDL, and Brix (syntax, units, templates, and that each error names
    the right line and column); the shipped `.brix` manifests must evaluate
-   and pass the check.
+   and pass the check. The toolkit (`grain/lib/ui.zig`) runs against a
+   recording sink: clicks reach the widget that drew them, fields take keys
+   once focused, tables select, scroll and page.
 2. **Scenario tests** (`sim/kernel_test.zig`): the real kernel core on a
    simulated machine. A test *acts as* the current user thread by setting its
    registers and calling `handle(.syscall)`, then checks the result and the
    invariants. They cover mint and revoke, passive servers with donation,
-   leases, untyped reset, faults, budgets, round robin, capability transfer,
-   interrupts, and destroying a server with a caller waiting.
+   leases, untyped reset, faults, budgets, the time a context is charged
+   (and that reading it needs `read`), round robin, capability transfer,
+   interrupts, and destroying a server with a caller waiting. Among the
+   invariants: no context has been charged more time than has passed.
 3. **The simulator** (`caravan-sim`): seeded random system calls (valid and
    garbage), faults, interrupts, IPIs and timer events on 2 harts.
    `checkInvariants()` runs after every step. When nothing can run any
@@ -134,14 +138,21 @@ The four layers, from fastest to most real:
    streams: a tool call that must reach the store through Envoy, then an
    answer); the desktop: the scene read through
    Envoy held against the canvas's pixels, the shell opened by a click on
-   the dock and `whoami` typed into it; `bye`), then reloads and checks the
-   disk survived (the same identity; a wrong passphrase refused). CI runs it
+   the dock, `whoami` typed into it and text pasted onto it, its window
+   dragged, resized, minimized, restored and closed; the task manager
+   listing every domain, restarting an exited task, stopping a service
+   (shown as stopped) and restarting it, after which the shell's calls to
+   it work again; Settings putting the desktop and the apps in daylight,
+   refusing a wrong passphrase and changing it; `bye`), then
+   reloads and checks the disk survived (the same identity; the old
+   passphrase refused and the new one accepted; the style kept), exports the disk, forgets it and imports it back,
+   and boots with a 1280×800 screen. CI runs it
    on the release build (`.github/workflows/web.yml`).
 
 4. **QEMU, kernel suite** (`caravan-ktest`): the kernel test program runs as
    root task, on 2 harts. That covers boot info, capability identity, mint and revoke, thread
    signalling, a passive server, fault handling with retry, leases, CPU
-   budgets, untyped reset, a UART interrupt, tearing down an address space
+   budgets (and the time the kernel charged each spinner), untyped reset, a UART interrupt, tearing down an address space
    while it runs on the other hart, and a cross-hart call. Results are
    `@grain test ...` records, and the exit status comes from the test
    finisher.

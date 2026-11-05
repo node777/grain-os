@@ -4,7 +4,10 @@
 //!
 //! The desktop is window 0, owned by Surf: its background, top bar, dock and
 //! one launcher per application window are strokes like any other, so
-//! scene.v1 reads back the whole screen. One thread serves surf.v1 (apps),
+//! scene.v1 reads back the whole screen. The frame around each window is
+//! Surf's own: the owner drags it by the title bar, puts it away ("-"),
+//! closes it ("x"), resizes it from the corner if the app allows, and moves
+//! between windows with Alt+Tab. One thread serves surf.v1 (apps),
 //! scene.v1 (inspection) and the input devices: their interrupts arrive on
 //! a signal bound to the thread (Thread.bind_signal), so a receive returns
 //! for a client or for a key, whichever comes first.
@@ -13,6 +16,7 @@ const g = @import("grain");
 const proto = @import("proto");
 const P = proto.surf;
 const SceneP = proto.scene;
+const DeskP = proto.desktop;
 const idl = g.idl;
 const D = g.domain;
 const paint = g.paint;
@@ -26,28 +30,76 @@ comptime {
 }
 
 // ---------------------------------------------------------------------------
-// The look: warm and quiet.
+// The look: warm and quiet, in two styles (desktop.v1).
 
-const theme = struct {
-    const background: u32 = 0x1d1a2b;
-    const bar: u32 = 0x15131f;
-    const bar_text: u32 = 0xe9dfcf;
-    const dock: u32 = 0x2b2540;
-    const launcher: u32 = 0x3d355a;
-    const launcher_open: u32 = 0x7a6aa8;
-    const frame: u32 = 0xf3ece2;
-    const frame_focused: u32 = 0xfaf4ea;
-    const title: u32 = 0x3b3049;
-    const shadow: u32 = 0x000000;
-    const cursor: u32 = 0xfaf4ea;
-    const cursor_edge: u32 = 0x15131f;
+const Palette = struct {
+    background: u32,
+    bar: u32,
+    bar_text: u32,
+    dock: u32,
+    launcher: u32,
+    launcher_open: u32,
+    frame: u32,
+    frame_focused: u32,
+    title: u32,
+    shadow: u32,
+    cursor: u32,
+    cursor_edge: u32,
+    close: u32,
+    minimize: u32,
+    grip: u32,
 };
+
+const dusk: Palette = .{
+    .background = 0x1d1a2b,
+    .bar = 0x15131f,
+    .bar_text = 0xe9dfcf,
+    .dock = 0x2b2540,
+    .launcher = 0x3d355a,
+    .launcher_open = 0x7a6aa8,
+    .frame = 0xf3ece2,
+    .frame_focused = 0xfaf4ea,
+    .title = 0x3b3049,
+    .shadow = 0x000000,
+    .cursor = 0xfaf4ea,
+    .cursor_edge = 0x15131f,
+    .close = 0xe8a28c,
+    .minimize = 0xd9cfbf,
+    .grip = 0xb9ad9c,
+};
+
+const daylight: Palette = .{
+    .background = 0xe4ddd0,
+    .bar = 0xf6f1e8,
+    .bar_text = 0x2b2433,
+    .dock = 0xd3c9b8,
+    .launcher = 0xe9e2d6,
+    .launcher_open = 0xb8a6e0,
+    .frame = 0xfbf8f2,
+    .frame_focused = 0xffffff,
+    .title = 0x3b3049,
+    .shadow = 0x5a4e3c,
+    .cursor = 0xfaf4ea,
+    .cursor_edge = 0x15131f,
+    .close = 0xe8a28c,
+    .minimize = 0xd9cfbf,
+    .grip = 0xa89c8a,
+};
+
+var current_style: DeskP.Style = .dusk;
+var theme: *const Palette = &dusk;
+
+/// Text on a filled stroke: dark on light fills, light on dark ones.
+const ink_dark: u32 = 0x3b3049;
+const ink_light: u32 = 0xe9dfcf;
 const bar_h = 28;
 const title_h = 30;
 /// The frame's paper around the content, on the sides and below.
 const border = 6;
 const dock_h = 44;
 const launcher_w = 112;
+const button_d = 16;
+const grip_size = 14;
 
 // ---------------------------------------------------------------------------
 // The scene
@@ -86,7 +138,7 @@ const Stroke = struct {
 
 const Event = struct { kind: P.EventKind, char: u8 = 0, code: u16 = 0, x: i16 = 0, y: i16 = 0, element: u16 = 0 };
 
-const max_windows = 6;
+const max_windows = 12;
 
 const Window = struct {
     used: bool = false,
@@ -98,13 +150,18 @@ const Window = struct {
     /// Content size; the frame adds a title bar.
     w: u16 = 0,
     h: u16 = 0,
+    /// The owner may resize it down to this (0: fixed size).
+    min_w: u16 = 0,
+    min_h: u16 = 0,
     x: i32 = 0,
     y: i32 = 0,
     shown: bool = false,
     strokes: [P.max_strokes]Stroke = undefined,
     n: u16 = 0,
     staged: [P.max_strokes]Stroke = undefined,
-    events: [32]Event = undefined,
+    /// Waiting events. Surf runs above its clients, so a burst of keys (a
+    /// paste) lands here before the app reads any.
+    events: [128]Event = undefined,
     ev_head: u8 = 0,
     ev_len: u8 = 0,
     /// The signal to raise when events wait (0 = the app polls).
@@ -118,6 +175,31 @@ const Window = struct {
     fn content(w: *const Window) Rect {
         if (w.badge == desktop_badge) return screen;
         return .{ .x = w.x + border, .y = w.y + title_h, .w = w.w, .h = w.h };
+    }
+
+    fn resizable(w: *const Window) bool {
+        return w.min_w != 0 and w.min_h != 0;
+    }
+
+    fn closeButton(w: *const Window) Rect {
+        const f = w.frame();
+        return .{ .x = f.x + f.w - border - 4 - button_d, .y = f.y + 7, .w = button_d, .h = button_d };
+    }
+
+    fn minimizeButton(w: *const Window) Rect {
+        const c = w.closeButton();
+        return .{ .x = c.x - button_d - 6, .y = c.y, .w = button_d, .h = button_d };
+    }
+
+    fn grip(w: *const Window) Rect {
+        const f = w.frame();
+        return .{ .x = f.x + f.w - grip_size, .y = f.y + f.h - grip_size, .w = grip_size, .h = grip_size };
+    }
+
+    /// The frame and its shadow: what moves when the window does.
+    fn footprint(w: *const Window) Rect {
+        const f = w.frame();
+        return .{ .x = f.x, .y = f.y, .w = f.w + 3, .h = f.h + 5 };
     }
 
     fn push(w: *Window, e: Event) void {
@@ -141,7 +223,18 @@ var order: [max_windows]u8 = undefined;
 var n_order: usize = 0;
 var focused: u8 = 0;
 var screen: Rect = .{};
-var pointer: struct { x: i32 = 0, y: i32 = 0, shift: bool = false } = .{};
+var pointer: struct { x: i32 = 0, y: i32 = 0, shift: bool = false, alt: bool = false, down: bool = false } = .{};
+
+/// A window being moved or resized by the owner, from where the press was.
+var drag: struct {
+    mode: enum { none, move, resize } = .none,
+    win: u8 = 0,
+    /// move: the pointer's offset in the frame; resize: where it started.
+    dx: i32 = 0,
+    dy: i32 = 0,
+    w0: u16 = 0,
+    h0: u16 = 0,
+} = .{};
 
 // ---------------------------------------------------------------------------
 // Devices
@@ -186,7 +279,7 @@ fn onColor(bg: u32) u32 {
     const r = (bg >> 16) & 0xff;
     const gg = (bg >> 8) & 0xff;
     const b = bg & 0xff;
-    return if (r * 3 + gg * 6 + b > 1280) theme.title else theme.bar_text;
+    return if (r * 3 + gg * 6 + b > 1280) ink_dark else ink_light;
 }
 
 fn drawStroke(c: *paint.Canvas, s: *const Stroke, dx: i32, dy: i32) void {
@@ -217,11 +310,26 @@ fn drawWindow(c: *paint.Canvas, i: u8, clip: Rect) void {
     c.panel(f, 10, if (i == focused) theme.frame_focused else theme.frame);
     const t = w.titleSlice();
     _ = c.text(f.x + @divTrunc(f.w - paint.textWidth(t), 2), f.y + 6, t, theme.title);
+    const cb = w.closeButton();
+    c.panel(cb, button_d / 2, theme.close);
+    _ = c.text(cb.x + 4, cb.y - 1, "x", theme.title);
+    const mb = w.minimizeButton();
+    c.panel(mb, button_d / 2, theme.minimize);
+    _ = c.text(mb.x + 4, mb.y - 1, "-", theme.title);
     const inner = w.content();
     const saved = c.clip;
     c.clip = c.clip.intersect(inner);
     for (w.strokes[0..w.n]) |*s| drawStroke(c, s, inner.x, inner.y);
     c.clip = saved;
+    if (w.resizable()) {
+        // Three dots on the diagonal: the corner to drag.
+        const gr = w.grip();
+        for (0..3) |k| {
+            const d: i32 = @intCast(k * 4);
+            c.fill(.{ .x = gr.x + gr.w - 4 - d, .y = gr.y + gr.h - 4 - (8 - d), .w = 2, .h = 2 }, theme.grip);
+            c.fill(.{ .x = gr.x + gr.w - 4 - (8 - d), .y = gr.y + gr.h - 4 - d, .w = 2, .h = 2 }, theme.grip);
+        }
+    }
 }
 
 fn cursorRect() Rect {
@@ -270,14 +378,17 @@ fn layoutDesktop() void {
     var apps: i32 = 0;
     for (wins[1..]) |*w| apps += @intFromBool(w.used);
     if (apps > 0) {
-        const dw = 12 + apps * (launcher_w + 8) - 8 + 12;
+        // Launchers shrink to fit many windows across the screen.
+        const lw = @min(launcher_w, @divTrunc(screen.w - 40, apps) - 8);
+        const dw = 12 + apps * (lw + 8) - 8 + 12;
         const dock: Rect = .{ .x = @divTrunc(screen.w - dw, 2), .y = screen.h - dock_h - 10, .w = dw, .h = dock_h };
         add(d, &n, Stroke.make(.panel, dock, theme.dock, 0, "dock", ""));
         var x = dock.x + 12;
         for (wins[1..], 1..) |*w, i| if (w.used) {
-            const r: Rect = .{ .x = x, .y = dock.y + 7, .w = launcher_w, .h = dock_h - 14 };
-            add(d, &n, Stroke.make(.panel, r, if (w.shown) theme.launcher_open else theme.launcher, launcherId(@intCast(i)), "launcher", w.titleSlice()));
-            x += launcher_w + 8;
+            const r: Rect = .{ .x = x, .y = dock.y + 7, .w = lw, .h = dock_h - 14 };
+            const label = w.titleSlice()[0..@min(w.title_len, @as(usize, @intCast(@max(0, @divTrunc(lw - 8, paint.font.w)))))];
+            add(d, &n, Stroke.make(.panel, r, if (w.shown) theme.launcher_open else theme.launcher, launcherId(@intCast(i)), "launcher", label));
+            x += lw + 8;
         };
     }
     d.n = n;
@@ -285,6 +396,18 @@ fn layoutDesktop() void {
 
 fn launcherId(window: u8) u16 {
     return 1000 + @as(u16, window);
+}
+
+/// Change style: the desktop and frames repaint, every window is told.
+fn restyle(to: DeskP.Style) void {
+    if (to == current_style) return;
+    current_style = to;
+    theme = switch (to) {
+        .dusk => &dusk,
+        .daylight => &daylight,
+    };
+    for (wins[1..]) |*w| if (w.used) w.push(.{ .kind = .restyled, .code = @intFromEnum(to) });
+    refreshDesktop();
 }
 
 /// Lay the desktop out again and repaint everything.
@@ -307,15 +430,22 @@ fn raise(i: u8) void {
 }
 
 fn setShown(i: u8, shown: bool) void {
+    hide(i, shown, .hidden);
+}
+
+/// Show or put away a window; a window put away hears `how` (hidden, or
+/// close when the owner closed it).
+fn hide(i: u8, shown: bool, how: P.EventKind) void {
     const w = &wins[i];
     if (w.shown == shown) {
         if (shown and focused != i) focus(i);
         return;
     }
     w.shown = shown;
-    w.push(.{ .kind = if (shown) .shown else .hidden });
+    if (drag.mode != .none and drag.win == i) drag.mode = .none;
+    w.push(.{ .kind = if (shown) .shown else how });
     const what = .{ .window = i, .owner = w.owner[0..w.owner_len], .title = w.titleSlice() };
-    if (shown) g.log("surf_window_shown", what) else g.log("surf_window_hidden", what);
+    if (shown) g.log("surf_window_shown", what) else if (how == .close) g.log("surf_window_closed", what) else g.log("surf_window_hidden", what);
     if (shown) {
         raise(i);
         focused = i;
@@ -381,7 +511,19 @@ fn strokeAt(i: u8, x: i32, y: i32, clickable: bool) ?u16 {
 // ---------------------------------------------------------------------------
 // Input
 
-fn click(x: i32, y: i32) void {
+/// The next shown window below the focused one, round to the top: Alt+Tab.
+fn cycleFocus() void {
+    var k: usize = 1;
+    while (k < n_order) : (k += 1) {
+        const i = order[k];
+        if (i != 0 and wins[i].shown and i != focused) {
+            focus(i);
+            return;
+        }
+    }
+}
+
+fn press(x: i32, y: i32) void {
     const i = windowAt(x, y) orelse return;
     if (i == 0) {
         const s = strokeAt(0, x, y, true) orelse return;
@@ -396,10 +538,68 @@ fn click(x: i32, y: i32) void {
     }
     focus(i);
     const w = &wins[i];
+    if (w.closeButton().contains(x, y)) return hide(i, false, .close);
+    if (w.minimizeButton().contains(x, y)) return hide(i, false, .hidden);
+    if (w.resizable() and w.grip().contains(x, y)) {
+        drag = .{ .mode = .resize, .win = i, .dx = x, .dy = y, .w0 = w.w, .h0 = w.h };
+        return;
+    }
+    if (y < w.frame().y + title_h) {
+        drag = .{ .mode = .move, .win = i, .dx = x - w.x, .dy = y - w.y };
+        return;
+    }
     const in = w.content();
     if (!in.contains(x, y)) return;
     const s = strokeAt(i, x, y, true);
     w.push(.{ .kind = .click, .x = @intCast(x - in.x), .y = @intCast(y - in.y), .element = if (s) |k| w.strokes[k].element else 0 });
+}
+
+/// The pointer moved, with the button held: carry the window along.
+fn dragTo(x: i32, y: i32) void {
+    if (drag.mode == .none) return;
+    const w = &wins[drag.win];
+    const before = w.footprint();
+    switch (drag.mode) {
+        .none => {},
+        .move => {
+            // Keep the title bar on the screen, below the top bar.
+            const f = w.frame();
+            w.x = std.math.clamp(x - drag.dx, 60 - f.w, screen.w - 60);
+            w.y = std.math.clamp(y - drag.dy, bar_h, screen.h - title_h);
+        },
+        .resize => {
+            const max_w = @max(@as(i32, w.min_w), screen.w - w.x - 2 * border);
+            const max_h = @max(@as(i32, w.min_h), screen.h - w.y - title_h - border);
+            w.w = @intCast(std.math.clamp(@as(i32, drag.w0) + x - drag.dx, w.min_w, max_w));
+            w.h = @intCast(std.math.clamp(@as(i32, drag.h0) + y - drag.dy, w.min_h, max_h));
+        },
+    }
+    const after = w.footprint();
+    if (before.x != after.x or before.y != after.y or before.w != after.w or before.h != after.h) repaint(before.join(after));
+}
+
+fn release() void {
+    const mode = drag.mode;
+    drag.mode = .none;
+    const i = drag.win;
+    const w = &wins[i];
+    switch (mode) {
+        .none => {},
+        .move => g.log("surf_window_moved", .{ .window = i, .owner = w.owner[0..w.owner_len], .x = w.x, .y = w.y }),
+        .resize => if (w.w != drag.w0 or w.h != drag.h0) {
+            w.push(.{ .kind = .resized, .x = @intCast(w.w), .y = @intCast(w.h) });
+            g.log("surf_window_resized", .{ .window = i, .owner = w.owner[0..w.owner_len], .width = w.w, .height = w.h });
+        },
+    }
+}
+
+fn button(down: bool) void {
+    if (down == pointer.down) return;
+    pointer.down = down;
+    if (down) press(pointer.x, pointer.y) else {
+        dragTo(pointer.x, pointer.y);
+        release();
+    }
 }
 
 fn key(code: u16, value: u32) void {
@@ -407,17 +607,19 @@ fn key(code: u16, value: u32) void {
         pointer.shift = value != 0;
         return;
     }
+    if (code == vin.key_left_alt or code == vin.key_right_alt) {
+        pointer.alt = value != 0;
+        return;
+    }
     if (value == 0) return; // releases
+    if (pointer.alt and code == vin.key_tab) return cycleFocus();
     if (focused == 0 or !wins[focused].shown) return;
     wins[focused].push(.{ .kind = .key, .char = vin.char(code, pointer.shift), .code = code });
 }
 
-fn movePointer(x: u64, y: u64, max_x: u64, max_y: u64) void {
-    const before = cursorRect();
-    pointer.x = @intCast(x * @as(u64, @intCast(screen.w)) / (max_x + 1));
-    pointer.y = @intCast(y * @as(u64, @intCast(screen.h)) / (max_y + 1));
-    repaint(before.join(cursorRect()));
-}
+/// Where the pointer is drawn: repainted once per batch of input, so a
+/// drag does not repaint for every motion event on the way.
+var drawn_cursor: Rect = .{};
 
 fn drainInput() void {
     if (usb) |*u| {
@@ -425,8 +627,9 @@ fn drainInput() void {
         for (u.poll(&buf)) |e| switch (e) {
             .key => |k| key(k.code, @intFromBool(k.down)),
             .pointer => |p| {
-                movePointer(p.x, p.y, g.xhci.pointer_max, g.xhci.pointer_max);
-                if (p.buttons & 1 != 0 and usb_buttons & 1 == 0) click(pointer.x, pointer.y);
+                pointer.x = @intCast(p.x * @as(u64, @intCast(screen.w)) / (g.xhci.pointer_max + 1));
+                pointer.y = @intCast(p.y * @as(u64, @intCast(screen.h)) / (g.xhci.pointer_max + 1));
+                if ((p.buttons & 1 != 0) != pointer.down) button(p.buttons & 1 != 0);
                 usb_buttons = p.buttons;
             },
         };
@@ -436,14 +639,18 @@ fn drainInput() void {
     };
     if (mouse) |*m| while (m.next()) |e| switch (e.kind) {
         vin.ev_abs => {
-            const before = cursorRect();
             if (e.code == vin.abs_x) pointer.x = @intCast(@as(u64, e.value) * @as(u64, @intCast(screen.w)) / (@as(u64, m.abs_max[0]) + 1));
             if (e.code == vin.abs_y) pointer.y = @intCast(@as(u64, e.value) * @as(u64, @intCast(screen.h)) / (@as(u64, m.abs_max[1]) + 1));
-            repaint(before.join(cursorRect()));
         },
-        vin.ev_key => if (e.code == vin.btn_left and e.value == 1) click(pointer.x, pointer.y),
+        vin.ev_key => if (e.code == vin.btn_left) button(e.value != 0),
         else => {},
     };
+    dragTo(pointer.x, pointer.y);
+    const now = cursorRect();
+    if (now.x != drawn_cursor.x or now.y != drawn_cursor.y) {
+        repaint(drawn_cursor.join(now));
+        drawn_cursor = now;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -475,14 +682,24 @@ const Server = struct {
 
     pub fn open(_: *Server, p: P.open.Params, c: idl.Caller) !P.open.Results {
         if (p.width == 0 or p.height == 0 or @as(i32, p.width) + 2 * border > screen.w or @as(i32, p.height) + title_h + border + bar_h > screen.h) return error.InvalidArgs;
+        if (p.min_width > p.width or p.min_height > p.height or (p.min_width == 0) != (p.min_height == 0)) return error.InvalidArgs;
+        const again = if (windowOf(c, false)) |_| true else |_| false;
         const i = try windowOf(c, true);
         const w = &wins[i];
+        const before = w.footprint();
         setText(&w.title, &w.title_len, p.title.slice());
         w.w = p.width;
         w.h = p.height;
-        // Centred, a little higher than the middle; later windows step down.
-        w.x = @divTrunc(screen.w - w.w, 2) - border + (@as(i32, i) - 1) * 24;
-        w.y = bar_h + 24 + (@as(i32, i) - 1) * 24;
+        w.min_w = p.min_width;
+        w.min_h = p.min_height;
+        if (!again) {
+            // Centred, a little higher than the middle; later windows step down.
+            w.x = @divTrunc(screen.w - w.w, 2) - border + (@as(i32, i) - 1) * 24;
+            w.y = bar_h + 24 + (@as(i32, i) - 1) * 24;
+        }
+        if (again and w.shown) repaint(before.join(w.footprint()));
+        // A new window learns the style, unless it is the default.
+        if (!again and current_style != .dusk) w.push(.{ .kind = .restyled, .code = @intFromEnum(current_style) });
         g.log("surf_window_opened", .{ .window = i, .owner = w.owner[0..w.owner_len], .title = w.titleSlice(), .width = w.w, .height = w.h });
         if (p.shown) setShown(i, true) else refreshDesktop();
         return .{};
@@ -527,6 +744,19 @@ const Server = struct {
         w.ev_head = @intCast((w.ev_head + 1) % w.events.len);
         w.ev_len -= 1;
         return .{ .kind = e.kind, .char = e.char, .code = e.code, .x = e.x, .y = e.y, .element = e.element };
+    }
+
+    // --- desktop.v1 --------------------------------------------------------
+
+    pub fn style(_: *Server, _: DeskP.style.Params, _: idl.Caller) !DeskP.style.Results {
+        return .{ .style = current_style };
+    }
+
+    pub fn set_style(_: *Server, p: DeskP.set_style.Params, _: idl.Caller) !DeskP.set_style.Results {
+        const was = current_style;
+        restyle(p.style);
+        g.log("surf_restyled", .{ .style = @tagName(p.style), .was = @tagName(was) });
+        return .{ .style = was };
     }
 
     // --- scene.v1 ----------------------------------------------------------
@@ -692,5 +922,5 @@ pub fn main() !u16 {
 
     idl.recv_slot = try space.slot();
     var s: Server = .{};
-    idl.serveAll(.{ P, SceneP }, g.provided("surf") orelse return error.NoService, &s);
+    idl.serveAll(.{ P, SceneP, DeskP }, g.provided("surf") orelse return error.NoService, &s);
 }

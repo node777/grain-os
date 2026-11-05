@@ -10,6 +10,7 @@
 //!                           the machine waits for a client before starting
 //!     --envoy-socket P      a second console device at P (no waiting)
 //!     --display             a screen (virtio-gpu, 1024x768), a keyboard and a tablet
+//!     --display-size WxH    the same, with a screen of that size
 //!     --screenshot FILE     at the end, write the screen to FILE (PPM)
 //!     --realtime            time from the host's clock (default: instruction counts)
 //!     --max-seconds S       stop after S seconds of guest time
@@ -28,7 +29,7 @@ const emu = @import("machine.zig");
 const usage =
     \\usage: grain-emu [--harts N] [--ram MIB] [--rng FILE|seed:N] [--disk FILE]
     \\                 [--console-socket PATH] [--envoy-socket PATH] [--display]
-    \\                 [--screenshot FILE] [--realtime]
+    \\                 [--display-size WxH] [--screenshot FILE] [--realtime]
     \\                 [--max-seconds S] KERNEL
     \\
 ;
@@ -232,6 +233,12 @@ pub fn main(init: std.process.Init) !u8 {
             envoy_path = args[i];
         } else if (std.mem.eql(u8, a, "--display")) {
             display = true;
+        } else if (std.mem.eql(u8, a, "--display-size") and has_value) {
+            i += 1;
+            const size = parseSize(args[i]) orelse return bad(a);
+            config.display_width = size[0];
+            config.display_height = size[1];
+            display = true;
         } else if (std.mem.eql(u8, a, "--screenshot") and has_value) {
             i += 1;
             screenshot = args[i];
@@ -385,6 +392,15 @@ fn writePpm(io: std.Io, path: []const u8, scr: emu.Machine.Screen) !void {
         o += 3;
     }
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = rgb });
+}
+
+/// "1280x800" -> .{ 1280, 800 }, within what a screen can be.
+fn parseSize(text: []const u8) ?[2]u32 {
+    const x = std.mem.indexOfScalar(u8, text, 'x') orelse return null;
+    const w = std.fmt.parseInt(u32, text[0..x], 10) catch return null;
+    const h = std.fmt.parseInt(u32, text[x + 1 ..], 10) catch return null;
+    if (w < 320 or h < 240 or w > 4096 or h > 4096) return null;
+    return .{ w, h };
 }
 
 fn bad(arg: []const u8) u8 {

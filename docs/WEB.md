@@ -29,13 +29,18 @@ and a default number of harts.
 | The kernel test suite | The kernel with its test program as the root task; it powers off with a summary. |
 | Failure handling | The faults system: a domain that crashes until Steward stops it, and a caller that gets an error instead of hanging. |
 
-**Panels:**
+**The layout.** The machine fills the page; a drawer beside it (below it
+on a narrow window) holds the system's text: Console, grainsh, Agent, Log
+and Manifest, one tab each. A dot on the Console tab means the system said
+something there while another tab was open (the passphrase prompt, an ask).
 
-- **Desktop** (setups with a screen): Surf's screen on a canvas. Click it
-  to give it the keyboard (keys go by their place on the keyboard, as a
+- **The desktop** (setups with a screen): Surf's screen on a canvas. Click
+  it to give it the keyboard (keys go by their place on the keyboard, as a
   US layout); the pointer follows the mouse. The shell waits in the dock:
   click it, then type `help` or `whoami`. Click outside the canvas to type
-  elsewhere again.
+  elsewhere again. **Full screen** shows the desktop alone (Esc leaves).
+  **Paste** (Ctrl+V or Cmd+V on the desktop) and **Type text** type text
+  into the window that has the keyboard, as keystrokes, a few at a time.
 - **Console**: the system's own console (the first virtio console). The
   passphrase is typed here, and so are the owner's answers to the agent's
   asks. Typing is hidden unless "show" is ticked.
@@ -57,8 +62,16 @@ and a default number of harts.
   highlighted ("records only" hides the rest).
 - **The manifest** of the setup, as written in Brix.
 
-**Machine settings**: the number of harts (1, 2 or 4). Time is real time
-(the browser's clock), so leases expire as they would on a device.
+**Machine settings**: the number of harts (1, 2 or 4) beside the setup.
+Time is real time (the browser's clock), so leases expire as they would on
+a device.
+
+**Settings** (kept in this browser): the screen's size (1024×768 up to
+1920×1080, from the next boot; Surf lays the desktop out for it), scaling
+(fit the window, or actual pixels), the page's theme, and the setup's
+disk: **export** it as a raw image (what QEMU and `grain-disk` read),
+**import** one (it replaces the disk), or **forget** it. The machine must
+be off for these.
 
 ## How it works
 
@@ -120,9 +133,17 @@ API (its request carries the key, the model and the tools; the tool call
 it asks for changes the store through Envoy; the thinking block goes back
 unchanged); the desktop (the scene, read through Envoy,
 matches the canvas's pixels; a click on the dock opens the shell; `whoami`
-typed on the canvas runs); `bye`; then a reload in the same browser
-profile, where the disk must still be there (the same identity, a wrong
-passphrase refused, the right one accepted).
+typed on the canvas runs; text pasted onto it arrives as keystrokes; the
+window dragged by its title bar, resized from the corner (the shell lays
+itself out again), minimized, brought back from the dock where it was, and
+closed; the task manager restarting an exited task, stopping a service
+and restarting it, with the shell's calls to it working again; Settings
+showing the identity, putting everything in the daylight style, refusing a
+wrong passphrase and changing it);
+`bye`; then a reload in the same browser profile, where the disk
+must still be there (the same identity, the old passphrase refused and the new one
+accepted, the daylight style back); the disk exported, forgotten and imported again (the
+same identity after); and a boot with a 1280×800 screen.
 
 ## Publishing it (GitHub Pages)
 

@@ -52,6 +52,11 @@ def scene_matches_screen(s, screen, check, name):
     return img
 
 
+def window_of(s, owner):
+    count = s.call("scene", "windows")["count"]
+    return next((i for i in range(1, count) if s.call("scene", "window", index=i)["owner"] == owner), -1)
+
+
 def run(s, check, screen):
     screen.wait("surf_ready", timeout=120)
     screen.wait("shell_ready", timeout=120)
@@ -61,8 +66,10 @@ def run(s, check, screen):
     caps = {c["name"]: c for c in s.discover()}
     check("scene_granted", caps["scene"]["granted"] and caps["scene"]["protocol"] == "scene.v1", caps.get("scene"))
     w = s.call("scene", "windows")
-    check("desktop_up", w["width"] == 1024 and w["height"] == 768 and w["count"] == 2, w)
-    shell_win = s.call("scene", "window", index=1)
+    check("desktop_up", w["width"] == 1024 and w["height"] == 768 and w["count"] == 4, w)
+    sw = window_of(s, "shell")
+    check("apps_have_windows", sw > 0 and window_of(s, "tasks") > 0 and window_of(s, "settings") > 0, w)
+    shell_win = s.call("scene", "window", index=sw)
     check("shell_waits_in_dock", shell_win["owner"] == "shell" and not shell_win["shown"], shell_win)
     launcher = next((e for e in elements(s, 0) if e["role"] == "launcher" and e["text"] == "shell"), None)
     check("launcher_in_scene", launcher is not None and launcher["id"] != 0, launcher)
@@ -73,37 +80,54 @@ def run(s, check, screen):
     screen.click(launcher["x"] + launcher["w"] // 2, launcher["y"] + launcher["h"] // 2)
     screen.wait("surf_window_shown title=shell", after=m)
     w = s.call("scene", "windows")
-    check("shell_opened", s.call("scene", "window", index=1)["shown"] and w["focused"] == 1, w)
+    check("shell_opened", s.call("scene", "window", index=sw)["shown"] and w["focused"] == sw, w)
 
     # Ask it who this instance is.
     m = screen.mark()
     screen.type("whoami\n")
     screen.wait("shell_ran command=whoami ok=true", after=m)
     screen.wait("surf_presented owner=shell", after=m)
-    lines = [e for e in elements(s, 1) if e["kind"] == "text"]
+    lines = [e for e in elements(s, sw) if e["kind"] == "text"]
     answers = [e["text"] for e in lines if e["role"] == "answer"]
     check("whoami_on_screen", hello["identity"] in answers and any(e["text"] == "> whoami" and e["role"] == "command" for e in lines),
           (hello["identity"], answers))
     img = scene_matches_screen(s, screen, check, "shell_matches_scene")
 
     # The window's frame and title are where the scene says.
-    frame = s.call("scene", "window", index=1)
+    frame = s.call("scene", "window", index=sw)
     check("frame_where_scene_says", screen.pixel(img, frame["x"] + frame["w"] // 2, frame["y"] + 2) in (0xfaf4ea, 0xf3ece2),
           hex(screen.pixel(img, frame["x"] + frame["w"] // 2, frame["y"] + 2)))
 
+    # Surf's frame: drag the window by its title bar, then resize it from
+    # the corner; the shell lays itself out again for its new size.
+    m = screen.mark()
+    screen.drag(frame["x"] + 60, frame["y"] + 12, frame["x"] + 140, frame["y"] + 52)
+    screen.wait("surf_window_moved owner=shell", after=m)
+    moved = s.call("scene", "window", index=sw)
+    check("window_dragged", moved["x"] == frame["x"] + 80 and moved["y"] == frame["y"] + 40, (frame, moved))
+    m = screen.mark()
+    screen.drag(moved["x"] + moved["w"] - 5, moved["y"] + moved["h"] - 5, moved["x"] + moved["w"] + 55, moved["y"] + moved["h"] + 25)
+    screen.wait("surf_window_resized owner=shell", after=m)
+    screen.wait("surf_presented owner=shell", after=m)
+    grown = s.call("scene", "window", index=sw)
+    prompt = next(e for e in elements(s, sw) if e["role"] == "prompt")
+    check("window_resized", grown["w"] == moved["w"] + 60 and grown["h"] == moved["h"] + 30
+          and prompt["y"] > grown["y"] + grown["h"] - 60, (moved, grown, prompt))
+    scene_matches_screen(s, screen, check, "resized_matches_scene")
+
     # Clicking an element reaches the application: clear the page.
-    clear = next(e for e in elements(s, 1) if e["role"] == "button" and e["text"] == "clear")
+    clear = next(e for e in elements(s, sw) if e["role"] == "button" and e["text"] == "clear")
     m = screen.mark()
     screen.click(clear["x"] + clear["w"] // 2, clear["y"] + clear["h"] // 2)
     screen.wait("surf_presented owner=shell", after=m)
-    left = [e for e in elements(s, 1) if e["role"] in ("answer", "command")]
+    left = [e for e in elements(s, sw) if e["role"] in ("answer", "command")]
     check("click_reaches_app", not left, left)
 
     # The launcher puts the window away again.
     m = screen.mark()
     screen.click(launcher["x"] + launcher["w"] // 2, launcher["y"] + launcher["h"] // 2)
     screen.wait("surf_window_hidden title=shell", after=m)
-    check("shell_put_away", not s.call("scene", "window", index=1)["shown"])
+    check("shell_put_away", not s.call("scene", "window", index=sw)["shown"])
     scene_matches_screen(s, screen, check, "desktop_matches_scene_again")
     print(f"@agent desktop identity={hello['identity']}", flush=True)
     s.bye()

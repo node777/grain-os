@@ -97,7 +97,31 @@ fn storeError(e: tc.Error) anyerror {
     };
 }
 
+/// The owner's settings application: the one client that may change the
+/// passphrase (it asks the owner for the current one), and may roll back.
+const owner_settings = "settings";
+
 const Server = struct {
+    pub fn passphrase(_: *Server, p: P.passphrase.Params, c: idl.Caller) !P.passphrase.Results {
+        if (!std.mem.eql(u8, try ownerOf(c), owner_settings)) return error.Unavailable;
+        const new = p.new.slice();
+        if (new.len == 0 or kdf_heap.len == 0) return error.InvalidArgs;
+        var seed: [32]u8 = undefined;
+        defer std.crypto.secureZero(u8, &seed);
+        const r = idl.call(proto.entropy.get, entropy_ep, .{}) catch return error.Unavailable;
+        @memcpy(&seed, r.bytes.slice()[0..32]);
+        var fba: std.heap.FixedBufferAllocator = .init(kdf_heap);
+        cloth.rekey(fba.allocator(), p.current.slice(), new, seed) catch |e| switch (e) {
+            error.BadPassphrase => {
+                g.log("tablecloth_passphrase_refused", .{ .by = owner_settings });
+                return error.InvalidArgs;
+            },
+            else => return storeError(e),
+        };
+        g.log("tablecloth_passphrase_changed", .{ .by = owner_settings, .seq = cloth.sup.seq });
+        return .{};
+    }
+
     pub fn info(_: *Server, _: P.info.Params, _: idl.Caller) !P.info.Results {
         const b = cloth.sup.boot;
         return .{
@@ -195,7 +219,7 @@ const Server = struct {
 
     pub fn rollback(_: *Server, _: P.rollback.Params, c: idl.Caller) !P.rollback.Results {
         const owner = try ownerOf(c);
-        if (!std.mem.eql(u8, owner, "steward") and !std.mem.eql(u8, owner, "agent")) return error.Unavailable;
+        if (!std.mem.eql(u8, owner, "steward") and !std.mem.eql(u8, owner, "agent") and !std.mem.eql(u8, owner, owner_settings)) return error.Unavailable;
         const h = cloth.rollback() catch |e| return storeError(e);
         g.log("generation_staged", .{ .generation = g.klog.hex(std.mem.readInt(u64, h[0..8], .big)), .by = owner, .rollback = true });
         return .{ .generation = P.Hash.from(&h) };
@@ -268,9 +292,15 @@ fn readLine(input: g.CPtr, out: *[128]u8, nap: g.CPtr) []u8 {
     }
 }
 
+/// Memory for the passphrase's key derivation, kept for a later change.
+var kdf_heap: []u8 = &.{};
+var entropy_ep: g.CPtr = 0;
+
 fn unlock(space: *g.Space, console: g.CPtr, input: g.CPtr, entropy: g.CPtr) !void {
     const l = cloth.sup.lock;
     const heap = try space.mapHeap(D.Layout.heap + 0x10_0000, l.m_kib / 4 + 64);
+    kdf_heap = heap;
+    entropy_ep = entropy;
     var fba: std.heap.FixedBufferAllocator = .init(heap);
     const nap = try space.retype(.signal, 0);
     var pass: [128]u8 = undefined;

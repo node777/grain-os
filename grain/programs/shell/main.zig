@@ -2,9 +2,9 @@
 //! presses enter, and the answer appears: who this instance is, what the
 //! store holds, how long the Ledger is, keys in the key-value store.
 //!
-//! It draws itself as brushstrokes (surf.v1), so every line it shows is an
-//! element an agent can read back through scene.v1. It waits on one signal,
-//! which Surf raises when keys or clicks are waiting for it.
+//! It is drawn with grain/lib/ui.zig in a window the owner may resize, as
+//! brushstrokes (surf.v1), so every line it shows is an element an agent can
+//! read back through scene.v1.
 const std = @import("std");
 const g = @import("grain");
 const proto = @import("proto");
@@ -18,70 +18,76 @@ comptime {
     g.exportStart();
 }
 
+const ui = g.ui;
+
 const width = 640;
 const height = 404;
 const line_h = 20;
-const pad = 14;
-const rows = (height - 2 * pad - 30) / line_h;
-const cols = (width - 2 * pad) / g.paint.font.w;
 
 const color = struct {
-    const ink: u32 = 0x221d30;
-    const text: u32 = 0xe9dfcf;
     const command: u32 = 0xb8a6e0;
     const answer: u32 = 0xe9dfcf;
     const fault: u32 = 0xf0a07a;
-    const prompt: u32 = 0x8fd1b5;
-    const cursor: u32 = 0x8fd1b5;
-    const button: u32 = 0x3d355a;
 };
 
+const max_cols = 120;
 const Kind = enum { command, answer, fault };
-const Line = struct { kind: Kind = .answer, text: [cols]u8 = undefined, len: u8 = 0 };
+const Line = struct { kind: Kind = .answer, text: [max_cols]u8 = undefined, len: u8 = 0 };
 
-var lines: [rows]Line = @splat(.{});
+/// What has been said, oldest first; the window shows as much of the end
+/// as fits.
+var lines: [64]Line = @splat(.{});
 var n_lines: usize = 0;
-var input: [cols - 2]u8 = undefined;
-var input_len: usize = 0;
 
 fn say(kind: Kind, text: []const u8) void {
-    if (n_lines == rows) {
-        std.mem.copyForwards(Line, lines[0 .. rows - 1], lines[1..rows]);
+    if (n_lines == lines.len) {
+        std.mem.copyForwards(Line, lines[0 .. lines.len - 1], lines[1..lines.len]);
         n_lines -= 1;
     }
     const l = &lines[n_lines];
     l.kind = kind;
-    l.len = @intCast(@min(text.len, cols));
+    l.len = @intCast(@min(text.len, max_cols));
     @memcpy(l.text[0..l.len], text[0..l.len]);
     n_lines += 1;
 }
 
 fn sayf(kind: Kind, comptime fmt: []const u8, args: anytype) void {
-    var buf: [cols]u8 = undefined;
+    var buf: [max_cols]u8 = undefined;
     say(kind, std.fmt.bufPrint(&buf, fmt, args) catch buf[0..]);
 }
 
-const button_clear: u16 = 1;
+const Shell = struct {
+    input: ui.Field = .{},
 
-fn draw(surf: g.CPtr) !void {
-    var f: S.Frame = .{ .ep = surf };
-    try f.fill(.{ .x = 0, .y = 0, .w = width, .h = height }, color.ink, "background");
-    try f.button(.{ .x = width - pad - 64, .y = pad - 4, .w = 64, .h = 24 }, color.button, button_clear, "clear");
-    for (lines[0..n_lines], 0..) |*l, i| {
-        const y: i32 = @intCast(pad + 30 + i * line_h);
-        const c = switch (l.kind) {
-            .command => color.command,
-            .answer => color.answer,
-            .fault => color.fault,
-        };
-        try f.text(pad, y, l.text[0..l.len], c, @tagName(l.kind));
+    pub fn draw(sh: *Shell, u: *ui.Ui) void {
+        u.background();
+        u.moveTo(u.width - ui.pad - 64, ui.pad - 4);
+        if (u.button("clear")) n_lines = 0;
+        u.space(26);
+        // As many of the newest lines as fit above the prompt.
+        const room: usize = @intCast(@max(1, @divTrunc(u.height - u.y - ui.button_h - 2 * ui.pad, line_h)));
+        const first = n_lines -| room;
+        for (lines[first..n_lines]) |*l| {
+            const c = switch (l.kind) {
+                .command => color.command,
+                .answer => color.answer,
+                .fault => color.fault,
+            };
+            u.labelAs(l.text[0..l.len], c, @tagName(l.kind));
+            u.y -= ui.gap - (line_h - ui.char_h);
+        }
+        const y = @max(u.y, u.height - ui.button_h - ui.pad);
+        u.moveTo(u.left, y + @divTrunc(ui.button_h - ui.char_h, 2));
+        u.labelAs(">", u.theme.accent, "prompt");
+        u.moveTo(u.left + 2 * ui.char_w, y);
+        u.focusNext();
+        if (u.field(&sh.input, u.right - u.left - 2 * ui.char_w, "type a command (help)") == .submitted) {
+            run(sh.input.text());
+            sh.input.clear();
+        }
+        u.end();
     }
-    const y: i32 = @intCast(pad + 30 + n_lines * line_h);
-    try f.text(pad, y, ">", color.prompt, "prompt");
-    try f.text(pad + 2 * g.paint.font.w, y, input[0..input_len], color.text, "input");
-    try f.fill(.{ .x = pad + @as(i32, @intCast(2 + input_len)) * g.paint.font.w, .y = y + 2, .w = 2, .h = 15 }, color.cursor, "cursor");
-    try f.present();
-}
+};
 
 // ---------------------------------------------------------------------------
 // Commands
@@ -155,51 +161,14 @@ fn dispatch(verb: []const u8, it: anytype) !bool {
 
 pub fn main() !u16 {
     var space: g.Space = .{ .untyped = D.Slot.memory, .vspace = D.Slot.vspace, .next_slot = D.Slot.first_free };
-    const sig = try space.retype(.signal, 0);
-    const surf = g.use("surf") orelse return error.NoService;
-    _ = idl.call(S.open, surf, .{ .title = idl.Text(32).from("shell"), .width = width, .height = height, .shown = false }) catch {
+    var app = S.App.open(&space, "shell", width, height, .{ .min_width = 360, .min_height = 200 }) catch |e| {
         // No screen (Surf was skipped): nothing to show, so rest.
-        g.log("shell_idle", .{ .reason = "no_screen" });
+        g.log("shell_idle", .{ .reason = "no_screen", .err = @errorName(e) });
+        const sig = try space.retype(.signal, 0);
         while (true) _ = g.wait(sig);
     };
-    // Surf may raise the signal, nothing more.
-    const raise = try space.slot();
-    if (!g.invoke(D.Slot.cnode, g.abi.CNodeMethod.mint, .{ raise, sig, (g.abi.Rights{ .send = true }).bits(), 1, 0 }).ok()) return error.MintFailed;
-    _ = try idl.call(S.listen, surf, .{ .signal = .{ .slot = raise } });
     say(.answer, "grain shell. type help and press enter.");
-    try draw(surf);
+    var sh: Shell = .{};
     g.log("shell_ready", .{});
-    while (true) {
-        _ = g.wait(sig);
-        var changed = false;
-        while (true) {
-            const e = try idl.call(S.next_event, surf, .{});
-            switch (e.kind) {
-                .none => break,
-                .key => switch (e.char) {
-                    '\n' => {
-                        run(input[0..input_len]);
-                        input_len = 0;
-                        changed = true;
-                    },
-                    0x08 => if (input_len > 0) {
-                        input_len -= 1;
-                        changed = true;
-                    },
-                    0 => {},
-                    else => |c| if (c >= ' ' and input_len < input.len) {
-                        input[input_len] = c;
-                        input_len += 1;
-                        changed = true;
-                    },
-                },
-                .click => if (e.element == button_clear) {
-                    n_lines = 0;
-                    changed = true;
-                },
-                .shown, .hidden => {},
-            }
-        }
-        if (changed) try draw(surf);
-    }
+    try app.run(&sh);
 }

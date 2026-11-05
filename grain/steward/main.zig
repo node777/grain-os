@@ -27,6 +27,7 @@ const image = @import("image");
 const elf = @import("elf");
 const fdt = @import("fdt");
 const proto = @import("proto");
+const idl = g.idl;
 
 const manifest: schema.Manifest = @import("system.zon");
 /// A label the build gives this Steward (two builds of one system differ
@@ -56,6 +57,9 @@ const image_bytes = @embedFile("system.img");
 const ndomains = manifest.domains.len;
 /// Lifecycle badges with this bit set are fault messages from a domain thread.
 const fault_flag: usize = 1 << 16;
+/// Badges a client of a service Steward serves itself (steward.v1): the flag,
+/// and the caller's domain number + 1 (or the agent's badge).
+const service_flag: usize = 1 << 17;
 /// A scratch window in Steward's own address space for filling pages.
 const scratch_va: usize = 0x5000_0000;
 /// PCI bus 0's configuration space (ECAM), mapped for good.
@@ -386,7 +390,11 @@ fn makeAgentLease(comptime k: usize) !void {
     const gr = comptime agentGrant(k);
     const t = comptime schema.resolveUse(manifest, gr.from).?;
     const target = slot();
-    try mintProtocol(S.cnode, target, domains[t.domain].endpoints[t.service], .{ .send = true, .grant = true }, D.agent_badge, comptime proto.kernelIdOf(gr.protocol));
+    if (t.domain == schema.steward_domain) {
+        try mintProtocol(S.cnode, target, lifecycle, .{ .send = true }, service_flag | D.agent_badge, comptime proto.kernelIdOf(gr.protocol));
+    } else {
+        try mintProtocol(S.cnode, target, domains[t.domain].endpoints[t.service], .{ .send = true, .grant = true }, D.agent_badge, comptime proto.kernelIdOf(gr.protocol));
+    }
     const lease = try retypeFrom(pool, .lease, 0);
     try ok(g.invoke(lease, abi.LeaseMethod.arm, .{ target, (abi.Rights{ .send = true, .grant = true }).bits(), ticks(@as(u64, gr.duration_ms) * 1000), gr.uses }));
     agent_leases[k] = lease;
@@ -559,7 +567,7 @@ fn decide(i: usize, number: usize, yes: bool) ?D.AskRefusal {
 // ---------------------------------------------------------------------------
 // Domains
 
-const Status = enum { not_started, running, exited, failed, skipped };
+const Status = enum { not_started, running, exited, failed, skipped, stopped };
 
 const Domain = struct {
     region: g.CPtr = 0,
@@ -572,6 +580,9 @@ const Domain = struct {
     thread_id: u64 = 0,
     /// Steward's copy of the domain's CNode (to install later grants).
     cnode: g.CPtr = 0,
+    /// Steward's copy of its scheduling context: the time it has used.
+    sc: g.CPtr = 0,
+    region_kib: u32 = 0,
 };
 
 var domains: [ndomains]Domain = @splat(.{});
@@ -640,7 +651,10 @@ fn build(comptime i: usize) !void {
     st.cnode = cnode;
     const vspace = try R.make(region, &owned, .page_table, 2);
     const thread = try R.make(region, &owned, .thread, 0);
-    const sc = try R.make(region, &owned, .sched_context, 0);
+    const sc = try retypeFrom(region, .sched_context, 0);
+    if (st.sc != 0) release(st.sc);
+    st.sc = sc;
+    st.region_kib = @intCast((@as(u64, 1) << region_bits) / 1024);
     const info_frame = try R.make(region, &owned, .frame, 12);
     const ipc_frame = try R.make(region, &owned, .frame, 12);
     const memory = try R.make(region, &owned, .untyped, log2Ceil(memory_bytes));
@@ -693,12 +707,17 @@ fn build(comptime i: usize) !void {
 
     inline for (md.uses, 0..) |u, ui| {
         const t = comptime schema.resolveUse(manifest, u.from).?;
-        const ep = domains[t.domain].endpoints[t.service];
-        // A provider already skipped or failed gets no client: the slot
-        // stays empty and calls fail at once (invalid_cap), where a minted
-        // capability would reach an endpoint nobody serves and wait forever.
-        const down = domains[t.domain].status == .skipped or domains[t.domain].status == .failed;
-        if (!down) try mintProtocol(cnode, D.Slot.first_use + ui, ep, .{ .send = true, .grant = true }, i + 1, comptime proto.kernelIdOf(u.protocol));
+        if (t.domain == schema.steward_domain) {
+            // A service Steward serves: its own endpoint, badged as this client.
+            try mintProtocol(cnode, D.Slot.first_use + ui, lifecycle, .{ .send = true }, service_flag | (i + 1), comptime proto.kernelIdOf(u.protocol));
+        } else {
+            const ep = domains[t.domain].endpoints[t.service];
+            // A provider already skipped, failed or stopped gets no client:
+            // the slot stays empty and calls fail at once (invalid_cap), where
+            // a minted capability would reach an endpoint nobody serves and
+            // wait forever.
+            if (!isDown(t.domain)) try mintProtocol(cnode, D.Slot.first_use + ui, ep, .{ .send = true, .grant = true }, i + 1, comptime proto.kernelIdOf(u.protocol));
+        }
         info.uses[ui] = .{ .name = undefined, .protocol = undefined, .slot = D.Slot.first_use + ui, .protocol_id = comptime proto.idOf(u.protocol) };
         D.setName(&info.uses[ui].name, u.name);
         D.setName(&info.uses[ui].protocol, u.protocol);
@@ -821,6 +840,10 @@ fn teardown(i: usize) void {
         release(domains[i].cnode);
         domains[i].cnode = 0;
     }
+    if (domains[i].sc != 0) {
+        release(domains[i].sc);
+        domains[i].sc = 0;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -844,6 +867,110 @@ fn onFault(i: usize, m: g.Result) void {
     st.status = .failed;
     g.record("domain_stopped", .{ .domain = md.name, .reason = if (md.restart == .on_fault) "restart_limit" else "fault" });
     servicesDown(i);
+}
+
+fn isDown(i: usize) bool {
+    return domains[i].status == .skipped or domains[i].status == .failed or domains[i].status == .stopped;
+}
+
+// ---------------------------------------------------------------------------
+// steward.v1: what Steward runs, for the task manager (and an agent the
+// owner lets see it).
+
+const SP = proto.steward;
+
+const Service = struct {
+    pub fn system(_: *Service, _: SP.system.Params, _: idl.Caller) !SP.system.Results {
+        return .{
+            .name = idl.Text(32).from(manifest.name),
+            .closure = idl.Bytes(32).from(&img.header.closure),
+            .harts = @intCast(boot.hart_count),
+            .domains = ndomains,
+            .uptime_us = g.time() * 1_000_000 / boot.timebase_hz,
+        };
+    }
+
+    pub fn domain(_: *Service, p: SP.domain.Params, _: idl.Caller) !SP.domain.Results {
+        if (p.index >= ndomains) return error.NotFound;
+        inline for (manifest.domains, 0..) |md, i| if (i == p.index) {
+            const st = &domains[i];
+            var cpu_ticks: u64 = 0;
+            if (st.status == .running and st.sc != 0) {
+                const r = g.invoke(st.sc, abi.SchedContextMethod.info, .{});
+                if (r.ok()) cpu_ticks = r.w[2];
+            }
+            return .{
+                .name = idl.Text(24).from(md.name),
+                .program = idl.Text(24).from(md.program),
+                .kind = if (md.kind == .task) .task else .service,
+                .status = @enumFromInt(@intFromEnum(st.status)),
+                .restarts = st.restarts,
+                .exit_code = st.exit_code,
+                .priority = md.priority,
+                .hart = md.hart,
+                .budget_us = md.budget_us,
+                .period_us = md.period_us,
+                .memory_kib = st.region_kib,
+                .cpu_us = cpu_ticks * 1_000_000 / boot.timebase_hz,
+            };
+        };
+        unreachable;
+    }
+
+    pub fn restart(_: *Service, p: SP.restart.Params, c: idl.Caller) !SP.restart.Results {
+        if (p.index >= ndomains) return error.NotFound;
+        const i: usize = p.index;
+        const was = domains[i].status;
+        if (was == .skipped) return error.Unavailable; // its device is missing
+        g.record("domain_restart", .{ .domain = domainName(i), .by = callerName(c.badge), .was = @tagName(was) });
+        if (was == .running) teardown(i);
+        domains[i].restarts += 1;
+        buildByIndex(i) catch |e| {
+            domains[i].status = .failed;
+            g.record("domain_restart_failed", .{ .domain = domainName(i), .err = @errorName(e) });
+            teardown(i);
+            servicesDown(i);
+            return error.Failed;
+        };
+        // Back from down: its clients had their capabilities revoked.
+        if (was == .stopped or was == .failed) reconnectClients(i);
+        return .{};
+    }
+
+    pub fn stop(_: *Service, p: SP.stop.Params, c: idl.Caller) !SP.stop.Results {
+        if (p.index >= ndomains) return error.NotFound;
+        const i: usize = p.index;
+        if (domains[i].status != .running) return error.InvalidArgs;
+        g.record("domain_stop", .{ .domain = domainName(i), .by = callerName(c.badge) });
+        teardown(i);
+        domains[i].status = .stopped;
+        servicesDown(i);
+        return .{};
+    }
+};
+var service: Service = .{};
+
+fn callerName(badge: usize) []const u8 {
+    const who = badge & ~service_flag;
+    if (who == D.agent_badge) return "agent";
+    if (who >= 1 and who <= ndomains) return domainName(who - 1);
+    return "?";
+}
+
+/// Give the clients of domain i's services fresh capabilities (theirs were
+/// revoked when it went down).
+fn reconnectClients(i: usize) void {
+    inline for (manifest.domains, 0..) |d, j| {
+        inline for (d.uses, 0..) |u, ui| {
+            const t = comptime schema.resolveUse(manifest, u.from).?;
+            if (t.domain == i and domains[j].cnode != 0) {
+                const index = D.Slot.first_use + ui;
+                _ = g.invoke(domains[j].cnode, abi.CNodeMethod.delete, .{index});
+                mintProtocol(domains[j].cnode, index, domains[i].endpoints[t.service], .{ .send = true, .grant = true }, j + 1, comptime proto.kernelIdOf(u.protocol)) catch |e|
+                    g.record("reconnect_failed", .{ .domain = d.name, .service = u.name, .err = @errorName(e) });
+            }
+        }
+    }
 }
 
 fn onExit(i: usize, code: u16) void {
@@ -958,7 +1085,10 @@ export fn stewardMain(bi: *const abi.BootInfo) callconv(.c) noreturn {
         if (manifest.halt_when_tasks_finish and tasksDone() and awaitedReady()) summary();
         const m = g.recv(lifecycle);
         if (m.status != .ok) continue;
-        if (m.badge & fault_flag != 0) {
+        if (m.badge & service_flag != 0) {
+            const rep = idl.dispatch(.{SP}, &service, m);
+            _ = idl.sendReply(&rep);
+        } else if (m.badge & fault_flag != 0) {
             const i = m.badge & ~fault_flag;
             if (i < ndomains) onFault(i, m);
         } else if (m.badge >= 1 and m.badge <= ndomains) {

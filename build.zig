@@ -82,7 +82,7 @@ pub fn build(b: *std.Build) void {
     // boot image and embedded in its own Steward. grain-pack refuses an image
     // missing a program, and Steward refuses a miswired manifest at compile time.
     const system_path = b.option([]const u8, "system", "System manifest for run/steward/check-manifest: .brix or .zon (default system/dev.brix)") orelse "system/dev.brix";
-    const program_names = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker", "crasher", "waiter", "registry", "kv", "envoy", "tablecloth", "kumara", "ledger", "surf", "shell", "mycelium", "comlink", "guestbook", "consent" };
+    const program_names = [_][]const u8{ "virtio_console", "virtio_rng", "hello", "flaky", "checker", "crasher", "waiter", "registry", "kv", "envoy", "tablecloth", "kumara", "ledger", "surf", "shell", "mycelium", "comlink", "guestbook", "consent", "taskman", "settings" };
 
     const pack = b.addExecutable(.{ .name = "grain-pack", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/pack/main.zig"),
@@ -796,6 +796,7 @@ pub fn build(b: *std.Build) void {
     const tablecloth_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/tablecloth.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(tablecloth_tests).step);
     const paint_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/paint.zig"), .target = host, .optimize = optimize }) });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/ui.zig"), .target = host, .optimize = optimize }) })).step);
     test_step.dependOn(&b.addRunArtifact(paint_tests).step);
     const input_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("grain/lib/virtio_input.zig"), .target = host, .optimize = optimize }) });
     test_step.dependOn(&b.addRunArtifact(input_tests).step);

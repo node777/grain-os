@@ -84,6 +84,9 @@ object; lifetime is the region's.
 **CPU time.** A thread runs only on a scheduling context's budget; a
 context is configured through the single `SchedControl` capability
 (Steward's). Passive servers run on their callers' contexts (donation).
+A context counts every tick charged to it, whoever was running on it;
+`SchedContext.info` (with `read`) reads the count, which is how Steward
+reports each domain's CPU time to the task manager.
 
 **Interrupts.** `IrqControl.get(line)` makes an Irq object for a device
 line; lines the kernel uses itself (a GIC's IPIs and timer, below 32) are

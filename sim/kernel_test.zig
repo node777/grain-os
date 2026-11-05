@@ -289,6 +289,36 @@ test "budgets: a thread with 20% of a period is throttled and refilled" {
     try std.testing.expect(m.current(0) == w);
 }
 
+test "a context counts the time charged to it; info needs the read right" {
+    var m = try bootMachine();
+    defer m.deinit();
+    const w = try spawn(&m, 110, 111, 200, 2_000, 10_000);
+    var info = try m.invoke(0, 111, abi.SchedContextMethod.info, &.{});
+    try expectEqual(abi.Status.ok, info.status);
+    try expectEqual(@as(u64, 2_000), info.words[0]);
+    try expectEqual(@as(u64, 10_000), info.words[1]);
+    try expectEqual(@as(u64, 0), info.words[2]);
+    _ = try m.invoke(0, 110, abi.ThreadMethod.resume_thread, &.{});
+    // The root sleeps until an alarm wakes it, 7000 ticks on.
+    try retype(&m, .signal, 0, 100);
+    try expectEqual(abi.Status.ok, (try m.invoke(0, 100, abi.SignalMethod.alarm, &.{7_000})).status);
+    _ = try m.sys(0, .wait, 100, 0, &.{});
+    try std.testing.expect(m.current(0) == w);
+    // The worker runs its whole budget, is throttled, and waits for its
+    // refill: only the time it ran is charged.
+    try m.advance(0, 2_000);
+    try expectEqual(abi.ThreadState.stalled, w.state);
+    try m.advance(0, 5_000);
+    try std.testing.expect(m.current(0) == m.root);
+    info = try m.invoke(0, 111, abi.SchedContextMethod.info, &.{});
+    try expectEqual(abi.Status.ok, info.status);
+    try expectEqual(@as(u64, 2_000), info.words[2]);
+    try expectEqual(@as(u64, 1), info.words[4]); // throttled until its refill
+    // A copy without read may not ask.
+    _ = try m.invoke(0, S.cnode, abi.CNodeMethod.mint, &.{ 112, 111, (abi.Rights{ .configure = true }).bits(), 0 });
+    try expectEqual(abi.Status.no_rights, (try m.invoke(0, 112, abi.SchedContextMethod.info, &.{})).status);
+}
+
 test "round robin between equal priorities on full-bandwidth contexts" {
     var m = try bootMachine();
     defer m.deinit();
