@@ -204,7 +204,9 @@ const Server = struct {
         _ = try ownerOf(c);
         cloth.commit() catch |e| return storeError(e);
         g.log("tablecloth_commit", .{ .seq = cloth.sup.seq, .objects = cloth.n_objects, .used_blocks = cloth.sup.usedBlocks() });
-        return .{ .seq = cloth.sup.seq };
+        const seq = cloth.sup.seq;
+        reclaimIfLow();
+        return .{ .seq = seq };
     }
 
     pub fn switch_to(_: *Server, p: P.switch_to.Params, c: idl.Caller) !P.switch_to.Results {
@@ -250,6 +252,18 @@ const Server = struct {
         return .{ .dropped = r.dropped, .copied = r.copied, .free = r.free };
     }
 };
+
+/// Running low on space (less than a quarter of the log free): bring back
+/// what nothing keeps alive, at once. Each commit rewrites the index, so a
+/// busy store (every agent action is committed) fills its log between
+/// boots; waiting for the next boot to reclaim would let it run out.
+fn reclaimIfLow() void {
+    if (cloth.freeBlocks() >= cloth.sup.logBlocks() / 4) return;
+    cached = .{};
+    if (cloth.reclaim(cloth.sup.logBlocks())) |rc| {
+        g.log("tablecloth_reclaimed", .{ .dropped = rc.dropped, .copied = rc.copied, .free_blocks = rc.free, .by = "tablecloth" });
+    } else |e| g.log("tablecloth_reclaim_failed", .{ .err = @errorName(e) });
+}
 
 /// A generation gets a Mantra name the first time it is staged: `system@N`,
 /// numbered in the order generations arrive. Only a valid descriptor whose
@@ -397,12 +411,7 @@ pub fn main() !u16 {
         g.log("generation_confirmed", .{ .promoted = promoted, .current = g.klog.hex(std.mem.readInt(u64, now[0..8], .big)) });
     } else g.log("generation_not_confirmed", .{ .reason = "boot_unhealthy" });
 
-    // Running low on space: bring back what nothing keeps alive.
-    if (cloth.freeBlocks() < cloth.sup.logBlocks() / 4) {
-        if (cloth.reclaim(cloth.sup.logBlocks())) |rc| {
-            g.log("tablecloth_reclaimed", .{ .dropped = rc.dropped, .copied = rc.copied, .free_blocks = rc.free, .by = "tablecloth" });
-        } else |e| g.log("tablecloth_reclaim_failed", .{ .err = @errorName(e) });
-    }
+    reclaimIfLow();
     _ = g.call(D.Slot.steward, .{ .label = ready, .length = 1 }, .{1});
 
     var s: Server = .{};

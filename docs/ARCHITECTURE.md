@@ -599,8 +599,10 @@ power cut leaves the old passphrase or the new one working (the crash
 scenario's last step). Over IPC it needs the current passphrase, and the
 store answers only the domain named `settings` (the agent may hold the
 store but cannot change its passphrase); a refusal is recorded
-(`tablecloth_passphrase_refused`). When less than a quarter of the log is free at boot,
-the store reclaims by itself once it is unlocked.
+(`tablecloth_passphrase_refused`). When less than a quarter of the log is free, at boot
+(once unlocked) or after any commit, the store reclaims by itself: each
+commit rewrites the index, so a busy store (every agent action commits)
+would otherwise fill its log between boots.
 
 - *Planned:* an index that is not rewritten whole per commit, changing the
   passphrase from the device itself (it needs the owner present, so it
@@ -1102,8 +1104,17 @@ window is shown; select a row to read its program, priority and budget,
 and to restart or stop it. A restart that started a domain counts as one of
 its restarts. It runs on 2% of hart 0.
 
+**Glow** (docs/GLOW.md) is the shell's language: calls to what the program
+holds, by manifest name, with typed arguments checked against the IDL
+before anything is sent (`grain/proto/glow_call.zig`, generated at compile
+time over every protocol), and typed records back, with names, fields,
+pipes that fill arguments from the record on their left, loops and
+conditions. The language itself (`grain/lib/glow.zig`) is pure: tested on
+the host and fuzzed. It adds no authority.
+
 **The shell** is built on the toolkit. It opens a hidden, resizable window,
-appears in the dock, and when opened takes typed commands (`whoami`, `store`, `ledger`, `get`/`put`, `echo`,
+appears in the dock, and when opened takes Glow, and its older typed
+commands as shorthands (`whoami`, `store`, `ledger`, `get`/`put`, `echo`,
 `clear`) over the services the manifest gives it; its answers are `answer`
 strokes anyone with the scene can read. Without a screen Surf is skipped
 (its devices are optional) and the shell rests.

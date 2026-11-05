@@ -20,6 +20,8 @@ pub const guestbook = @import("guestbook.zig");
 pub const attest = @import("attest.zig");
 pub const steward = @import("steward.zig");
 pub const desktop = @import("desktop.zig");
+/// Glow's world in a domain: its uses, callable by name (not a protocol).
+pub const glow_call = @import("glow_call.zig");
 
 pub const all = .{ console, entropy, echo, kv, registry, tablecloth, kumara, ledger, input, surf, scene, mycelium, comlink, guestbook, attest, steward, desktop };
 

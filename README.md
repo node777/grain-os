@@ -128,6 +128,7 @@ hash chain: verified  head f82b57c52ddf0fb7...
 - [docs/PLAN.md](docs/PLAN.md): phased roadmap and open questions
 - [docs/TESTING.md](docs/TESTING.md): how each layer is built, booted, tested and driven
 - [docs/MAC.md](docs/MAC.md): getting ready to run and use Grain on a Mac, safely
+- [docs/GLOW.md](docs/GLOW.md): Glow, the command language
 - [docs/WEB.md](docs/WEB.md): Grain in a browser: the page, how it works, publishing it
 - [docs/CAPABILITY_MODEL.md](docs/CAPABILITY_MODEL.md): the capability model, written for an external reviewer
 - [docs/BRIX.md](docs/BRIX.md): Brix, the language manifests are written in

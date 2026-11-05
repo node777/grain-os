@@ -56,8 +56,9 @@ The four layers, from fastest to most real:
 
 1. **Unit tests** (`zig test` on the host): the device-tree parser against
    captured QEMU DTBs, the ELF reader, the record formatter, Sv39 encoding,
-   the IDL, and Brix (syntax, units, templates, and that each error names
-   the right line and column); the shipped `.brix` manifests must evaluate
+   the IDL, Glow (calls, pipes, loops, every error's explanation), and Brix
+   (syntax, units, templates, and that each error names the right line and
+   column); the shipped `.brix` manifests must evaluate
    and pass the check. The toolkit (`grain/lib/ui.zig`) runs against a
    recording sink: clicks reach the widget that drew them, fields take keys
    once focused, tables select, scroll and page.

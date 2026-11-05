@@ -231,7 +231,48 @@ fn manifests(src: *Source) !void {
     _ = schema.validate(r.value, &msg);
 }
 
-// ---------------------------------------------------------------------------
+/// Glow scripts, as the owner or an agent might type them, damaged: they
+/// must fail with an explanation or run, never crash or run away.
+fn glowScripts(src: *Source) !void {
+    const glow = g.glow;
+    const seeds = [_][]const u8{
+        "kv.put key=7 value=42; let r = kv.get key=7; print r.value + 1",
+        "for i in 0..3 { kv.put key=i value=(i*i) } # squares",
+        "kv.get key=1 | kv.put key=2 | .value",
+        "if (kv.get key=9).found and not false { print \"yes\" } else if 1 < 2 { print \"no\\n\" }",
+        "let x = -0x10 % 3; print x, x == -1, \"a\" + \"b\"; caps; describe kv; help",
+    };
+    const World = struct {
+        fn has(_: *anyopaque, cap: []const u8) bool {
+            return std.mem.eql(u8, cap, "kv");
+        }
+        fn call(_: *anyopaque, gpa: std.mem.Allocator, _: []const u8, method: []const u8, args: []const glow.Field, from: ?glow.Value, why: *glow.Why) error{Failed}!glow.Value {
+            if (method.len == 0 or method[0] == 'z') {
+                why.set("no such method", .{});
+                return error.Failed;
+            }
+            const fields = gpa.dupe(glow.Field, &.{ .{ .name = "found", .value = .{ .boolean = args.len > 0 } }, .{ .name = "value", .value = .{ .int = @intCast(args.len + @intFromBool(from != null)) } } }) catch return error.Failed;
+            return .{ .record = fields };
+        }
+        fn list(_: *anyopaque, out: glow.Out) void {
+            out.line(out.ctx, "kv  kv.v1");
+        }
+        fn describe(_: *anyopaque, cap: []const u8, _: glow.Out) bool {
+            return has(undefined, cap);
+        }
+        fn line(_: *anyopaque, _: []const u8) void {}
+    };
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const script = src.mutate(try arena.dupe(u8, seeds[src.below(seeds.len)]));
+    var dummy: u8 = 0;
+    var it = glow.Interp.init(arena, .{ .ctx = &dummy, .has = World.has, .call = World.call, .list = World.list, .describe = World.describe }, .{ .ctx = &dummy, .line = World.line });
+    it.run(script) catch |e| switch (e) {
+        error.OutOfMemory => return e,
+        error.Syntax, error.Failed, error.TooMuch => try std.testing.expect(it.why.text().len > 0),
+    };
+}
 
 // ---------------------------------------------------------------------------
 
@@ -258,6 +299,9 @@ test "fuzz: generation" {
 }
 test "fuzz: IDL messages" {
     try fuzz.run(idlMessages, .{ .sweep = 3000 });
+}
+test "fuzz: Glow scripts" {
+    try fuzz.run(glowScripts, .{ .sweep = 2000 });
 }
 test "fuzz: manifests" {
     try fuzz.run(manifests, .{ .sweep = 300 });

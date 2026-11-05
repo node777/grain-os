@@ -280,7 +280,7 @@ fn jsonString(comptime s: []const u8) []const u8 {
     }
 }
 
-fn typeName(comptime T: type) []const u8 {
+pub fn typeName(comptime T: type) []const u8 {
     comptime {
         if (isBytes(T)) return std.fmt.comptimePrint("{s}({d})", .{ if (T.idl_text) "text" else "bytes", T.idl_bytes });
         if (isCap(T)) return "cap";

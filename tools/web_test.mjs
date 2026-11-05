@@ -344,6 +344,31 @@ try {
     await logSince(page, n, /shell_ran [^@]*command=get ok=true/);
     check('store_back_for_its_clients', true);
 
+    // Glow, in the shell: calls, names, fields, pipes, loops, and errors that say why.
+    const glowLine = async (src) => {
+      const at = await logLength(page);
+      await page.$eval('#screen', (c, t) => {
+        const data = new DataTransfer();
+        data.setData('text/plain', t + '\n');
+        c.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+      }, src);
+      await logSince(page, at, /shell_ran [^@]*command=glow ok=/);
+      await logSince(page, at, /surf_presented [^@]*owner=shell/);
+      await page.waitForTimeout(600);
+      return (await elements(page, shellWin)).filter((e) => e.kind === 'text').map((e) => e.text);
+    };
+    let said = await glowLine('kv.put key=5 value=50');
+    said = await glowLine('let r = kv.get key=5; print r.value + 1');
+    check('glow_names_and_fields', said.includes('51'), JSON.stringify(said.slice(-6)));
+    said = await glowLine('kumara.whoami | .name');
+    check('glow_pipes', said.includes(`"${identityNow}"`), JSON.stringify(said.slice(-6)));
+    said = await glowLine('for i in 1..4 { kv.put key=i value=(i*10) }; kv.get key=3 | .value');
+    check('glow_loops', said[said.length - 2] === '30' || said.includes('30'), JSON.stringify(said.slice(-6)));
+    said = await glowLine('kv.gett key=1');
+    check('glow_explains_errors', said.some((t) => t.includes("has no method 'gett'")), JSON.stringify(said.slice(-6)));
+    said = await glowLine('describe kv');
+    check('glow_describes', said.some((t) => t.startsWith('kv.v1:')) && said.some((t) => t.startsWith('  kv.get key=u64')), JSON.stringify(said.slice(-8)));
+
     // Settings: the system as it is, the desktop's style, the passphrase.
     const setWin = await windowOf(page, 'settings');
     const setLauncher = (await elements(page, 0)).find((e) => e.role === 'launcher' && e.text === 'settings');
@@ -376,6 +401,7 @@ try {
     await logSince(page, n, /surf_presented [^@]*owner=shell/);
     const deskBg = (await elements(page, 0)).find((e) => e.role === 'background');
     const shellBg = (await elements(page, shellWin)).find((e) => e.role === 'background');
+    check('style_kept', sw.some((e) => e.role === 'note' && e.text === 'daylight, and kept for the next boot'), JSON.stringify(sw.filter((e) => e.role === 'note')));
     check('daylight_everywhere', deskBg.color === 0xe4ddd0 && shellBg.color === 0xf6f1e8 && sw.find((e) => e.role === 'background').color === 0xf6f1e8,
       JSON.stringify([deskBg.color.toString(16), shellBg.color.toString(16)]));
     n = await logLength(page);

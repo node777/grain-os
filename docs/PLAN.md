@@ -279,15 +279,20 @@ named **Glow**.
 - Built: Settings (the system and identity, the desktop's style through
   `desktop.v1`, storage and generations with a rollback, the passphrase
   through `tablecloth.passphrase`), the style kept across boots.
-- Next: Glow, the command language, in the shell and for the agent.
+- Built: Glow, the command language (docs/GLOW.md): the language in
+  `grain/lib/glow.zig`, every protocol reachable from it, in the shell.
+- Next in Glow: plans and undo through Envoy, a `grain_run` tool for the
+  agent, grainsh in the page speaking Glow (WebAssembly), lists and maps.
 - Known, to look into: (1) late in the long browser test, a fast burst of
   keys into Settings (1% of a hart) once came out with the two new
   passphrases unequal; the test now types at a person's pace, and the
   cause (where keys are lost or reordered under load) is not yet found.
   (2) Every agent action commits the store, and each commit rewrites
-  Tablecloth's whole index (about 35 blocks late in that test), so a long
-  agent session can fill a 64 MiB disk before the next boot reclaims it;
-  the planned incremental index is the fix.
+  Tablecloth's whole index (about 35 blocks late in that test). A long
+  agent session filled the 64 MiB disk before the next boot reclaimed it,
+  and a later save failed; the store now reclaims as soon as a commit
+  leaves less than a quarter of its log free. The planned incremental
+  index would make each commit small.
 
 ## Next: the platform (proposed, in this order)
 Five aims from the owner: applications and drivers that ship with Grain,

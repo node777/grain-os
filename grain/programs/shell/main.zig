@@ -92,12 +92,42 @@ const Shell = struct {
 // ---------------------------------------------------------------------------
 // Commands
 
+/// Glow's memory: names (`let`) last until it is full, then start again.
+var glow_buf: [96 * 1024]u8 = undefined;
+var glow_fba: std.heap.FixedBufferAllocator = .init(&glow_buf);
+var glow_it: ?g.glow.Interp = null;
+
+fn glowLine(_: *anyopaque, text: []const u8) void {
+    // Long answers wrap at the window's edge.
+    var rest = text;
+    while (rest.len > max_cols) : (rest = rest[max_cols..]) say(.answer, rest[0..max_cols]);
+    say(.answer, rest);
+}
+
+fn runGlow(src: []const u8) bool {
+    if (glow_it == null) glow_it = .init(glow_fba.allocator(), proto.glow_call.world(), .{ .ctx = &glow_buf, .line = glowLine });
+    const it = &glow_it.?;
+    it.run(src) catch |e| {
+        if (e == error.OutOfMemory) {
+            glow_fba.reset();
+            glow_it = null;
+            say(.fault, "Glow's memory was full: names are forgotten; try again.");
+        } else say(.fault, it.why.text());
+        return false;
+    };
+    return true;
+}
+
 fn run(line: []const u8) void {
     const cmd = std.mem.trim(u8, line, " ");
     if (cmd.len == 0) return;
     sayf(.command, "> {s}", .{cmd});
     var it = std.mem.tokenizeScalar(u8, cmd, ' ');
     const verb = it.next().?;
+    if (!shorthand(verb)) {
+        g.log("shell_ran", .{ .command = "glow", .ok = runGlow(cmd) });
+        return;
+    }
     const ok = dispatch(verb, &it) catch |e| blk: {
         sayf(.fault, "{s}: {s}", .{ verb, switch (e) {
             error.Transport => "not available here",
@@ -120,15 +150,17 @@ fn service(name: []const u8) !g.CPtr {
     return g.use(name) orelse error.Transport;
 }
 
+/// The shell's own words, kept from before Glow; anything else is Glow.
+fn shorthand(verb: []const u8) bool {
+    for ([_][]const u8{ "help", "whoami", "store", "ledger", "get", "put", "echo", "clear" }) |w| if (std.mem.eql(u8, w, verb)) return true;
+    return false;
+}
+
 fn dispatch(verb: []const u8, it: anytype) !bool {
     const eq = std.mem.eql;
     if (eq(u8, verb, "help")) {
-        say(.answer, "whoami          this instance's identity");
-        say(.answer, "store           the content store's disk");
-        say(.answer, "ledger          the signed record of authority");
-        say(.answer, "get K / put K V the key-value store");
-        say(.answer, "echo TEXT       say it back");
-        say(.answer, "clear           start a fresh page");
+        for (g.glow.help_text) |l| say(.answer, l);
+        say(.answer, "Shorthands: whoami, store, ledger, get K, put K V, echo TEXT, clear.");
     } else if (eq(u8, verb, "whoami")) {
         const r = try idl.call(proto.kumara.whoami, try service("kumara"), .{});
         sayf(.answer, "{s}", .{r.name.slice()});

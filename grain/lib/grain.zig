@@ -11,6 +11,7 @@ pub const kumara = @import("kumara.zig");
 pub const generation = @import("generation.zig");
 pub const paint = @import("paint.zig");
 pub const ui = @import("ui.zig");
+pub const glow = @import("glow.zig");
 pub const virtio_gpu = @import("virtio_gpu.zig");
 pub const virtio_input = @import("virtio_input.zig");
 pub const virtio_net = @import("virtio_net.zig");

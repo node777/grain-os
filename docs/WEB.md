@@ -138,7 +138,8 @@ window dragged by its title bar, resized from the corner (the shell lays
 itself out again), minimized, brought back from the dock where it was, and
 closed; the task manager restarting an exited task, stopping a service
 and restarting it, with the shell's calls to it working again; Settings
-showing the identity, putting everything in the daylight style, refusing a
+showing the identity, putting everything in the daylight style; Glow in
+the shell (names, fields, pipes, loops, an explained error, describe); refusing a
 wrong passphrase and changing it);
 `bye`; then a reload in the same browser profile, where the disk
 must still be there (the same identity, the old passphrase refused and the new one
