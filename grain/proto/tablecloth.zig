@@ -153,3 +153,8 @@ pub fn find(ep: grain.CPtr, name_: []const u8, secret: bool) idl.CallError!?[32]
     const r = try idl.call(lookup, ep, .{ .name = NameText.from(name_), .secret = secret });
     return if (r.found) r.hash.data else null;
 }
+
+pub const passphrase = idl.Method(.{ .label = 15, .effect = .external, .doc = "Change the passphrase, given the current one. Nothing sealed changes, only how its key is wrapped; one commit, so a power cut leaves either passphrase working. The owner's settings alone may ask." }, struct {
+    current: idl.Text(96),
+    new: idl.Text(96),
+}, struct {});

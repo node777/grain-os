@@ -66,9 +66,9 @@ def run(s, check, screen):
     caps = {c["name"]: c for c in s.discover()}
     check("scene_granted", caps["scene"]["granted"] and caps["scene"]["protocol"] == "scene.v1", caps.get("scene"))
     w = s.call("scene", "windows")
-    check("desktop_up", w["width"] == 1024 and w["height"] == 768 and w["count"] == 3, w)
+    check("desktop_up", w["width"] == 1024 and w["height"] == 768 and w["count"] == 4, w)
     sw = window_of(s, "shell")
-    check("apps_have_windows", sw > 0 and window_of(s, "tasks") > 0, w)
+    check("apps_have_windows", sw > 0 and window_of(s, "tasks") > 0 and window_of(s, "settings") > 0, w)
     shell_win = s.call("scene", "window", index=sw)
     check("shell_waits_in_dock", shell_win["owner"] == "shell" and not shell_win["shown"], shell_win)
     launcher = next((e for e in elements(s, 0) if e["role"] == "launcher" and e["text"] == "shell"), None)

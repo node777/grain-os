@@ -592,10 +592,14 @@ and reports settled; a test system does not power off before that. Steward
 never blocks on a domain (an earlier draft had Steward call the store, and a
 store fault would have deadlocked the supervisor).
 
-**Changing the passphrase** (`rekey`, `grain-disk passwd`) rewraps the
+**Changing the passphrase** (`rekey`, `grain-disk passwd`, or
+`tablecloth.passphrase` from the owner's Settings) rewraps the
 master key under a fresh salt in one commit: nothing sealed changes, and a
 power cut leaves the old passphrase or the new one working (the crash
-scenario's last step). When less than a quarter of the log is free at boot,
+scenario's last step). Over IPC it needs the current passphrase, and the
+store answers only the domain named `settings` (the agent may hold the
+store but cannot change its passphrase); a refusal is recorded
+(`tablecloth_passphrase_refused`). When less than a quarter of the log is free at boot,
 the store reclaims by itself once it is unlocked.
 
 - *Planned:* an index that is not rewritten whole per commit, changing the
@@ -1074,13 +1078,29 @@ through a sink and knows nothing of IPC (its tests run on the host);
 an optional periodic tick (an alarm on the same signal, badge 2), events
 to the widgets, one redraw for everything that came.
 
+**Styles** (`desktop.v1`, served by Surf beside surf.v1 and scene.v1):
+*dusk* (light on deep violet, the default) and *daylight* (dark on warm
+paper). `set_style` repaints the desktop and every frame and sends each
+window `restyled`; `surf.App` switches the toolkit's theme with it, so
+applications follow without code of their own. Its undo is itself, given
+the style it returns.
+
+**Settings** (`grain/programs/settings`): four tabs. *System*: this
+instance's identity and key, the system's name and closure, harts, uptime,
+the Ledger's length. *Desktop*: the style, kept in the content store under
+`settings/style` and put back at boot (Settings reads it as soon as the
+store is unlocked). *Storage*: space used, objects, commits, the current,
+pending and previous generations, and a rollback that asks twice.
+*Security*: the passphrase, typed into secret fields (current, new, new
+again). It runs on 1% of hart 0.
+
 **The task manager** (`grain/programs/taskman`) holds `steward.domains` and
 the surf: a table of every domain with its status, its share of a hart
 over the last second (from the change in its charged CPU time), that time,
 its restarts, hart, budget and region, refreshed every second while its
 window is shown; select a row to read its program, priority and budget,
 and to restart or stop it. A restart that started a domain counts as one of
-its restarts. It runs on 3% of hart 0.
+its restarts. It runs on 2% of hart 0.
 
 **The shell** is built on the toolkit. It opens a hidden, resizable window,
 appears in the dock, and when opened takes typed commands (`whoami`, `store`, `ledger`, `get`/`put`, `echo`,

@@ -16,6 +16,7 @@ const g = @import("grain");
 const proto = @import("proto");
 const P = proto.surf;
 const SceneP = proto.scene;
+const DeskP = proto.desktop;
 const idl = g.idl;
 const D = g.domain;
 const paint = g.paint;
@@ -29,25 +30,68 @@ comptime {
 }
 
 // ---------------------------------------------------------------------------
-// The look: warm and quiet.
+// The look: warm and quiet, in two styles (desktop.v1).
 
-const theme = struct {
-    const background: u32 = 0x1d1a2b;
-    const bar: u32 = 0x15131f;
-    const bar_text: u32 = 0xe9dfcf;
-    const dock: u32 = 0x2b2540;
-    const launcher: u32 = 0x3d355a;
-    const launcher_open: u32 = 0x7a6aa8;
-    const frame: u32 = 0xf3ece2;
-    const frame_focused: u32 = 0xfaf4ea;
-    const title: u32 = 0x3b3049;
-    const shadow: u32 = 0x000000;
-    const cursor: u32 = 0xfaf4ea;
-    const cursor_edge: u32 = 0x15131f;
-    const close: u32 = 0xe8a28c;
-    const minimize: u32 = 0xd9cfbf;
-    const grip: u32 = 0xb9ad9c;
+const Palette = struct {
+    background: u32,
+    bar: u32,
+    bar_text: u32,
+    dock: u32,
+    launcher: u32,
+    launcher_open: u32,
+    frame: u32,
+    frame_focused: u32,
+    title: u32,
+    shadow: u32,
+    cursor: u32,
+    cursor_edge: u32,
+    close: u32,
+    minimize: u32,
+    grip: u32,
 };
+
+const dusk: Palette = .{
+    .background = 0x1d1a2b,
+    .bar = 0x15131f,
+    .bar_text = 0xe9dfcf,
+    .dock = 0x2b2540,
+    .launcher = 0x3d355a,
+    .launcher_open = 0x7a6aa8,
+    .frame = 0xf3ece2,
+    .frame_focused = 0xfaf4ea,
+    .title = 0x3b3049,
+    .shadow = 0x000000,
+    .cursor = 0xfaf4ea,
+    .cursor_edge = 0x15131f,
+    .close = 0xe8a28c,
+    .minimize = 0xd9cfbf,
+    .grip = 0xb9ad9c,
+};
+
+const daylight: Palette = .{
+    .background = 0xe4ddd0,
+    .bar = 0xf6f1e8,
+    .bar_text = 0x2b2433,
+    .dock = 0xd3c9b8,
+    .launcher = 0xe9e2d6,
+    .launcher_open = 0xb8a6e0,
+    .frame = 0xfbf8f2,
+    .frame_focused = 0xffffff,
+    .title = 0x3b3049,
+    .shadow = 0x5a4e3c,
+    .cursor = 0xfaf4ea,
+    .cursor_edge = 0x15131f,
+    .close = 0xe8a28c,
+    .minimize = 0xd9cfbf,
+    .grip = 0xa89c8a,
+};
+
+var current_style: DeskP.Style = .dusk;
+var theme: *const Palette = &dusk;
+
+/// Text on a filled stroke: dark on light fills, light on dark ones.
+const ink_dark: u32 = 0x3b3049;
+const ink_light: u32 = 0xe9dfcf;
 const bar_h = 28;
 const title_h = 30;
 /// The frame's paper around the content, on the sides and below.
@@ -235,7 +279,7 @@ fn onColor(bg: u32) u32 {
     const r = (bg >> 16) & 0xff;
     const gg = (bg >> 8) & 0xff;
     const b = bg & 0xff;
-    return if (r * 3 + gg * 6 + b > 1280) theme.title else theme.bar_text;
+    return if (r * 3 + gg * 6 + b > 1280) ink_dark else ink_light;
 }
 
 fn drawStroke(c: *paint.Canvas, s: *const Stroke, dx: i32, dy: i32) void {
@@ -352,6 +396,18 @@ fn layoutDesktop() void {
 
 fn launcherId(window: u8) u16 {
     return 1000 + @as(u16, window);
+}
+
+/// Change style: the desktop and frames repaint, every window is told.
+fn restyle(to: DeskP.Style) void {
+    if (to == current_style) return;
+    current_style = to;
+    theme = switch (to) {
+        .dusk => &dusk,
+        .daylight => &daylight,
+    };
+    for (wins[1..]) |*w| if (w.used) w.push(.{ .kind = .restyled, .code = @intFromEnum(to) });
+    refreshDesktop();
 }
 
 /// Lay the desktop out again and repaint everything.
@@ -642,6 +698,8 @@ const Server = struct {
             w.y = bar_h + 24 + (@as(i32, i) - 1) * 24;
         }
         if (again and w.shown) repaint(before.join(w.footprint()));
+        // A new window learns the style, unless it is the default.
+        if (!again and current_style != .dusk) w.push(.{ .kind = .restyled, .code = @intFromEnum(current_style) });
         g.log("surf_window_opened", .{ .window = i, .owner = w.owner[0..w.owner_len], .title = w.titleSlice(), .width = w.w, .height = w.h });
         if (p.shown) setShown(i, true) else refreshDesktop();
         return .{};
@@ -686,6 +744,19 @@ const Server = struct {
         w.ev_head = @intCast((w.ev_head + 1) % w.events.len);
         w.ev_len -= 1;
         return .{ .kind = e.kind, .char = e.char, .code = e.code, .x = e.x, .y = e.y, .element = e.element };
+    }
+
+    // --- desktop.v1 --------------------------------------------------------
+
+    pub fn style(_: *Server, _: DeskP.style.Params, _: idl.Caller) !DeskP.style.Results {
+        return .{ .style = current_style };
+    }
+
+    pub fn set_style(_: *Server, p: DeskP.set_style.Params, _: idl.Caller) !DeskP.set_style.Results {
+        const was = current_style;
+        restyle(p.style);
+        g.log("surf_restyled", .{ .style = @tagName(p.style), .was = @tagName(was) });
+        return .{ .style = was };
     }
 
     // --- scene.v1 ----------------------------------------------------------
@@ -851,5 +922,5 @@ pub fn main() !u16 {
 
     idl.recv_slot = try space.slot();
     var s: Server = .{};
-    idl.serveAll(.{ P, SceneP }, g.provided("surf") orelse return error.NoService, &s);
+    idl.serveAll(.{ P, SceneP, DeskP }, g.provided("surf") orelse return error.NoService, &s);
 }

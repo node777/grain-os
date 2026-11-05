@@ -276,8 +276,18 @@ named **Glow**.
   and the toolkit `grain/lib/ui.zig`; the shell rebuilt on it.
 - Built: the task manager, on `steward.v1` (served by Steward) and the
   kernel's count of the time charged to each scheduling context.
-- Next: a settings application (identity and system, the desktop's theme,
-  storage and generations, the passphrase).
+- Built: Settings (the system and identity, the desktop's style through
+  `desktop.v1`, storage and generations with a rollback, the passphrase
+  through `tablecloth.passphrase`), the style kept across boots.
+- Next: Glow, the command language, in the shell and for the agent.
+- Known, to look into: (1) late in the long browser test, a fast burst of
+  keys into Settings (1% of a hart) once came out with the two new
+  passphrases unequal; the test now types at a person's pace, and the
+  cause (where keys are lost or reordered under load) is not yet found.
+  (2) Every agent action commits the store, and each commit rewrites
+  Tablecloth's whole index (about 35 blocks late in that test), so a long
+  agent session can fill a 64 MiB disk before the next boot reclaims it;
+  the planned incremental index is the fix.
 
 ## Next: the platform (proposed, in this order)
 Five aims from the owner: applications and drivers that ship with Grain,

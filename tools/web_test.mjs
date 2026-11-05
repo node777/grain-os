@@ -8,7 +8,9 @@
 // command there (holding the scene, read through Envoy, against the pixels),
 // says bye; reloads in the same browser profile and checks the disk persisted (the
 // same identity, a wrong passphrase refused, the right one accepted); exports the
-// disk, forgets it and imports it back; boots with a larger screen.
+// disk, forgets it and imports it back; boots with a larger screen. Along the way:
+// the task manager restarts and stops domains, and Settings restyles the
+// desktop and changes the passphrase (both kept across boots).
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -98,8 +100,19 @@ async function dragScreen(page, x0, y0, x1, y1) {
   await page.mouse.move(...await toScreen(page, x1, y1), { steps: 6 });
   await page.mouse.up();
 }
-const logSince = (page, n, re) => page.waitForFunction(([n, src]) => new RegExp(src).test(document.getElementById('log-out').textContent.slice(n)), [n, re.source], { timeout: 120_000, polling: 200 });
-const logLength = async (page) => (await text(page, 'log-out')).length;
+// The page keeps only the last few thousand log lines, so waits count lines
+// in a copy of every line, kept by the test (watchLog, in each page).
+const watchLog = () => {
+  window.__lines = [];
+  new MutationObserver((changes) => {
+    for (const c of changes) for (const node of c.addedNodes) window.__lines.push(node.textContent);
+  }).observe(document, { childList: true, subtree: true });
+};
+const logSince = (page, n, re, timeout = 120_000) => page.waitForFunction(([n, src]) => {
+  const r = new RegExp(src);
+  return window.__lines.slice(n).some((l) => r.test(l));
+}, [n, re.source], { timeout, polling: 200 });
+const logLength = (page) => page.evaluate(() => window.__lines.length);
 
 async function clickScreen(page, x, y) {
   await page.locator('#screen').scrollIntoViewIfNeeded();
@@ -164,6 +177,7 @@ try {
 
   // 2. The dev system on a fresh disk, then 3. again on the same disk.
   const ctx = await browser.newContext({ viewport: { width: 1600, height: 1100 }, acceptDownloads: true });
+  await ctx.addInitScript(watchLog);
   {
     const page = await ctx.newPage();
     page.on('pageerror', (e) => check('no_page_errors', false, e.message));
@@ -175,6 +189,7 @@ try {
     await until(page, 'log-out', 'kumara_ready');
     const log = await text(page, 'log-out');
     const name = /kumara_ready domain=kumara name=(\S+) .* created=true/.exec(log);
+    const identityNow = name && name[1];
     check('identity_created', name !== null, log);
     await shell(page, 'caps', 'kv.v1');
     check('grainsh_caps', (await text(page, 'shell-out')).includes('entropy.v1'));
@@ -329,6 +344,77 @@ try {
     await logSince(page, n, /shell_ran [^@]*command=get ok=true/);
     check('store_back_for_its_clients', true);
 
+    // Settings: the system as it is, the desktop's style, the passphrase.
+    const setWin = await windowOf(page, 'settings');
+    const setLauncher = (await elements(page, 0)).find((e) => e.role === 'launcher' && e.text === 'settings');
+    n = await logLength(page);
+    await clickScreen(page, setLauncher.x + (setLauncher.w >> 1), setLauncher.y + (setLauncher.h >> 1));
+    await logSince(page, n, /surf_window_shown [^@]*title=settings/);
+    await logSince(page, n, /surf_presented [^@]*owner=settings/);
+    let sw = await elements(page, setWin);
+    check('settings_shows_identity', sw.some((e) => e.role === 'value' && e.text === identityNow), JSON.stringify(sw.filter((e) => e.role === 'value').map((e) => e.text)));
+    const press = async (role, label) => {
+      const e = sw.find((x) => x.role === role && x.text === label);
+      await clickScreen(page, e.x + (e.w >> 1), e.y + (e.h >> 1));
+    };
+    const settled = async (re) => {
+      try { await logSince(page, n, re, 180_000); } catch (e) {
+        if (process.env.WEB_TEST_SHOTS) await page.locator('#screen').screenshot({ path: path.join(process.env.WEB_TEST_SHOTS, 'settings-stuck.png') });
+        const now = await elements(page, setWin);
+        check('settings_settled', false, JSON.stringify({ waiting: re.source, focus: await call(page, 'scene.windows'), roles: now.map((x) => `${x.role}:${x.text}`), log: await page.evaluate(() => window.__lines.slice(-12)) }));
+        throw e;
+      }
+      await page.waitForTimeout(1200);
+      sw = await elements(page, setWin);
+    };
+    n = await logLength(page);
+    await press('tab', 'Desktop');
+    await settled(/surf_presented [^@]*owner=settings/);
+    n = await logLength(page);
+    await press('button', 'Daylight');
+    await settled(/settings_style [^@]*style=daylight/);
+    await logSince(page, n, /surf_presented [^@]*owner=shell/);
+    const deskBg = (await elements(page, 0)).find((e) => e.role === 'background');
+    const shellBg = (await elements(page, shellWin)).find((e) => e.role === 'background');
+    check('daylight_everywhere', deskBg.color === 0xe4ddd0 && shellBg.color === 0xf6f1e8 && sw.find((e) => e.role === 'background').color === 0xf6f1e8,
+      JSON.stringify([deskBg.color.toString(16), shellBg.color.toString(16)]));
+    n = await logLength(page);
+    await press('tab', 'Security');
+    await settled(/surf_presented [^@]*owner=settings/);
+    // The first time, click into the first field; after that, the focus is
+    // on the last one (Enter was pressed there), and Tab wraps to the first.
+    const typePassphrases = async (current, first) => {
+      if (first) {
+        const input = sw.find((e) => e.role === 'input');
+        await clickScreen(page, input.x + 20, input.y + (input.h >> 1));
+      }
+      await page.locator('#screen').focus();
+      if (!first) await page.keyboard.press('Tab');
+      // At a person's pace: late in this run the system is busy, and a
+      // burst of keys into a 1%-budget app has come out unequal.
+      for (const [i, t] of [current, 'new sesame', 'new sesame'].entries()) {
+        await page.keyboard.type(t, { delay: 40 });
+        await page.keyboard.press(i < 2 ? 'Tab' : 'Enter');
+      }
+    };
+    n = await logLength(page);
+    await typePassphrases('not it', true);
+    await settled(/tablecloth_passphrase_refused/);
+    check('settings_refuses_a_wrong_passphrase', sw.some((e) => e.role === 'note' && e.text === 'That is not the current passphrase.'), JSON.stringify(sw.filter((e) => e.role === 'note')));
+    n = await logLength(page);
+    await typePassphrases('open sesame', false);
+    // Two key derivations on the store's budget: give it time, and say what
+    // the system was doing if it never answers.
+    try { await logSince(page, n, /settings_passphrase [^@]*changed=/, 300_000); } catch (e) {
+      check('settings_answers_a_passphrase_change', false, JSON.stringify(await page.evaluate(() => window.__lines.slice(-25))));
+      throw e;
+    }
+    await page.waitForTimeout(1200);
+    sw = await elements(page, setWin);
+    const lines = (await page.$eval('#log-out', (e) => Array.from(e.children, (c) => c.textContent))).filter((t) => /passphrase/.test(t)).slice(-6);
+    check('settings_changes_the_passphrase', lines.some((t) => /tablecloth_passphrase_changed [^@]*by=settings/.test(t)) && sw.some((e) => e.role === 'note' && e.text.startsWith('Passphrase changed')),
+      JSON.stringify({ lines, notes: sw.filter((e) => e.role === 'note').map((e) => e.text) }));
+
     await shell(page, 'bye', '"actions"');
     await page.waitForFunction(() => document.body.dataset.exit === '0', null, { timeout: LONG, polling: 500 });
     check('dev_powers_off_cleanly', (await text(page, 'log-out')).includes('summary') && !(await text(page, 'log-out')).includes('failed=1'));
@@ -342,12 +428,14 @@ try {
     check('disk_persisted', (await text(page, 'log-out')).includes("blocks from this browser's storage"));
     await until(page, 'console-out', 'passphrase');
     check('disk_not_new', !(await text(page, 'console-out')).includes('this disk is new'), await text(page, 'console-out'));
-    await typeConsole(page, 'wrong guess');
+    await typeConsole(page, 'open sesame'); // the old one: changed in Settings
     await until(page, 'log-out', 'tablecloth_unlock_failed');
-    await typeConsole(page, 'open sesame');
+    await typeConsole(page, 'new sesame');
     await until(page, 'log-out', 'kumara_ready');
     const log = await text(page, 'log-out');
     check('same_identity', log.includes(`name=${identity} `) && log.includes('created=false'), log);
+    await until(page, 'log-out', 'settings_restored');
+    check('style_kept_across_boots', /settings_restored [^@]*style=daylight/.test(await text(page, 'log-out')) && /surf_restyled [^@]*style=daylight/.test(await text(page, 'log-out')));
     await shell(page, 'call store.get key=9', '"value"');
     await shell(page, 'bye', '"actions"');
     await page.waitForFunction(() => document.body.dataset.exit === '0', null, { timeout: LONG, polling: 500 });
@@ -371,7 +459,7 @@ try {
     const page = await ctx.newPage();
     await page.goto(`${base}?config=dev&autostart=1`);
     await until(page, 'console-out', 'passphrase');
-    await typeConsole(page, 'open sesame');
+    await typeConsole(page, 'new sesame');
     await until(page, 'log-out', 'kumara_ready');
     check('disk_imported_same_identity', (await text(page, 'log-out')).includes(`name=${identity} `), await text(page, 'log-out'));
     await shell(page, 'bye', '"actions"');

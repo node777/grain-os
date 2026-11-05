@@ -137,10 +137,12 @@ typed on the canvas runs; text pasted onto it arrives as keystrokes; the
 window dragged by its title bar, resized from the corner (the shell lays
 itself out again), minimized, brought back from the dock where it was, and
 closed; the task manager restarting an exited task, stopping a service
-and restarting it, with the shell's calls to it working again);
+and restarting it, with the shell's calls to it working again; Settings
+showing the identity, putting everything in the daylight style, refusing a
+wrong passphrase and changing it);
 `bye`; then a reload in the same browser profile, where the disk
-must still be there (the same identity, a wrong passphrase refused, the
-right one accepted); the disk exported, forgotten and imported again (the
+must still be there (the same identity, the old passphrase refused and the new one
+accepted, the daylight style back); the disk exported, forgotten and imported again (the
 same identity after); and a boot with a 1280×800 screen.
 
 ## Publishing it (GitHub Pages)

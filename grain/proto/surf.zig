@@ -66,7 +66,7 @@ pub const listen = idl.Method(.{ .label = 4, .effect = .mutates, .doc = "Give Su
     signal: idl.Cap,
 }, struct {});
 
-pub const EventKind = enum { none, key, click, shown, hidden, close, resized };
+pub const EventKind = enum { none, key, click, shown, hidden, close, resized, restyled };
 
 pub const next_event = idl.Method(.{ .label = 5, .effect = .mutates, .doc = "Take the oldest event for your window (kind none if there is none)." }, struct {}, struct {
     kind: EventKind,
@@ -77,7 +77,7 @@ pub const next_event = idl.Method(.{ .label = 5, .effect = .mutates, .doc = "Tak
     element: u16,
     pub const docs = .{
         .char = "key: the character typed (0 for keys that type none)",
-        .code = "key: the key code (Linux numbering)",
+        .code = "key: the key code (Linux numbering); restyled: the desktop's new style (desktop.v1: 0 dusk, 1 daylight)",
         .x = "click: window coordinates; resized: the new width (and y the new height)",
         .element = "click: the element id under the pointer, or 0",
     };
@@ -255,6 +255,8 @@ pub const App = struct {
                         app.height = @intCast(@max(1, e.y));
                         if (@hasDecl(T, "resized")) state.resized();
                     },
+                    // The owner chose another style: the toolkit's theme follows.
+                    .restyled => app.theme = if (e.code == 1) &ui.light else &ui.dark,
                 }
                 changed = true;
             }

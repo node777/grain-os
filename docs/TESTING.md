@@ -142,9 +142,10 @@ The four layers, from fastest to most real:
    dragged, resized, minimized, restored and closed; the task manager
    listing every domain, restarting an exited task, stopping a service
    (shown as stopped) and restarting it, after which the shell's calls to
-   it work again; `bye`), then
-   reloads and checks the disk survived (the same identity; a wrong
-   passphrase refused), exports the disk, forgets it and imports it back,
+   it work again; Settings putting the desktop and the apps in daylight,
+   refusing a wrong passphrase and changing it; `bye`), then
+   reloads and checks the disk survived (the same identity; the old
+   passphrase refused and the new one accepted; the style kept), exports the disk, forgets it and imports it back,
    and boots with a 1280×800 screen. CI runs it
    on the release build (`.github/workflows/web.yml`).
 
