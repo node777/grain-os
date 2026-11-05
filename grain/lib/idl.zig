@@ -454,39 +454,55 @@ pub fn serveAll(comptime protocols: anytype, ep: grain.CPtr, impl: anytype) nore
             r = grain.recv(ep);
             continue;
         }
-        const req = gather(r);
-        var reply_label: u32 = 1;
-        var reply: Words = @splat(0);
-        reply[0] = @backingInt(ErrorCode.unknown_method);
-        var reply_len: u7 = 1;
-        inline for (protocols, 0..) |P, pi| {
-            const speaks = r.protocol == kernelId(P) or (r.protocol == 0 and pi == 0);
-            if (speaks) inline for (comptime methodNames(P)) |n| {
-                const M = @field(P, n);
-                if (r.tag.label == M.label) {
-                    if (decode(M.Params, &req)) |decoded| {
-                        var params = decoded;
-                        inline for (comptime std.meta.fieldNames(M.Params)) |f| if (comptime isCap(@FieldType(M.Params, f))) {
-                            @field(params, f).slot = if (r.tag.caps > 0) recv_slot else 0;
-                        };
-                        if (@field(@TypeOf(impl.*), n)(impl, params, .{ .badge = r.badge, .protocol = r.protocol })) |res| {
-                            reply_label = 0;
-                            reply = encode(M.Results, res);
-                            reply_len = @intCast(words(M.Results));
-                        } else |e| {
-                            reply[0] = @backingInt(codeOf(e));
-                        }
-                    } else |_| {
-                        reply[0] = @backingInt(ErrorCode.invalid_args);
-                    }
-                }
-            };
-        }
-        // A capability the handler did not move is dropped, so the slot is
-        // empty for the next one.
-        if (r.tag.caps > 0) _ = grain.invoke(grain.S.cnode, grain.abi.CNodeMethod.delete, .{recv_slot});
-        r = grain.syscall(.reply_recv, ep, @bitCast(grain.Tag{ .label = reply_label, .length = reply_len }), scatter(&reply, reply_len));
+        const rep = dispatch(protocols, impl, r);
+        r = grain.syscall(.reply_recv, ep, @bitCast(grain.Tag{ .label = rep.label, .length = rep.len }), scatter(&rep.w, rep.len));
     }
+}
+
+/// The answer to one request: a label (0 = ok, else an error code in w[0])
+/// and words.
+pub const Reply = struct { label: u32, w: Words, len: u7 };
+
+/// Handle one received request `r` (see serveAll); the caller replies. For
+/// a server with a loop of its own (Steward's).
+pub fn dispatch(comptime protocols: anytype, impl: anytype, r: grain.Result) Reply {
+    const req = gather(r);
+    var reply_label: u32 = 1;
+    var reply: Words = @splat(0);
+    reply[0] = @backingInt(ErrorCode.unknown_method);
+    var reply_len: u7 = 1;
+    inline for (protocols, 0..) |P, pi| {
+        const speaks = r.protocol == kernelId(P) or (r.protocol == 0 and pi == 0);
+        if (speaks) inline for (comptime methodNames(P)) |n| {
+            const M = @field(P, n);
+            if (r.tag.label == M.label) {
+                if (decode(M.Params, &req)) |decoded| {
+                    var params = decoded;
+                    inline for (comptime std.meta.fieldNames(M.Params)) |f| if (comptime isCap(@FieldType(M.Params, f))) {
+                        @field(params, f).slot = if (r.tag.caps > 0) recv_slot else 0;
+                    };
+                    if (@field(@TypeOf(impl.*), n)(impl, params, .{ .badge = r.badge, .protocol = r.protocol })) |res| {
+                        reply_label = 0;
+                        reply = encode(M.Results, res);
+                        reply_len = @intCast(words(M.Results));
+                    } else |e| {
+                        reply[0] = @backingInt(codeOf(e));
+                    }
+                } else |_| {
+                    reply[0] = @backingInt(ErrorCode.invalid_args);
+                }
+            }
+        };
+    }
+    // A capability the handler did not move is dropped, so the slot is
+    // empty for the next one.
+    if (r.tag.caps > 0 and recv_slot != 0) _ = grain.invoke(grain.S.cnode, grain.abi.CNodeMethod.delete, .{recv_slot});
+    return .{ .label = reply_label, .w = reply, .len = reply_len };
+}
+
+/// Reply to the request just received with `rep`.
+pub fn sendReply(rep: *const Reply) grain.Result {
+    return grain.syscall(.reply, 0, @bitCast(grain.Tag{ .label = rep.label, .length = rep.len }), scatter(&rep.w, rep.len));
 }
 
 test "encode and decode round-trip; descriptors and ids are stable" {

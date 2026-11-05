@@ -159,7 +159,8 @@ pub const Wake = enum { events, tick };
 
 /// A window and its loop. The application keeps its state in a value with
 /// `fn draw(self, *ui.Ui) void`, and may have `fn tick(self) void` (called
-/// on `every`), `fn closed(self) void` and `fn resized(self) void`.
+/// on `every` while the window is shown, and when it is shown),
+/// `fn closed(self) void` and `fn resized(self) void`.
 pub const App = struct {
     surf: grain.CPtr,
     /// Waited on: Surf raises it with badge 1, the alarm with badge 2.
@@ -227,8 +228,12 @@ pub const App = struct {
             var changed = false;
             if (bits & 2 != 0) {
                 if (app.period_ticks != 0) _ = grain.alarm(app.timer, app.period_ticks);
-                if (@hasDecl(T, "tick")) state.tick();
-                changed = app.shown;
+                // Ticks are for what is on the screen: a window put away
+                // costs nothing until it is shown again.
+                if (app.shown) {
+                    if (@hasDecl(T, "tick")) state.tick();
+                    changed = true;
+                }
             }
             while (true) {
                 const e = try idl.call(next_event, app.surf, .{});
@@ -236,7 +241,10 @@ pub const App = struct {
                     .none => break,
                     .key => app.handle(state, .{ .key = .{ .char = e.char, .code = e.code } }),
                     .click => app.handle(state, .{ .click = .{ .x = e.x, .y = e.y, .id = e.element } }),
-                    .shown => app.shown = true,
+                    .shown => {
+                        app.shown = true;
+                        if (@hasDecl(T, "tick")) state.tick();
+                    },
                     .hidden => app.shown = false,
                     .close => {
                         app.shown = false;

@@ -273,6 +273,9 @@ pub fn Kernel(comptime A: type) type {
             period: u64,
             remaining: u64,
             refill_at: u64,
+            /// Every tick ever charged to this context (SchedContext.info):
+            /// how much time its threads, and servers it was lent to, used.
+            consumed: u64,
             hart: u8,
             configured: bool,
             throttled: bool,
@@ -711,6 +714,7 @@ pub fn Kernel(comptime A: type) type {
                 .period = cfg.root_budget_ticks,
                 .remaining = cfg.root_budget_ticks,
                 .refill_at = cfg.now + cfg.root_budget_ticks,
+                .consumed = 0,
                 .hart = 0,
                 .configured = true,
                 .throttled = false,
@@ -1357,6 +1361,7 @@ pub fn Kernel(comptime A: type) type {
                     const sc = k.body(SchedContext, t.sc);
                     const used = k.now -| h.started_at;
                     sc.remaining -|= used;
+                    sc.consumed +%= used;
                     // Deal with exhaustion now, whatever the thread does in
                     // this entry: it may block or lend the context away, and
                     // then nobody would notice the budget ran out.
@@ -1945,6 +1950,7 @@ pub fn Kernel(comptime A: type) type {
                 .thread => try k.invokeThread(t, c, method),
                 .page_table => try k.invokeVSpace(t, c, method),
                 .sched_control => try k.invokeSchedControl(t, c, method),
+                .sched_context => try k.invokeSchedContext(t, c, method),
                 .irq_control => try k.invokeIrqControl(t, c, method),
                 .irq => try k.invokeIrq(t, c, method),
                 .lease => try k.invokeLease(t, c, method),
@@ -2245,6 +2251,15 @@ pub fn Kernel(comptime A: type) type {
             }
         }
 
+        fn invokeSchedContext(k: *Self, t: *Thread, c: Cap, method: u32) Error!void {
+            const m = std.enums.fromInt(abi.SchedContextMethod, method) orelse return error.UnknownMethod;
+            try need(c, .{ .read = true });
+            const sc = k.body(SchedContext, c.object);
+            switch (m) {
+                .info => setResult(t, .ok, &.{ sc.budget, sc.period, sc.consumed, sc.hart, @intFromBool(sc.throttled) }),
+            }
+        }
+
         fn invokeSchedControl(k: *Self, t: *Thread, c: Cap, method: u32) Error!void {
             _ = std.enums.fromInt(abi.SchedControlMethod, method) orelse return error.UnknownMethod;
             try need(c, .{ .configure = true });
@@ -2488,6 +2503,7 @@ pub fn Kernel(comptime A: type) type {
                     .sched_context => {
                         const sc = k.body(SchedContext, id);
                         if (sc.remaining > sc.budget) return "budget overrun";
+                        if (sc.consumed > k.now) return "context charged more time than has passed";
                         // An exhausted context must be waiting for a refill.
                         if (sc.configured and sc.remaining == 0 and !sc.throttled) return "exhausted context not throttled";
                         if (sc.throttled and !k.onReleaseList(id)) return "throttled context not on its release list";

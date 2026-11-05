@@ -175,6 +175,20 @@ domain shell like light {
     uses kv { from = store.kv, protocol = kv.v1 }
 }
 
+# The task manager: what Steward runs, how much time each domain uses, and
+# the owner's restart and stop. Steward serves steward.domains itself.
+domain tasks like light {
+    program = taskman
+    hart = 0
+    priority = 90
+    # A refresh a second is cheap: 3% of hart 0.
+    budget = 300us
+    stack = 32KiB
+    memory = 128KiB
+    uses surf { from = surf.surf, protocol = surf.v1 }
+    uses steward { from = steward.domains, protocol = steward.v1 }
+}
+
 # The network below Comlink: the network device, and datagrams between
 # instances on the link. Without a network device it is skipped.
 domain mycelium like driver {

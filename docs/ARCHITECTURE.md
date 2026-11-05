@@ -59,7 +59,7 @@ in userspace.
 | `Frame` | 4 KiB, 2 MiB or 1 GiB of memory (RAM or device). |
 | `Endpoint` | Synchronous IPC rendezvous (call/reply, send/recv). |
 | `Signal` | An asynchronous notification word (seL4 notifications): OR in bits, wait for any. Interrupts arrive as signals. |
-| `SchedContext` | A CPU-time budget and period on one hart (seL4 MCS). Time is a capability. |
+| `SchedContext` | A CPU-time budget and period on one hart (seL4 MCS). Time is a capability. It counts every tick charged to it (`info`: budget, period, ticks consumed, hart, throttled). |
 | `Lease` | A revocable, limited forwarder to another capability (§2.3). |
 | `Irq` | The right to receive one interrupt line as a signal. |
 | `IrqControl`, `SchedControl`, `DebugConsole` | Boot singletons: the authority to create Irqs, to give contexts budgets, and (for bring-up) console output and power-off. |
@@ -397,6 +397,21 @@ every hash at boot and refuses to start if any differs.
    `aborted` and later calls fail with `invalid_cap` instead of hanging.
 7. With `halt_when_tasks_finish`, it prints one `domain_status` record per
    domain and a `summary` once every task has finished, then powers off.
+8. Serves **`steward.v1`** itself, on the same endpoint: a manifest uses it
+   as `steward.domains` (the name `steward` is reserved for this; no domain
+   may take it). A client's capability carries a service badge (the flag
+   and its domain number) and the protocol's id, so its calls never look
+   like lifecycle messages. `system` gives the system's name, closure,
+   harts and uptime; `domain(i)` each domain's program, kind, status,
+   restarts, budget, region size and the CPU time charged to its
+   scheduling context (Steward keeps a copy of each domain's context for
+   this, as it keeps its CNode); `restart(i)` tears a domain down and
+   builds it again, and `stop(i)` tears it down and revokes its services
+   until a restart. A domain that comes back from stopped or failed has its
+   clients' capabilities minted afresh into their CNodes (Steward kept
+   those), so they work again; the agent's leases on it do not come back.
+   Each is recorded (`domain_restart`, `domain_stop`, with who asked). The
+   task manager holds it; nothing else does in the dev system.
 
 **The domain contract** (`grain/lib/domain.zig`): fixed capability slots
 (the domain's own CNode, address space, thread, memory and lifecycle
@@ -1058,6 +1073,14 @@ through a sink and knows nothing of IPC (its tests run on the host);
 `surf.App` (in `proto/surf.zig`) is the window and the loop: open, listen,
 an optional periodic tick (an alarm on the same signal, badge 2), events
 to the widgets, one redraw for everything that came.
+
+**The task manager** (`grain/programs/taskman`) holds `steward.domains` and
+the surf: a table of every domain with its status, its share of a hart
+over the last second (from the change in its charged CPU time), that time,
+its restarts, hart, budget and region, refreshed every second while its
+window is shown; select a row to read its program, priority and budget,
+and to restart or stop it. A restart that started a domain counts as one of
+its restarts. It runs on 3% of hart 0.
 
 **The shell** is built on the toolkit. It opens a hidden, resizable window,
 appears in the dock, and when opened takes typed commands (`whoami`, `store`, `ledger`, `get`/`put`, `echo`,

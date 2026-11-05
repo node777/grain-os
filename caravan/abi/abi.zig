@@ -275,6 +275,14 @@ pub const FrameMethod = enum(u32) {
     info = 1,
 };
 
+/// Methods on a scheduling context.
+pub const SchedContextMethod = enum(u32) {
+    /// () -> a2 = budget ticks, a3 = period ticks, a4 = ticks consumed (all
+    /// time ever charged to it: its threads', and servers' it was lent to),
+    /// a5 = hart, a6 = throttled (out of budget until its refill). Needs `read`.
+    info = 1,
+};
+
 pub const SchedControlMethod = enum(u32) {
     /// (sched_context_cptr, budget_ticks, period_ticks, hart)
     configure = 1,

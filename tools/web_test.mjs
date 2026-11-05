@@ -59,6 +59,12 @@ async function call(page, line) {
   const out = (await text(page, 'shell-out')).slice(before).trim().split('\n');
   return JSON.parse(out[out.length - 1]);
 }
+/// The index of the window `owner` opened.
+async function windowOf(page, owner) {
+  const { count } = await call(page, 'scene.windows');
+  for (let i = 1; i < count; i++) if ((await call(page, `scene.window index=${i}`)).owner === owner) return i;
+  return -1;
+}
 async function elements(page, window) {
   const n = (await call(page, `scene.window index=${window}`)).elements;
   const all = [];
@@ -217,6 +223,8 @@ try {
     // The desktop: what the scene says is on the screen is in the canvas.
     await until(page, 'log-out', 'surf_ready');
     check('desktop_up', /surf_ready domain=surf width=1024 height=768 screen=virtio keyboard=true pointer=true/.test(await text(page, 'log-out')), await text(page, 'log-out'));
+    const shellWin = await windowOf(page, 'shell');
+    check('apps_have_windows', shellWin > 0 && (await windowOf(page, 'tasks')) > 0, shellWin);
     const desk = await elements(page, 0);
     const launcher = desk.find((e) => e.role === 'launcher' && e.text === 'shell');
     check('launcher_in_scene', launcher !== undefined, JSON.stringify(desk));
@@ -237,7 +245,7 @@ try {
     const shown = (await text(page, 'log-out')).length;
     await clickScreen(page, launcher.x + (launcher.w >> 1), launcher.y + (launcher.h >> 1));
     await page.waitForFunction((n) => /surf_window_shown [^@]*title=shell/.test(document.getElementById('log-out').textContent.slice(n)), shown, { timeout: 120_000, polling: 200 });
-    check('shell_opened', (await call(page, 'scene.window index=1')).shown === true);
+    check('shell_opened', (await call(page, `scene.window index=${shellWin}`)).shown === true);
     await page.locator('#screen').focus(); // the grainsh call took the keyboard
     await page.keyboard.type('whoami');
     await page.keyboard.press('Enter');
@@ -250,36 +258,76 @@ try {
       c.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
     });
     await page.waitForFunction(() => /shell_ran [^@]*command=echo ok=true/.test(document.getElementById('log-out').textContent), null, { timeout: 120_000, polling: 200 });
-    const echoed = (await elements(page, 1)).some((e) => e.text === 'Pasted, with CAPS & symbols!');
+    const echoed = (await elements(page, shellWin)).some((e) => e.text === 'Pasted, with CAPS & symbols!');
     check('pasted_on_canvas', echoed);
 
     // Windows: drag by the title bar, resize from the corner, minimize, close.
-    let f = await call(page, 'scene.window index=1');
+    let f = await call(page, `scene.window index=${shellWin}`);
     let n = await logLength(page);
     await dragScreen(page, f.x + 60, f.y + 12, f.x + 160, f.y + 62);
     await logSince(page, n, /surf_window_moved [^@]*owner=shell/);
-    let g = await call(page, 'scene.window index=1');
+    let g = await call(page, `scene.window index=${shellWin}`);
     check('window_dragged', g.x === f.x + 100 && g.y === f.y + 50 && g.w === f.w, JSON.stringify([f, g]));
     n = await logLength(page);
     await dragScreen(page, g.x + g.w - 5, g.y + g.h - 5, g.x + g.w + 75, g.y + g.h + 35);
     await logSince(page, n, /surf_window_resized [^@]*owner=shell width=720 height=444/);
     await logSince(page, n, /surf_presented [^@]*owner=shell/);
-    f = await call(page, 'scene.window index=1');
-    const prompt = (await elements(page, 1)).find((e) => e.role === 'prompt');
+    f = await call(page, `scene.window index=${shellWin}`);
+    const prompt = (await elements(page, shellWin)).find((e) => e.role === 'prompt');
     check('window_resized', f.w === g.w + 80 && f.h === g.h + 40 && prompt && prompt.y > f.y + f.h - 60, JSON.stringify([g, f, prompt]));
     n = await logLength(page);
     await clickScreen(page, f.x + f.w - 6 - 4 - 16 - 6 - 8, f.y + 15); // "-"
     await logSince(page, n, /surf_window_hidden [^@]*title=shell/);
-    check('window_minimized', !(await call(page, 'scene.window index=1')).shown);
+    check('window_minimized', !(await call(page, `scene.window index=${shellWin}`)).shown);
     n = await logLength(page);
     await clickScreen(page, launcher.x + (launcher.w >> 1), launcher.y + (launcher.h >> 1));
     await logSince(page, n, /surf_window_shown [^@]*title=shell/);
-    f = await call(page, 'scene.window index=1');
+    f = await call(page, `scene.window index=${shellWin}`);
     check('window_restored_in_place', f.shown && f.x === g.x && f.w === g.w + 80, JSON.stringify(f));
     n = await logLength(page);
     await clickScreen(page, f.x + f.w - 6 - 4 - 8, f.y + 15); // "x"
     await logSince(page, n, /surf_window_closed [^@]*title=shell/);
-    check('window_closed', !(await call(page, 'scene.window index=1')).shown);
+    check('window_closed', !(await call(page, `scene.window index=${shellWin}`)).shown);
+
+    // The task manager: every domain, restart one, stop and restart another.
+    const tasksWin = await windowOf(page, 'tasks');
+    const tasksLauncher = (await elements(page, 0)).find((e) => e.role === 'launcher' && e.text === 'tasks');
+    n = await logLength(page);
+    await clickScreen(page, tasksLauncher.x + (tasksLauncher.w >> 1), tasksLauncher.y + (tasksLauncher.h >> 1));
+    await logSince(page, n, /surf_window_shown [^@]*title=tasks/);
+    await logSince(page, n, /surf_presented [^@]*owner=tasks/);
+    let tw = await elements(page, tasksWin);
+    const cells = tw.filter((e) => e.role === 'cell').map((e) => e.text);
+    check('tasks_lists_domains', ['console', 'store', 'hello'].every((d) => cells.includes(d)) && tw.some((e) => e.role === 'column' && e.text === 'cpu'), JSON.stringify(cells));
+    const clickCell = async (text) => { const c = tw.find((e) => e.role === 'cell' && e.text === text); await clickScreen(page, c.x + 4, c.y + 6); };
+    const clickButton = async (text) => { const b = tw.find((e) => e.role === 'button' && e.text === text); await clickScreen(page, b.x + (b.w >> 1), b.y + (b.h >> 1)); };
+    const settle = async (re) => { await logSince(page, n, re); await page.waitForTimeout(1500); tw = await elements(page, tasksWin); };
+    n = await logLength(page);
+    await clickCell('hello');
+    await settle(/surf_presented [^@]*owner=tasks/);
+    n = await logLength(page);
+    await clickButton('Restart');
+    await settle(/domain_exit domain=hello /);
+    check('tasks_restarts_a_task', /domain_restart domain=hello by=tasks was=exited/.test(await text(page, 'log-out')));
+    n = await logLength(page);
+    await clickCell('store');
+    await settle(/surf_presented [^@]*owner=tasks/);
+    n = await logLength(page);
+    await clickButton('Stop');
+    await settle(/taskman_action [^@]*action=stop domain=store ok=true/);
+    check('tasks_stops_a_service', tw.some((e) => e.role === 'cell' && e.text === 'stopped'), JSON.stringify(tw.filter((e) => e.role === 'cell').map((e) => e.text)));
+    n = await logLength(page);
+    await clickButton('Restart');
+    await settle(/domain_start domain=store [^@]*restart=1/);
+    // Its clients have their capabilities again: the shell reads the store.
+    n = await logLength(page);
+    await clickScreen(page, launcher.x + (launcher.w >> 1), launcher.y + (launcher.h >> 1));
+    await logSince(page, n, /surf_window_shown [^@]*title=shell/);
+    await page.locator('#screen').focus();
+    await page.keyboard.type('get 9');
+    await page.keyboard.press('Enter');
+    await logSince(page, n, /shell_ran [^@]*command=get ok=true/);
+    check('store_back_for_its_clients', true);
 
     await shell(page, 'bye', '"actions"');
     await page.waitForFunction(() => document.body.dataset.exit === '0', null, { timeout: LONG, polling: 500 });

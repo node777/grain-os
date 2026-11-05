@@ -265,6 +265,20 @@ Built:
 - Later: virtio-net in the emulator, once the networking layer is chosen
   (the owner has a separate project in mind for it).
 
+## Now: the desktop as the way into the system
+The owner's order: the web interface first, then the framework for using
+the system through its GUI, a better GUI, settings, and basic programs
+such as a task manager and window management. The command language is
+named **Glow**.
+- Built: the web page around the desktop (full screen, page settings, disk
+  export and import, pasting text as keys).
+- Built: window management in Surf (drag, minimize, close, resize, Alt+Tab)
+  and the toolkit `grain/lib/ui.zig`; the shell rebuilt on it.
+- Built: the task manager, on `steward.v1` (served by Steward) and the
+  kernel's count of the time charged to each scheduling context.
+- Next: a settings application (identity and system, the desktop's theme,
+  storage and generations, the passphrase).
+
 ## Next: the platform (proposed, in this order)
 Five aims from the owner: applications and drivers that ship with Grain,
 performance with benchmarks, more boot images, more commands and a
@@ -287,7 +301,7 @@ is born scriptable).
    paste into the console; export and import of a disk; machine snapshots
    (RAM and devices to IndexedDB: resume where you left off); the agent's
    token use and cost shown per conversation.
-3. **A command language.** Grain's shells speak typed values, not text, so
+3. **A command language: Glow** (the owner's name). Grain's shells speak typed values, not text, so
    the language is pipelines over capabilities: `store.get key=3 | .value`
    style calls, variables, and `plan { ... }` / `apply { ... }` blocks that
    go to Envoy as one all-or-nothing step list. One implementation in Zig

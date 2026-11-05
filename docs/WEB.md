@@ -136,7 +136,8 @@ matches the canvas's pixels; a click on the dock opens the shell; `whoami`
 typed on the canvas runs; text pasted onto it arrives as keystrokes; the
 window dragged by its title bar, resized from the corner (the shell lays
 itself out again), minimized, brought back from the dock where it was, and
-closed);
+closed; the task manager restarting an exited task, stopping a service
+and restarting it, with the shell's calls to it working again);
 `bye`; then a reload in the same browser profile, where the disk
 must still be there (the same identity, a wrong passphrase refused, the
 right one accepted); the disk exported, forgotten and imported again (the
